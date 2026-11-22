@@ -21,6 +21,7 @@ import { Route as AppProjectsProjectIdRouteImport } from './routes/_app/projects
 import { Route as AppSettingsAccountRouteImport } from './routes/_app/settings/account'
 import { Route as AppSettingsAlertsRouteImport } from './routes/_app/settings/alerts'
 import { Route as AppSettingsAuditRouteImport } from './routes/_app/settings/audit'
+import { Route as AppSettingsGeneralRouteImport } from './routes/_app/settings/general'
 import { Route as AppSettingsNetworkRouteImport } from './routes/_app/settings/network'
 import { Route as AppSettingsTeamRouteImport } from './routes/_app/settings/team'
 import { Route as AppSettingsTokensRouteImport } from './routes/_app/settings/tokens'
@@ -91,6 +92,11 @@ const AppSettingsAlertsRoute = AppSettingsAlertsRouteImport.update({
 const AppSettingsAuditRoute = AppSettingsAuditRouteImport.update({
   id: '/settings/audit',
   path: '/settings/audit',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsGeneralRoute = AppSettingsGeneralRouteImport.update({
+  id: '/settings/general',
+  path: '/settings/general',
   getParentRoute: () => AppRoute,
 } as any)
 const AppSettingsNetworkRoute = AppSettingsNetworkRouteImport.update({
@@ -165,6 +171,7 @@ export interface FileRoutesByFullPath {
   '/settings/account': typeof AppSettingsAccountRoute
   '/settings/alerts': typeof AppSettingsAlertsRoute
   '/settings/audit': typeof AppSettingsAuditRoute
+  '/settings/general': typeof AppSettingsGeneralRoute
   '/settings/network': typeof AppSettingsNetworkRoute
   '/settings/team': typeof AppSettingsTeamRoute
   '/settings/tokens': typeof AppSettingsTokensRoute
@@ -189,6 +196,7 @@ export interface FileRoutesByTo {
   '/settings/account': typeof AppSettingsAccountRoute
   '/settings/alerts': typeof AppSettingsAlertsRoute
   '/settings/audit': typeof AppSettingsAuditRoute
+  '/settings/general': typeof AppSettingsGeneralRoute
   '/settings/network': typeof AppSettingsNetworkRoute
   '/settings/team': typeof AppSettingsTeamRoute
   '/settings/tokens': typeof AppSettingsTokensRoute
@@ -216,6 +224,7 @@ export interface FileRoutesById {
   '/_app/settings/account': typeof AppSettingsAccountRoute
   '/_app/settings/alerts': typeof AppSettingsAlertsRoute
   '/_app/settings/audit': typeof AppSettingsAuditRoute
+  '/_app/settings/general': typeof AppSettingsGeneralRoute
   '/_app/settings/network': typeof AppSettingsNetworkRoute
   '/_app/settings/team': typeof AppSettingsTeamRoute
   '/_app/settings/tokens': typeof AppSettingsTokensRoute
@@ -243,6 +252,7 @@ export interface FileRouteTypes {
     | '/settings/account'
     | '/settings/alerts'
     | '/settings/audit'
+    | '/settings/general'
     | '/settings/network'
     | '/settings/team'
     | '/settings/tokens'
@@ -267,6 +277,7 @@ export interface FileRouteTypes {
     | '/settings/account'
     | '/settings/alerts'
     | '/settings/audit'
+    | '/settings/general'
     | '/settings/network'
     | '/settings/team'
     | '/settings/tokens'
@@ -293,6 +304,7 @@ export interface FileRouteTypes {
     | '/_app/settings/account'
     | '/_app/settings/alerts'
     | '/_app/settings/audit'
+    | '/_app/settings/general'
     | '/_app/settings/network'
     | '/_app/settings/team'
     | '/_app/settings/tokens'
@@ -399,6 +411,13 @@ declare module '@tanstack/react-router' {
       path: '/settings/audit'
       fullPath: '/settings/audit'
       preLoaderRoute: typeof AppSettingsAuditRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/settings/general': {
+      id: '/_app/settings/general'
+      path: '/settings/general'
+      fullPath: '/settings/general'
+      preLoaderRoute: typeof AppSettingsGeneralRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/settings/network': {
@@ -520,6 +539,7 @@ interface AppRouteChildren {
   AppSettingsAccountRoute: typeof AppSettingsAccountRoute
   AppSettingsAlertsRoute: typeof AppSettingsAlertsRoute
   AppSettingsAuditRoute: typeof AppSettingsAuditRoute
+  AppSettingsGeneralRoute: typeof AppSettingsGeneralRoute
   AppSettingsNetworkRoute: typeof AppSettingsNetworkRoute
   AppSettingsTeamRoute: typeof AppSettingsTeamRoute
   AppSettingsTokensRoute: typeof AppSettingsTokensRoute
@@ -537,6 +557,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsAccountRoute: AppSettingsAccountRoute,
   AppSettingsAlertsRoute: AppSettingsAlertsRoute,
   AppSettingsAuditRoute: AppSettingsAuditRoute,
+  AppSettingsGeneralRoute: AppSettingsGeneralRoute,
   AppSettingsNetworkRoute: AppSettingsNetworkRoute,
   AppSettingsTeamRoute: AppSettingsTeamRoute,
   AppSettingsTokensRoute: AppSettingsTokensRoute,

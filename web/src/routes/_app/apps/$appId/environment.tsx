@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
-import { Eye, EyeOff, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Eye, EyeOff, KeyRound, Lock, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 
 import { api, unwrap, type Schemas } from '@/api/client'
@@ -8,6 +8,20 @@ import { envQuery, meQuery } from '@/api/queries'
 import { CopyButton } from '@/components/app/copy-button'
 import { Panel } from '@/components/app/page'
 import { EmptyState, ErrorState } from '@/components/app/state'
+import { Badge } from '@/components/fluid/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Switch } from '@/components/fluid/switch'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
+import { Textarea } from '@/components/fluid/textarea'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,26 +33,11 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Switch } from '@/components/ui/switch'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Textarea } from '@/components/ui/textarea'
 import { hasRole } from '@/lib/nav'
 
 type EnvVar = Schemas['EnvVar']
-
-/** `'new'` opens the dialog empty; a variable opens it for editing. */
 type DialogTarget = EnvVar | 'new' | null
 
 const MASK = '••••••••••••'
@@ -56,7 +55,6 @@ function AppEnvironment() {
 
   const [target, setTarget] = useState<DialogTarget>(null)
   const [deleting, setDeleting] = useState<EnvVar | null>(null)
-  // Secret values the person chose to reveal. Held only in this component.
   const [revealed, setRevealed] = useState<Record<string, string>>({})
 
   const forget = (key: string) =>
@@ -81,16 +79,18 @@ function AppEnvironment() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-        <p className="text-muted-foreground">Changes apply on the next deploy.</p>
-        {vars.data?.length ? addButton : null}
-      </div>
+      {vars.data?.length ? (
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+          <p className="text-[13px] text-muted-foreground">Applied on the next deploy.</p>
+          {addButton}
+        </div>
+      ) : null}
 
       {vars.isPending ? (
         <Panel>
           <div className="space-y-2">
             {Array.from({ length: 3 }, (_, i) => (
-              <Skeleton key={i} className="h-8" />
+              <Skeleton key={i} className="h-9" />
             ))}
           </div>
         </Panel>
@@ -98,7 +98,7 @@ function AppEnvironment() {
         <ErrorState error={vars.error} onRetry={() => void vars.refetch()} />
       ) : vars.data.length === 0 ? (
         <EmptyState icon={KeyRound} title="No variables yet" action={addButton}>
-          Variables are passed to the container as environment variables. Mark API keys and passwords as secret.
+          Environment variables are passed to the container at runtime. Mark passwords and tokens as secret.
         </EmptyState>
       ) : (
         <Panel flush>
@@ -107,23 +107,30 @@ function AppEnvironment() {
               <TableRow>
                 <TableHead className="pl-4">Key</TableHead>
                 <TableHead>Value</TableHead>
-                <TableHead className="w-28 pr-4" />
+                <TableHead className="w-36 pr-4" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {vars.data.map((v) => {
+              {vars.data.map((v, index) => {
                 const shown: string | undefined = v.is_secret ? revealed[v.key] : (v.value ?? '')
                 const isRevealed = v.is_secret && revealed[v.key] !== undefined
                 return (
-                  <TableRow key={v.key}>
+                  <TableRow key={v.key} index={index}>
                     <TableCell className="pl-4">
-                      <code className="block max-w-64 truncate text-[0.8125rem] font-medium" title={v.key}>
-                        {v.key}
-                      </code>
+                      <div className="flex items-center gap-2">
+                        <code className="block max-w-60 truncate text-[13px] font-medium text-foreground" title={v.key}>
+                          {v.key}
+                        </code>
+                        {v.is_secret ? (
+                          <Badge variant="solid" color="gray" size="compact" icon={Lock} className="text-muted-foreground">
+                            Secret
+                          </Badge>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <code
-                        className="block max-w-xs truncate text-[0.8125rem] text-muted-foreground sm:max-w-md"
+                        className="block max-w-xs truncate text-[13px] text-muted-foreground sm:max-w-md"
                         title={shown}
                       >
                         {shown ?? MASK}
@@ -192,8 +199,7 @@ function VariableDialog({
 }) {
   return (
     <Dialog open={target !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent>
-        {/* Keyed so each variable starts from its own values. */}
+      <DialogContent size="lg">
         {target ? (
           <VariableForm
             key={target === 'new' ? 'new' : target.key}
@@ -250,8 +256,8 @@ function VariableForm({
         <DialogTitle>{editing ? `Edit ${existing.key}` : 'Add variable'}</DialogTitle>
         <DialogDescription>
           {editing && existing.is_secret
-            ? 'Secret values are never shown here. Enter a new value to replace the current one.'
-            : 'The container reads this when it starts. Redeploy the app to apply it.'}
+            ? 'Enter a new value to replace the stored secret.'
+            : 'Redeploy to apply changes to the running container.'}
         </DialogDescription>
       </DialogHeader>
       <FieldGroup>
@@ -273,7 +279,9 @@ function VariableForm({
             autoComplete="off"
             spellCheck={false}
           />
-          <FieldDescription>Letters, digits and underscores. Cannot start with a digit.</FieldDescription>
+          {!editing ? (
+            <FieldDescription>Letters, digits, and underscores (cannot start with a digit).</FieldDescription>
+          ) : null}
         </Field>
         <Field>
           <FieldLabel htmlFor="env-value">Value</FieldLabel>
@@ -291,13 +299,18 @@ function VariableForm({
             spellCheck={false}
           />
         </Field>
-        <Field orientation="horizontal">
-          <FieldContent>
-            <FieldLabel htmlFor="env-secret">Secret</FieldLabel>
-            <FieldDescription>Hidden in the dashboard and encrypted on disk</FieldDescription>
-          </FieldContent>
-          <Switch id="env-secret" checked={secret} onCheckedChange={setSecret} />
-        </Field>
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border/80 bg-surface/40 px-3 py-2.5">
+          <div>
+            <div className="text-[13px] font-medium">Secret</div>
+            <div className="text-[12px] text-muted-foreground">Masked in UI and encrypted at rest</div>
+          </div>
+          <Switch
+            id="env-secret"
+            aria-label="Secret"
+            checked={secret}
+            onToggle={() => setSecret((v) => !v)}
+          />
+        </div>
       </FieldGroup>
       <DialogFooter>
         <Button type="button" variant="outline" onClick={onClose}>
@@ -341,7 +354,7 @@ function DeleteVariableDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Delete {variable?.key}?</AlertDialogTitle>
           <AlertDialogDescription>
-            The container stops receiving this variable on the next deploy. The value cannot be recovered afterwards.
+            Removed on the next deploy. The stored value cannot be recovered.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

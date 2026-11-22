@@ -4,6 +4,41 @@
  */
 
 export interface paths {
+    "/api/v1/account/avatar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a custom avatar image for your account. */
+        post: operations["upload_avatar"];
+        /** Remove your custom avatar and reset to initials. */
+        delete: operations["delete_avatar"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/account/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update your own display name or avatar (built-in preset, image URL, or empty to reset). */
+        patch: operations["update_profile"];
+        trace?: never;
+    };
     "/api/v1/account/totp": {
         parameters: {
             query?: never;
@@ -846,6 +881,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/media/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Serve an uploaded organization logo or user avatar. */
+        get: operations["get_media"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/members": {
         parameters: {
             query?: never;
@@ -894,6 +946,41 @@ export interface paths {
         /** Give a member a new temporary password and sign them out everywhere. */
         post: operations["reset_password"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/org": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update organization name, logo URL, brand accent color, or environment badge. */
+        patch: operations["update_org"];
+        trace?: never;
+    };
+    "/api/v1/org/logo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a custom organization logo image (PNG, JPEG, WebP, GIF, or SVG). */
+        post: operations["upload_org_logo"];
+        /** Remove the organization logo and fall back to the default mark. */
+        delete: operations["delete_org_logo"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1481,6 +1568,7 @@ export interface components {
             user: components["schemas"]["User"];
         };
         Member: {
+            avatar_url?: string | null;
             email: string;
             joined_at: string;
             last_login_at?: string | null;
@@ -1549,7 +1637,11 @@ export interface components {
             your_address?: string | null;
         };
         Organization: {
+            accent_color?: string;
+            env_color?: string | null;
+            env_label?: string | null;
             id: string;
+            logo_url?: string | null;
             name: string;
             slug: string;
         };
@@ -1564,6 +1656,13 @@ export interface components {
             id: string;
             name: string;
             slug: string;
+        };
+        PublicBranding: {
+            accent_color: string;
+            env_color?: string | null;
+            env_label?: string | null;
+            logo_url?: string | null;
+            org_name: string;
         };
         /** @description Shown once; only hashes are kept. */
         RecoveryCodes: {
@@ -1592,6 +1691,7 @@ export interface components {
             token: string;
         };
         SetupStatus: {
+            branding?: components["schemas"]["PublicBranding"] | null;
             /** @description False until the first owner account has been created. */
             setup_complete: boolean;
             version: string;
@@ -1696,6 +1796,25 @@ export interface components {
             role: components["schemas"]["Role"];
         };
         /**
+         * @description Update organization branding and workspace metadata. Omitted fields are kept.
+         *     Send an empty string for `logo_url`, `env_label`, or `env_color` to clear it.
+         */
+        UpdateOrganizationRequest: {
+            accent_color?: string | null;
+            env_color?: string | null;
+            env_label?: string | null;
+            logo_url?: string | null;
+            name?: string | null;
+        };
+        /**
+         * @description Update the signed-in user's display name or avatar. Omitted fields are kept.
+         *     Send an empty string for `avatar_url` to reset to initials.
+         */
+        UpdateProfileRequest: {
+            avatar_url?: string | null;
+            name?: string | null;
+        };
+        /**
          * @description Rename a project or change its description. Omitted fields are kept.
          *     The slug stays as it was, so nothing addressing the project breaks.
          */
@@ -1703,7 +1822,13 @@ export interface components {
             description?: string | null;
             name?: string | null;
         };
+        /** @description Upload an image (PNG, JPEG, WebP, GIF, or SVG) encoded as base64. */
+        UploadImageRequest: {
+            content_type: string;
+            data_base64: string;
+        };
         User: {
+            avatar_url?: string | null;
             email: string;
             id: string;
             name: string;
@@ -1724,6 +1849,87 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    upload_avatar: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UploadImageRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_avatar: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+        };
+    };
+    update_profile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateProfileRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     totp_status: {
         parameters: {
             query?: never;
@@ -3634,6 +3840,34 @@ export interface operations {
             };
         };
     };
+    get_media: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw image bytes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_members: {
         parameters: {
             query?: never;
@@ -3796,6 +4030,111 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOrganizationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Organization"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    upload_org_logo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UploadImageRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Organization"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_org_logo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Organization"];
+                };
+            };
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

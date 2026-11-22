@@ -5,10 +5,29 @@ import { useState } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { databaseEnginesQuery, databasesQuery, meQuery, projectsQuery } from '@/api/queries'
 import { BackupsSheet } from '@/components/app/backups-sheet'
-import { NewDatabaseDialog } from '@/components/app/new-database-dialog'
 import { CopyButton } from '@/components/app/copy-button'
+import { NewDatabaseDialog } from '@/components/app/new-database-dialog'
 import { Page, Panel } from '@/components/app/page'
+import { EngineMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import {
+  DropdownContent,
+  DropdownMenu,
+  DropdownSeparator,
+  DropdownTrigger,
+  MenuItem,
+} from '@/components/fluid/dropdown'
+import { Field, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,26 +39,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { Field, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { timeAgo } from '@/lib/format'
 import { hasRole } from '@/lib/nav'
 import { DATABASE_STATUS } from '@/lib/status'
@@ -94,14 +95,13 @@ function DatabasesPage() {
   return (
     <Page
       title="Databases"
-      description="Each database runs in its own container with its own volume. Apps in the same project reach it by name; nothing is exposed to the internet."
       actions={databases.data?.length ? newButton : undefined}
     >
       {databases.isPending ? (
         <Panel>
           <div className="space-y-2">
             {Array.from({ length: 3 }, (_, i) => (
-              <Skeleton key={i} className="h-8" />
+              <Skeleton key={i} className="h-9" />
             ))}
           </div>
         </Panel>
@@ -121,7 +121,7 @@ function DatabasesPage() {
             )
           }
         >
-          PostgreSQL, MySQL, MariaDB, Redis or MongoDB, started in about a minute and reachable from the apps in its project.
+          Private PostgreSQL, MySQL, MariaDB, Redis, or MongoDB instances reachable only inside their project.
         </EmptyState>
       ) : (
         <Panel flush>
@@ -131,26 +131,33 @@ function DatabasesPage() {
                 <TableHead className="pl-4">Name</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="hidden md:table-cell">Project</TableHead>
-                <TableHead className="hidden sm:table-cell">Address inside the project</TableHead>
+                <TableHead className="hidden sm:table-cell">Internal address</TableHead>
                 <TableHead className="hidden lg:table-cell">Created</TableHead>
                 <TableHead className="w-10 pr-4" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {databases.data.map((db) => {
+              {databases.data.map((db, index) => {
                 const look = DATABASE_STATUS[db.status]
                 return (
-                  <TableRow key={db.id}>
+                  <TableRow key={db.id} index={index}>
                     <TableCell className="pl-4">
-                      <span className="block max-w-56 truncate font-medium">{db.name}</span>
-                      <span className="text-[0.8125rem] text-muted-foreground">
-                        {engineLabel(db.engine)} {db.version}
-                      </span>
+                      <div className="flex items-center gap-2.5">
+                        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                          <EngineMark engine={db.engine} className="size-4" />
+                        </span>
+                        <div className="min-w-0">
+                          <span className="block max-w-52 truncate font-medium text-foreground">{db.name}</span>
+                          <span className="block text-[12px] text-muted-foreground">
+                            {engineLabel(db.engine)} {db.version}
+                          </span>
+                        </div>
+                      </div>
                     </TableCell>
                     <TableCell className="max-w-72">
                       <Status tone={look.tone}>{look.label}</Status>
                       {db.error ? (
-                        <p className="mt-1 line-clamp-2 text-[0.8125rem] whitespace-normal text-muted-foreground" title={db.error}>
+                        <p className="mt-1 line-clamp-2 text-[12px] whitespace-normal text-fail" title={db.error}>
                           {db.error}
                         </p>
                       ) : null}
@@ -158,7 +165,7 @@ function DatabasesPage() {
                     <TableCell className="hidden text-muted-foreground md:table-cell">{db.project_name}</TableCell>
                     <TableCell className="hidden sm:table-cell">
                       <span className="inline-flex items-center gap-1">
-                        <code className="text-[0.8125rem]">
+                        <code className="text-[12.5px] text-foreground">
                           {db.host}:{db.port}
                         </code>
                         <CopyButton value={`${db.host}:${db.port}`} label="Copy address" />
@@ -168,48 +175,55 @@ function DatabasesPage() {
                     <TableCell className="pr-4 text-right">
                       {canEdit ? (
                         <DropdownMenu>
-                          <DropdownMenuTrigger
+                          <DropdownTrigger
                             render={<Button variant="ghost" size="icon-sm" aria-label={`Actions for ${db.name}`} />}
                           >
                             <Ellipsis />
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="min-w-48">
-                            <DropdownMenuItem onClick={() => setConnecting(db)}>
-                              <KeyRound />
-                              Connection details
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => setBackingUp(db)}>
-                              <Archive />
-                              Backups
-                            </DropdownMenuItem>
+                          </DropdownTrigger>
+                          <DropdownContent align="end" className="w-48">
+                            <MenuItem
+                              index={0}
+                              icon={KeyRound}
+                              label="Connection details"
+                              onSelect={() => setConnecting(db)}
+                            />
+                            <MenuItem
+                              index={1}
+                              icon={Archive}
+                              label="Backups"
+                              onSelect={() => setBackingUp(db)}
+                            />
                             {db.status === 'running' ? (
-                              <DropdownMenuItem disabled={stop.isPending} onClick={() => stop.mutate(db.id)}>
-                                <Square />
-                                Stop
-                              </DropdownMenuItem>
+                              <MenuItem
+                                index={2}
+                                icon={Square}
+                                label="Stop"
+                                disabled={stop.isPending}
+                                onSelect={() => stop.mutate(db.id)}
+                              />
                             ) : (
-                              <DropdownMenuItem
+                              <MenuItem
+                                index={2}
+                                icon={Play}
+                                label="Start"
                                 disabled={db.status === 'creating' || start.isPending}
-                                onClick={() => start.mutate(db.id)}
-                              >
-                                <Play />
-                                Start
-                              </DropdownMenuItem>
+                                onSelect={() => start.mutate(db.id)}
+                              />
                             )}
                             {canDelete ? (
                               <>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  variant="destructive"
+                                <DropdownSeparator />
+                                <MenuItem
+                                  index={3}
+                                  icon={Trash2}
+                                  label="Delete database"
+                                  destructive
                                   disabled={db.status === 'creating'}
-                                  onClick={() => setDeleting(db)}
-                                >
-                                  <Trash2 />
-                                  Delete database
-                                </DropdownMenuItem>
+                                  onSelect={() => setDeleting(db)}
+                                />
                               </>
                             ) : null}
-                          </DropdownMenuContent>
+                          </DropdownContent>
                         </DropdownMenu>
                       ) : null}
                     </TableCell>
@@ -234,11 +248,10 @@ function DatabasesPage() {
   )
 }
 
-function ConnectionDialog({ database, onClose }: { database: Database | null; onClose: () => void }) {
+export function ConnectionDialog({ database, onClose }: { database: Database | null; onClose: () => void }) {
   return (
     <Dialog open={database !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent className="sm:max-w-xl">
-        {/* Keyed so revealed credentials never carry over to another database. */}
+      <DialogContent size="lg">
         {database ? <ConnectionDetails key={database.id} database={database} onClose={onClose} /> : null}
       </DialogContent>
     </Dialog>
@@ -272,16 +285,15 @@ function ConnectionDetails({ database: db, onClose }: { database: Database; onCl
       <DialogHeader>
         <DialogTitle>Connect to {db.name}</DialogTitle>
         <DialogDescription>
-          These work from apps in the {db.project_name} project. Add the URL to an app as a secret variable, for example
-          DATABASE_URL.
+          Private to apps in {db.project_name}. Store the URL as a secret env var (e.g. <code className="font-mono">DATABASE_URL</code>).
         </DialogDescription>
       </DialogHeader>
-      <dl className="divide-y rounded-md border text-[0.8125rem]">
+      <dl className="divide-y divide-border/80 rounded-lg border border-border/80 text-[13px]">
         {rows.map((row) => (
           <div key={row.label} className="flex min-h-10 items-center gap-3 py-1 pr-1 pl-3">
             <dt className="w-20 shrink-0 text-muted-foreground">{row.label}</dt>
             <dd className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap">
-              <code>{row.value}</code>
+              <code className="text-[12.5px]">{row.value}</code>
             </dd>
             {row.copy !== undefined || !['Password', 'URL'].includes(row.label) ? (
               <CopyButton value={row.copy ?? row.value} label={`Copy ${row.label.toLowerCase()}`} />
@@ -290,9 +302,8 @@ function ConnectionDetails({ database: db, onClose }: { database: Database; onCl
         ))}
       </dl>
       {db.host_port ? (
-        <p className="text-[0.8125rem] text-muted-foreground">
-          On the server itself it also listens on <code>127.0.0.1:{db.host_port}</code>, which changes each time the
-          database starts. Use an SSH tunnel to reach it from your machine.
+        <p className="text-[12.5px] text-muted-foreground">
+          Localhost port <code className="font-mono">127.0.0.1:{db.host_port}</code> (use an SSH tunnel from your machine).
         </p>
       ) : null}
       <DialogFooter>
@@ -332,7 +343,7 @@ function DeleteDialog({ database, onClose }: { database: Database | null; onClos
         <AlertDialogHeader>
           <AlertDialogTitle>Delete “{database?.name}”?</AlertDialogTitle>
           <AlertDialogDescription>
-            The database, every row in it and all of its backups are erased from the server. Download a backup first if you might need it. This cannot be undone.
+            The database, its data, and all backups will be permanently erased. This cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <Field>

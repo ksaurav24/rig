@@ -4,9 +4,9 @@ import { useId, useMemo, useState, type PointerEvent } from 'react'
 import { metricsQuery, type MetricRange, type MetricTarget } from '@/api/queries'
 import type { Schemas } from '@/api/client'
 import { Panel } from '@/components/app/page'
+import { Tabs, TabsItem } from '@/components/fluid/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { bytes } from '@/lib/format'
-import { cn } from '@/lib/utils'
 
 type Point = Schemas['MetricPoint']
 
@@ -56,7 +56,7 @@ function Chart({
     const peak = points.reduce((m, p) => Math.max(m, value(p)), 0)
     const top = ceiling ?? (peak > 0 ? peak * 1.25 : 1)
     const x = (ts: number) => ((ts - start) / (end - start)) * W
-    const y = (v: number) => H - Math.min(1, v / top) * (H - 4) - 1
+    const y = (v: number) => H - Math.min(1, v / top) * (H - 6) - 2
 
     // Break the line where samples are missing instead of drawing through the gap.
     let line = ''
@@ -77,7 +77,7 @@ function Chart({
       if (fresh && (i === points.length - 1 || points[i + 1].ts - p.ts > step * 1.5)) line += `h0.01`
     })
     area += `L${x(points[points.length - 1].ts).toFixed(1)},${H}Z`
-    return { line, area, x, y, start, end, peak }
+    return { line, area, x, y, start, end, peak, top }
   }, [points, step, value, ceiling])
 
   const latest = points.at(-1)
@@ -95,14 +95,14 @@ function Chart({
   }
 
   return (
-    <figure className="flex min-w-0 flex-col gap-2">
+    <figure className="flex min-w-0 flex-col gap-1.5">
       <figcaption className="flex items-baseline justify-between gap-3">
-        <span className="text-[0.8125rem] text-muted-foreground">{label}</span>
+        <span className="text-[12.5px] font-medium text-muted-foreground">{label}</span>
         <span className="flex items-baseline gap-2 tabular-nums">
           {hover !== null && shown ? (
-            <time className="text-xs text-muted-foreground">{TIME.format(new Date(shown.ts * 1000))}</time>
+            <time className="text-[11.5px] text-muted-foreground">{TIME.format(new Date(shown.ts * 1000))}</time>
           ) : null}
-          <span className="font-medium">{shown ? format(value(shown)) : '–'}</span>
+          <span className="text-[13px] font-semibold text-foreground">{shown ? format(value(shown)) : '–'}</span>
         </span>
       </figcaption>
       <svg
@@ -112,17 +112,29 @@ function Chart({
         aria-label={
           latest && shape ? `${label}: now ${format(value(latest))}, peak ${format(shape.peak)}` : `${label}: no data`
         }
-        className="h-24 w-full touch-none overflow-visible rounded-sm border-b"
+        className="h-24 w-full touch-none overflow-visible rounded-sm border-b border-border/80"
         style={{ color }}
         onPointerMove={onMove}
         onPointerLeave={() => setHover(null)}
       >
         <defs>
           <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="currentColor" stopOpacity="0.22" />
+            <stop offset="0" stopColor="currentColor" stopOpacity="0.2" />
             <stop offset="1" stopColor="currentColor" stopOpacity="0" />
           </linearGradient>
         </defs>
+        {/* Subtle horizontal reference lines so sparse histories still show scale */}
+        <line
+          x1="0"
+          x2={W}
+          y1={H * 0.5}
+          y2={H * 0.5}
+          stroke="var(--border)"
+          strokeOpacity="0.55"
+          strokeDasharray="3 3"
+          strokeWidth="1"
+          vectorEffect="non-scaling-stroke"
+        />
         {shape ? (
           <>
             <path d={shape.area} fill={`url(#${gradient})`} />
@@ -130,7 +142,7 @@ function Chart({
               d={shape.line}
               fill="none"
               stroke="currentColor"
-              strokeWidth="1.5"
+              strokeWidth="1.75"
               strokeLinejoin="round"
               strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
@@ -150,6 +162,13 @@ function Chart({
           </>
         ) : null}
       </svg>
+      {shape ? (
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground/80 tabular-nums">
+          <span>{TIME.format(new Date(shape.start * 1000))}</span>
+          <span>peak {format(shape.peak)}</span>
+          <span>{TIME.format(new Date(shape.end * 1000))}</span>
+        </div>
+      ) : null}
     </figure>
   )
 }
@@ -168,34 +187,24 @@ export function UsagePanel({ target, className }: { target: MetricTarget; classN
   const empty = data?.points.length === 0
   // Throughput needs two samples to measure between; the rest are gaps.
   const network = useMemo(() => data?.points.filter((p) => p.net_rx_bps != null && p.net_tx_bps != null) ?? [], [data])
+  const rangeIndex = RANGES.findIndex((r) => r.value === range)
 
   return (
     <Panel
       title="Usage"
-      description={
-        host
-          ? 'CPU across all cores, memory in use and network traffic on this server.'
-          : 'CPU as a share of one core, memory in use and network traffic.'
-      }
       className={className}
       actions={
-        <div role="group" aria-label="Time range" className="flex shrink-0 rounded-md border p-0.5">
-          {RANGES.map((r) => (
-            <button
-              key={r.value}
-              type="button"
-              aria-pressed={range === r.value}
-              aria-label={r.name}
-              onClick={() => setRange(r.value)}
-              className={cn(
-                'rounded-[5px] px-2 py-0.5 text-xs font-medium text-muted-foreground tabular-nums transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50',
-                range === r.value && 'bg-muted text-foreground',
-              )}
-            >
-              {r.label}
-            </button>
+        <Tabs
+          size="compact"
+          selectedIndex={rangeIndex}
+          onSelect={(i) => setRange(RANGES[i].value)}
+          aria-label="Time range"
+          className="border border-border/80 bg-surface/60"
+        >
+          {RANGES.map((r, i) => (
+            <TabsItem key={r.value} index={i} label={r.label} aria-label={r.name} className="tabular-nums" />
           ))}
-        </div>
+        </Tabs>
       }
     >
       {isPending ? (
@@ -204,15 +213,15 @@ export function UsagePanel({ target, className }: { target: MetricTarget; classN
           <Skeleton className="h-32" />
         </div>
       ) : isError || !data ? (
-        <p className="text-[0.8125rem] text-muted-foreground">Usage could not be loaded. It will retry on its own.</p>
+        <p className="text-[13px] text-muted-foreground">Usage could not be loaded. It will retry automatically.</p>
       ) : empty ? (
-        <p className="text-[0.8125rem] text-muted-foreground">
+        <p className="text-[13px] text-muted-foreground">
           {host
-            ? 'No samples yet. The first one arrives within 30 seconds.'
-            : 'No samples in this range. Usage is recorded every 30 seconds while the container runs.'}
+            ? 'No samples yet. First sample arrives within 30 seconds.'
+            : 'No samples in this range yet.'}
         </p>
       ) : (
-        <div className="grid gap-6 sm:grid-cols-2">
+        <div className="grid gap-x-8 gap-y-6 sm:grid-cols-2">
           <Chart
             label="CPU"
             points={data.points}
@@ -223,7 +232,7 @@ export function UsagePanel({ target, className }: { target: MetricTarget; classN
             color="var(--chart-1)"
           />
           <Chart
-            label={data.memory_total > 0 ? `Memory of ${bytes(data.memory_total)}${host ? '' : ' limit'}` : 'Memory'}
+            label={data.memory_total > 0 ? `Memory · ${bytes(data.memory_total)}${host ? '' : ' limit'}` : 'Memory'}
             points={data.points}
             step={data.step_seconds}
             value={memoryValue}

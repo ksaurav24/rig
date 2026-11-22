@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 export function Logo({ className }: { className?: string }) {
@@ -9,5 +10,42 @@ export function Logo({ className }: { className?: string }) {
         className="fill-primary-foreground"
       />
     </svg>
+  )
+}
+
+/**
+ * Renders the organization's uploaded/linked logo when set, falling back cleanly
+ * to the default Rig mark if unset or if an external link fails to load.
+ */
+export function OrgMark({
+  logoUrl,
+  name,
+  className,
+}: {
+  logoUrl?: string | null
+  name?: string
+  className?: string
+}) {
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    setFailed(false)
+  }, [logoUrl])
+
+  if (!logoUrl || failed) {
+    return <Logo className={className} />
+  }
+
+  return (
+    <img
+      src={logoUrl}
+      alt={name ? `${name} logo` : 'Organization logo'}
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+      className={cn(
+        'size-6 shrink-0 rounded-[7px] bg-surface object-cover ring-1 ring-border/70',
+        className,
+      )}
+    />
   )
 }

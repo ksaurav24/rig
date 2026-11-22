@@ -4,11 +4,13 @@ import { useState, type FormEvent } from 'react'
 
 import { api, unwrap, type Schemas } from '@/api/client'
 import { appQuery, githubQuery, githubReposQuery, meQuery } from '@/api/queries'
-import { BranchField, GithubSource } from '@/components/app/new-app-dialog'
-import { keepComboboxEnter } from '@/lib/forms'
 import { CopyButton } from '@/components/app/copy-button'
+import { BranchField, GithubSource } from '@/components/app/new-app-dialog'
 import { Panel } from '@/components/app/page'
 import { ErrorState } from '@/components/app/state'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Switch } from '@/components/fluid/switch'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,11 +22,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Switch } from '@/components/ui/switch'
+import { keepComboboxEnter } from '@/lib/forms'
 import { hasRole } from '@/lib/nav'
 
 type App = Schemas['App']
@@ -43,20 +43,20 @@ function AppSettings() {
 
   if (app.isPending) {
     return (
-      <Panel title="General">
-        <div className="space-y-3">
-          {Array.from({ length: 4 }, (_, i) => (
-            <Skeleton key={i} className="h-9" />
-          ))}
-        </div>
-      </Panel>
+      <div className="max-w-3xl">
+        <Panel title="General">
+          <div className="space-y-3">
+            {Array.from({ length: 4 }, (_, i) => (
+              <Skeleton key={i} className="h-9" />
+            ))}
+          </div>
+        </Panel>
+      </div>
     )
   }
   if (app.isError) return <ErrorState error={app.error} onRetry={() => void app.refetch()} />
 
   const current = app.data
-  // Re-key on the saved values so the form picks up changes made elsewhere
-  // without wiping what someone is typing during a background refresh.
   const formKey = JSON.stringify([
     current.name,
     current.image,
@@ -70,7 +70,7 @@ function AppSettings() {
   ])
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex max-w-3xl flex-col gap-6">
       <GeneralPanel key={formKey} app={current} canEdit={canEdit} />
       {current.source_kind === 'git' && <PushPanel app={current} canEdit={canEdit} />}
       {canEdit ? <WebhookPanel app={current} /> : null}
@@ -91,33 +91,42 @@ function PushPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
 
   return (
     <Panel title="Deploy on push">
-      <label className="flex items-start justify-between gap-4">
-        <span className="space-y-1 text-sm">
-          <span className="block font-medium">Deploy every new commit on {app.git_branch || 'the default branch'}</span>
-          <span className="block text-muted-foreground">
-            Uses the <Link to="/settings/github" className="underline underline-offset-2">GitHub App</Link> push
-            webhook, and branch polling when GitHub can't reach this server.
-          </span>
-        </span>
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-0.5 text-[13px]">
+          <div className="font-medium text-foreground">
+            Auto-deploy commits on <code className="font-mono text-xs">{app.git_branch || 'default branch'}</code>
+          </div>
+          <div className="text-[12.5px] text-muted-foreground">
+            Uses the{' '}
+            <Link to="/settings/github" className="text-foreground underline underline-offset-4">
+              GitHub App
+            </Link>{' '}
+            webhook, with branch polling fallback.
+          </div>
+        </div>
         <Switch
           checked={on}
           disabled={!canEdit || toggle.isPending}
-          onCheckedChange={(v) => toggle.mutate(v)}
+          onToggle={() => toggle.mutate(!on)}
           aria-label="Deploy on push"
         />
-      </label>
+      </div>
     </Panel>
   )
 }
 
 function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
   const queryClient = useQueryClient()
+  const [dirty, setDirty] = useState(false)
 
   const save = useMutation({
     mutationFn: (body: Schemas['UpdateAppRequest']) =>
       unwrap(api.PATCH('/api/v1/apps/{id}', { params: { path: { id: app.id } }, body })),
     meta: { success: 'Settings saved' },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['apps', app.id] }),
+    onSuccess: () => {
+      setDirty(false)
+      return queryClient.invalidateQueries({ queryKey: ['apps', app.id] })
+    },
   })
 
   function submit(e: FormEvent<HTMLFormElement>) {
@@ -138,15 +147,14 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
     } else {
       body.git_url = text('git_url')
       body.dockerfile_path = text('dockerfile_path')
-      // An empty branch clears it, which means the repository's default.
       body.git_branch = text('git_branch')
     }
     save.mutate(body)
   }
 
   return (
-    <Panel title="General" description="How Rig builds and runs this app.">
-      <form onSubmit={submit} onKeyDown={keepComboboxEnter}>
+    <Panel title="General" description="Applied on the next deploy.">
+      <form onSubmit={submit} onChange={() => setDirty(true)} onKeyDown={keepComboboxEnter}>
         <fieldset disabled={!canEdit} className="min-w-0">
           <FieldGroup>
             <Field>
@@ -171,7 +179,7 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
               </Field>
             ) : (
               <>
-                <SourceField app={app} />
+                <SourceField app={app} onDirty={() => setDirty(true)} />
                 <div className="grid gap-5 sm:grid-cols-2">
                   <Field>
                     <FieldLabel htmlFor="app-dockerfile">Dockerfile path</FieldLabel>
@@ -193,7 +201,7 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
 
             <div className="grid gap-5 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="app-port">Port</FieldLabel>
+                <FieldLabel htmlFor="app-port">Container port</FieldLabel>
                 <Input
                   id="app-port"
                   name="port"
@@ -205,7 +213,6 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
                   defaultValue={app.port}
                   required
                 />
-                <FieldDescription>The port the app listens on inside its container.</FieldDescription>
               </Field>
               <Field>
                 <FieldLabel htmlFor="app-health">Health check path</FieldLabel>
@@ -219,9 +226,7 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
                   autoComplete="off"
                   spellCheck={false}
                 />
-                <FieldDescription>
-                  A deploy goes live once this path answers. Leave empty to check the port instead.
-                </FieldDescription>
+                <FieldDescription>Leave empty to check the open port.</FieldDescription>
               </Field>
             </div>
 
@@ -238,10 +243,10 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
                   defaultValue={app.memory_mb ?? ''}
                   placeholder="512"
                 />
-                <FieldDescription>Leave empty for the 512 MB default. Changes apply on the next deploy.</FieldDescription>
+                <FieldDescription>Defaults to 512 MB when empty.</FieldDescription>
               </Field>
               <Field>
-                <FieldLabel htmlFor="app-cpu">CPU limit (CPUs)</FieldLabel>
+                <FieldLabel htmlFor="app-cpu">CPU limit (cores)</FieldLabel>
                 <Input
                   id="app-cpu"
                   name="cpu"
@@ -250,24 +255,24 @@ function GeneralPanel({ app, canEdit }: { app: App; canEdit: boolean }) {
                   min={0}
                   step="any"
                   defaultValue={app.cpu_millis ? app.cpu_millis / 1000 : ''}
-                  placeholder="No limit"
+                  placeholder="Unlimited"
                 />
-                <FieldDescription>For example 0.5 for half a core. Leave empty for no limit.</FieldDescription>
+                <FieldDescription>E.g. 0.5 for half a core.</FieldDescription>
               </Field>
             </div>
           </FieldGroup>
 
           {canEdit ? (
-            <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2">
-              <Button type="submit" disabled={save.isPending}>
+            <div className="mt-5 flex items-center justify-end gap-3 border-t border-border/70 pt-4">
+              {dirty ? <span className="text-[12.5px] text-muted-foreground">Unsaved changes</span> : null}
+              <Button type="submit" disabled={!dirty || save.isPending}>
                 {save.isPending ? <Spinner data-icon="inline-start" /> : null}
                 Save changes
               </Button>
-              <p className="text-[0.8125rem] text-muted-foreground">Saved settings apply on the next deploy.</p>
             </div>
           ) : (
-            <p className="mt-5 text-[0.8125rem] text-muted-foreground">
-              You can view these settings. Changing them needs the developer role.
+            <p className="mt-5 text-[12.5px] text-muted-foreground">
+              Developer role or higher required to edit settings.
             </p>
           )}
         </fieldset>
@@ -280,10 +285,10 @@ function DeletePanel({ app }: { app: App }) {
   const [open, setOpen] = useState(false)
 
   return (
-    <Panel title="Delete app">
+    <Panel title="Danger zone" tone="danger">
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-        <p className="max-w-[60ch] text-muted-foreground">
-          Removes the container, its deployments, variables and domains. This cannot be undone.
+        <p className="max-w-[55ch] text-[13px] text-muted-foreground">
+          Permanently deletes this app, its container, deployments, variables, and domains.
         </p>
         <Button variant="destructive" onClick={() => setOpen(true)}>
           Delete app
@@ -316,8 +321,6 @@ function DeleteAppDialog({
     mutationFn: () => unwrap(api.DELETE('/api/v1/apps/{id}', { params: { path: { id: app.id } } })),
     meta: { success: 'App deleted' },
     onSuccess: async () => {
-      // Drop the gone app from the cached list first, so the project page
-      // never flashes it; then drop its own data instead of refetching a 404.
       queryClient.setQueryData<Schemas['App'][]>(['apps'], (list) => list?.filter((a) => a.id !== app.id))
       void queryClient.invalidateQueries({ queryKey: ['projects'] })
       await navigate({ to: '/projects/$projectId', params: { projectId: app.project_id } })
@@ -332,7 +335,7 @@ function DeleteAppDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Delete “{app.name}”?</AlertDialogTitle>
           <AlertDialogDescription>
-            The container, its deployments, variables and domains are removed from the server. This cannot be undone.
+            The container, deployments, variables, and domains will be permanently removed.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <Field>
@@ -360,8 +363,6 @@ function DeleteAppDialog({
   )
 }
 
-/** Push-to-deploy. The secret stays hidden until someone asks for it, and
- *  each reveal is audited on the server. */
 function WebhookPanel({ app }: { app: Schemas['App'] }) {
   const [hook, setHook] = useState<Schemas['AppWebhook'] | null>(null)
   const reveal = useMutation({
@@ -378,33 +379,32 @@ function WebhookPanel({ app }: { app: Schemas['App'] }) {
 
   return (
     <Panel
-      title="Deploy on push"
+      title="Deploy webhook"
       description={
         app.source_kind === 'git'
-          ? `Point a GitHub or GitLab webhook here and every push to ${app.git_branch ?? 'the default branch'} deploys.`
-          : 'Call this webhook from CI after pushing a new image and the app redeploys.'
+          ? `Trigger a deploy from GitHub, GitLab, or CI for ${app.git_branch ?? 'the default branch'}.`
+          : 'Trigger a redeploy from CI after pushing a new image.'
       }
     >
       {hook && url ? (
-        <dl className="grid gap-4 text-sm">
+        <dl className="grid gap-4 text-[13px]">
           <div className="grid gap-1.5">
-            <dt className="text-muted-foreground">Payload URL</dt>
-            <dd className="flex min-w-0 items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs">{url}</code>
+            <dt className="text-[12.5px] font-medium text-muted-foreground">Payload URL</dt>
+            <dd className="flex min-w-0 items-center gap-1 rounded-lg border border-border/80 bg-surface/60 py-1 pr-1 pl-3">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs">{url}</code>
               <CopyButton value={url} label="Copy URL" />
             </dd>
           </div>
           <div className="grid gap-1.5">
-            <dt className="text-muted-foreground">Secret</dt>
-            <dd className="flex min-w-0 items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded-md bg-muted px-2 py-1.5 font-mono text-xs">{hook.secret}</code>
+            <dt className="text-[12.5px] font-medium text-muted-foreground">Secret</dt>
+            <dd className="flex min-w-0 items-center gap-1 rounded-lg border border-border/80 bg-surface/60 py-1 pr-1 pl-3">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs">{hook.secret}</code>
               <CopyButton value={hook.secret} label="Copy secret" />
             </dd>
           </div>
-          <p className="text-muted-foreground">
-            Use content type <code className="font-mono">application/json</code>. Rig checks the{' '}
-            <code className="font-mono">X-Hub-Signature-256</code> signature, or GitLab&apos;s{' '}
-            <code className="font-mono">X-Gitlab-Token</code>. From CI, sign the body with HMAC-SHA256 and send it as{' '}
+          <p className="text-[12.5px] text-muted-foreground">
+            Send <code className="font-mono">application/json</code> signed with{' '}
+            <code className="font-mono">X-Hub-Signature-256</code>, <code className="font-mono">X-Gitlab-Token</code>, or{' '}
             <code className="font-mono">X-Rig-Signature: sha256=&lt;hex&gt;</code>.
           </p>
           <div>
@@ -424,10 +424,7 @@ function WebhookPanel({ app }: { app: Schemas['App'] }) {
   )
 }
 
-/** The repository and branch: picked from the GitHub App when one is connected
- *  and the current URL is one of its repositories, typed otherwise. Picking
- *  another repository moves the branch to that repository's default. */
-function SourceField({ app }: { app: App }) {
+function SourceField({ app, onDirty }: { app: App; onDirty: () => void }) {
   const status = useQuery(githubQuery)
   const repos = useQuery({ ...githubReposQuery, enabled: Boolean(status.data?.app) })
   const [url, setUrl] = useState(app.git_url ?? '')
@@ -446,10 +443,21 @@ function SourceField({ app }: { app: App }) {
           onRepo={(r) => {
             setUrl(r?.clone_url ?? '')
             setBranch(r?.default_branch ?? '')
+            onDirty()
           }}
           onUseGitUrl={() => setTyped(true)}
         />
-        <BranchField id="app-git-branch" name="git_branch" repo={match} github value={branch} onChange={setBranch} />
+        <BranchField
+          id="app-git-branch"
+          name="git_branch"
+          repo={match}
+          github
+          value={branch}
+          onChange={(b) => {
+            setBranch(b)
+            onDirty()
+          }}
+        />
       </>
     )
   }
@@ -462,7 +470,10 @@ function SourceField({ app }: { app: App }) {
           name="git_url"
           className="font-mono"
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          onChange={(e) => {
+            setUrl(e.target.value)
+            onDirty()
+          }}
           required
           placeholder="https://github.com/acme/web.git"
           autoCapitalize="none"
@@ -470,7 +481,17 @@ function SourceField({ app }: { app: App }) {
           spellCheck={false}
         />
       </Field>
-      <BranchField id="app-git-branch" name="git_branch" repo={null} github={false} value={branch} onChange={setBranch} />
+      <BranchField
+        id="app-git-branch"
+        name="git_branch"
+        repo={null}
+        github={false}
+        value={branch}
+        onChange={(b) => {
+          setBranch(b)
+          onDirty()
+        }}
+      />
     </>
   )
 }

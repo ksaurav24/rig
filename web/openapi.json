@@ -9,6 +9,102 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/account/avatar": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Upload a custom avatar image for your account.",
+        "operationId": "upload_avatar",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Remove your custom avatar and reset to initials.",
+        "operationId": "delete_avatar",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/profile": {
+      "patch": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Update your own display name or avatar (built-in preset, image URL, or empty to reset).",
+        "operationId": "update_profile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/account/totp": {
       "get": {
         "tags": [
@@ -2454,6 +2550,39 @@
         }
       }
     },
+    "/api/v1/media/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Serve an uploaded organization logo or user avatar.",
+        "operationId": "get_media",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw image bytes"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/members": {
       "get": {
         "tags": [
@@ -2656,6 +2785,129 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/org": {
+      "patch": {
+        "tags": [
+          "organization"
+        ],
+        "summary": "Update organization name, logo URL, brand accent color, or environment badge.",
+        "operationId": "update_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOrganizationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/org/logo": {
+      "post": {
+        "tags": [
+          "organization"
+        ],
+        "summary": "Upload a custom organization logo image (PNG, JPEG, WebP, GIF, or SVG).",
+        "operationId": "upload_org_logo",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "organization"
+        ],
+        "summary": "Remove the organization logo and fall back to the default mark.",
+        "operationId": "delete_org_logo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Organization"
+                }
+              }
+            }
+          },
+          "403": {
             "content": {
               "application/json": {
                 "schema": {
@@ -4484,6 +4736,12 @@
           "joined_at"
         ],
         "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "email": {
             "type": "string"
           },
@@ -4663,8 +4921,29 @@
           "slug"
         ],
         "properties": {
+          "accent_color": {
+            "type": "string"
+          },
+          "env_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "name": {
             "type": "string"
@@ -4714,6 +4993,39 @@
             "type": "string"
           },
           "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "PublicBranding": {
+        "type": "object",
+        "required": [
+          "org_name",
+          "accent_color"
+        ],
+        "properties": {
+          "accent_color": {
+            "type": "string"
+          },
+          "env_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_name": {
             "type": "string"
           }
         }
@@ -4812,6 +5124,17 @@
           "version"
         ],
         "properties": {
+          "branding": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PublicBranding",
+                "description": "Public branding of the primary organization once setup is complete."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "setup_complete": {
             "type": "boolean",
             "description": "False until the first owner account has been created."
@@ -5113,6 +5436,60 @@
           }
         }
       },
+      "UpdateOrganizationRequest": {
+        "type": "object",
+        "description": "Update organization branding and workspace metadata. Omitted fields are kept.\nSend an empty string for `logo_url`, `env_label`, or `env_color` to clear it.",
+        "properties": {
+          "accent_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateProfileRequest": {
+        "type": "object",
+        "description": "Update the signed-in user's display name or avatar. Omitted fields are kept.\nSend an empty string for `avatar_url` to reset to initials.",
+        "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateProjectRequest": {
         "type": "object",
         "description": "Rename a project or change its description. Omitted fields are kept.\nThe slug stays as it was, so nothing addressing the project breaks.",
@@ -5131,6 +5508,22 @@
           }
         }
       },
+      "UploadImageRequest": {
+        "type": "object",
+        "description": "Upload an image (PNG, JPEG, WebP, GIF, or SVG) encoded as base64.",
+        "required": [
+          "content_type",
+          "data_base64"
+        ],
+        "properties": {
+          "content_type": {
+            "type": "string"
+          },
+          "data_base64": {
+            "type": "string"
+          }
+        }
+      },
       "User": {
         "type": "object",
         "required": [
@@ -5139,6 +5532,12 @@
           "name"
         ],
         "properties": {
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "email": {
             "type": "string"
           },

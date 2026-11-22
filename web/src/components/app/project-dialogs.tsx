@@ -3,6 +3,17 @@ import { useNavigate, useRouter } from '@tanstack/react-router'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import { Field, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -13,17 +24,6 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 
 type Project = Schemas['Project']
@@ -54,19 +54,16 @@ export function NewProjectDialog({ open, onOpenChange }: { open: boolean; onOpen
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent size="sm">
         <form onSubmit={submit} className="contents">
           <DialogHeader>
             <DialogTitle>New project</DialogTitle>
-            <DialogDescription>
-              A project holds the apps and databases of one product. They reach each other over a private network.
-            </DialogDescription>
+            <DialogDescription>Services inside a project share a private network.</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor="project-name">Name</FieldLabel>
               <Input id="project-name" name="name" required maxLength={64} placeholder="Storefront" autoFocus autoComplete="off" />
-              <FieldDescription>You can rename it later.</FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="project-description">Description (optional)</FieldLabel>
@@ -97,9 +94,7 @@ export function EditProjectDialog({ project, onClose }: { project: Project | nul
     meta: { success: 'Project updated' },
     onSuccess: async () => {
       onClose()
-      // App and database rows carry the project's name too.
       await Promise.all(['projects', 'apps', 'databases'].map((key) => queryClient.invalidateQueries({ queryKey: [key] })))
-      // Breadcrumbs come from route loaders, which read the name once.
       await router.invalidate()
     },
   })
@@ -119,12 +114,11 @@ export function EditProjectDialog({ project, onClose }: { project: Project | nul
 
   return (
     <Dialog open={project !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent>
-        {/* Keyed so reopening starts from the saved values. */}
+      <DialogContent size="sm">
         <form key={project?.id} onSubmit={submit} className="contents">
           <DialogHeader>
             <DialogTitle>Project settings</DialogTitle>
-            <DialogDescription>Renaming keeps every app, database, domain and token working.</DialogDescription>
+            <DialogDescription>Renaming does not affect domains or tokens.</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
@@ -167,8 +161,7 @@ export function EditProjectDialog({ project, onClose }: { project: Project | nul
 /**
  * Deletes a project and its apps. Databases are kept by default: they move,
  * data and backups included, to another project. Deleting them instead takes
- * typing the project's name. The server refuses while a deploy or database
- * start is running.
+ * typing the project's name.
  */
 export function DeleteProjectDialog({
   project,
@@ -179,7 +172,6 @@ export function DeleteProjectDialog({
 }: {
   project: Project | null
   databases: Database[]
-  /** Every project, for choosing where the databases go. */
   projects: Project[]
   onClose: () => void
   onDeleted?: () => void
@@ -250,10 +242,10 @@ function DeleteProjectBody({
         <AlertDialogTitle>Delete “{project.name}”?</AlertDialogTitle>
         <AlertDialogDescription>
           {apps
-            ? `Its ${plural(apps, 'app')} stop and are deleted, with their deployments, variables, domains and volumes.`
+            ? `Its ${plural(apps, 'app')} will stop and be deleted along with deployments, variables, domains and volumes.`
             : dbs
-              ? 'It has no apps.'
-              : 'The project is empty.'}{' '}
+              ? 'This project has no apps.'
+              : 'This project is empty.'}{' '}
           This cannot be undone.
         </AlertDialogDescription>
       </AlertDialogHeader>
@@ -270,30 +262,30 @@ function DeleteProjectBody({
             title="Move to another project"
             hint={
               others.length
-                ? 'Data and backups move along. Running databases restart on the new project’s network.'
-                : 'There is no other project to move them to. Create one first to keep them.'
+                ? 'Data and backups move along. Running databases restart on the new network.'
+                : 'No other project exists. Create one first to move them.'
             }
           >
             {fate === 'move' && others.length ? (
-              <Select items={others.map((p) => ({ value: p.id, label: p.name }))} value={target} onValueChange={(v) => setTarget(String(v))}>
-                <SelectTrigger className="mt-2 w-full" aria-label="Move databases to">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {others.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="mt-2">
+                <Select value={target} onValueChange={(v) => setTarget(v)}>
+                  <SelectTrigger className="w-full" aria-label="Move databases to" />
+                  <SelectContent>
+                    {others.map((p, i) => (
+                      <SelectItem key={p.id} index={i} value={p.id}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             ) : null}
           </FateOption>
           <FateOption
             checked={fate === 'delete'}
             onSelect={() => setFate('delete')}
             title="Delete them too"
-            hint="Their data and backups are destroyed."
+            hint="All data and backups are destroyed."
             danger
           >
             {fate === 'delete' ? (
@@ -320,7 +312,6 @@ function DeleteProjectBody({
           variant="destructive"
           disabled={!ready}
           onClick={(e) => {
-            // Stay open on failure so the error toast sits next to the choice.
             e.preventDefault()
             remove.mutate()
           }}

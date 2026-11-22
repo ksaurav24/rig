@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createFileRoute, Link, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
-import { ExternalLink, GitBranch, Package, Rocket, Square } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { createFileRoute, Outlet, useLocation, useNavigate } from '@tanstack/react-router'
+import { ExternalLink, GitBranch, Package, Play, RotateCw, Square } from 'lucide-react'
+import { useState } from 'react'
 
 import { api, unwrap } from '@/api/client'
 import { appQuery, meQuery } from '@/api/queries'
 import { ErrorState, Status } from '@/components/app/state'
+import { Tabs, TabsItem } from '@/components/fluid/tabs'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,13 +43,13 @@ export const Route = createFileRoute('/_app/apps/$appId')({
 })
 
 const TABS = [
-  { to: '/apps/$appId', label: 'Overview', exact: true },
-  { to: '/apps/$appId/deployments', label: 'Deployments', exact: false },
-  { to: '/apps/$appId/logs', label: 'Logs', exact: false },
-  { to: '/apps/$appId/terminal', label: 'Terminal', exact: false },
-  { to: '/apps/$appId/environment', label: 'Environment', exact: false },
-  { to: '/apps/$appId/domains', label: 'Domains', exact: false },
-  { to: '/apps/$appId/settings', label: 'Settings', exact: false },
+  { to: '/apps/$appId', suffix: '', label: 'Overview' },
+  { to: '/apps/$appId/deployments', suffix: '/deployments', label: 'Deployments' },
+  { to: '/apps/$appId/logs', suffix: '/logs', label: 'Logs' },
+  { to: '/apps/$appId/terminal', suffix: '/terminal', label: 'Terminal' },
+  { to: '/apps/$appId/environment', suffix: '/environment', label: 'Environment' },
+  { to: '/apps/$appId/domains', suffix: '/domains', label: 'Domains' },
+  { to: '/apps/$appId/settings', suffix: '/settings', label: 'Settings' },
 ] as const
 
 function AppLayout() {
@@ -60,14 +61,6 @@ function AppLayout() {
   const [confirmStop, setConfirmStop] = useState(false)
   const canDeploy = me ? hasRole(me.role, 'developer') : false
   const { pathname } = useLocation()
-  const tabsRef = useRef<HTMLElement>(null)
-  const loaded = app !== undefined
-  // On narrow screens the tab strip scrolls; keep the current tab in view.
-  useEffect(() => {
-    tabsRef.current
-      ?.querySelector('[aria-current=page]')
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [pathname, loaded])
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['apps'] })
 
@@ -103,6 +96,15 @@ function AppLayout() {
   const busy = app.status === 'deploying'
   const url = app.domains[0]
   const SourceIcon = app.source_kind === 'git' ? GitBranch : Package
+  const basePath = `/apps/${appId}`
+  const selectedIndex = Math.max(
+    0,
+    TABS.findIndex((t) =>
+      t.suffix === ''
+        ? pathname === basePath || pathname === `${basePath}/`
+        : pathname.startsWith(`${basePath}${t.suffix}`),
+    ),
+  )
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 md:px-8 md:py-8">
@@ -110,9 +112,11 @@ function AppLayout() {
         <div className="flex min-w-0 flex-col gap-1.5">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className="truncate text-xl font-semibold tracking-tight">{app.name}</h1>
-            <Status tone={status.tone}>{status.label}</Status>
+            <Status tone={status.tone} variant="solid">
+              {status.label}
+            </Status>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[0.8125rem] text-muted-foreground">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-muted-foreground">
             <span className="flex min-w-0 items-center gap-1.5">
               <SourceIcon className="size-3.5 shrink-0" aria-hidden />
               <span className="truncate font-mono text-xs">
@@ -141,34 +145,31 @@ function AppLayout() {
               </Button>
             ) : null}
             <Button onClick={() => deploy.mutate()} disabled={busy || deploy.isPending}>
-              {busy || deploy.isPending ? <Spinner data-icon="inline-start" /> : <Rocket data-icon="inline-start" />}
+              {busy || deploy.isPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : app.current_deployment_id ? (
+                <RotateCw data-icon="inline-start" />
+              ) : (
+                <Play data-icon="inline-start" />
+              )}
               {busy ? 'Deploying' : app.current_deployment_id ? 'Redeploy' : 'Deploy'}
             </Button>
           </div>
         ) : null}
       </header>
 
-      <nav
-        ref={tabsRef}
-        aria-label="App sections"
-        className="-mx-4 [scrollbar-width:none] overflow-x-auto border-b px-4 [mask-image:linear-gradient(to_right,transparent,#000_1rem,#000_calc(100%-2rem),transparent)] md:-mx-8 md:px-8 md:[mask-image:none]"
-      >
-        <ul className="flex gap-5 pr-4">
-          {TABS.map((tab) => (
-            <li key={tab.to}>
-              <Link
-                to={tab.to}
-                params={{ appId }}
-                activeOptions={{ exact: tab.exact }}
-                activeProps={{ 'aria-current': 'page' }}
-                className="-mb-px block border-b-2 border-transparent py-2.5 text-[0.8125rem] font-medium whitespace-nowrap text-muted-foreground transition-colors hover:text-foreground aria-[current=page]:border-primary aria-[current=page]:text-foreground"
-              >
-                {tab.label}
-              </Link>
-            </li>
+      <div className="-mx-4 overflow-x-auto px-4 md:mx-0 md:px-0">
+        <Tabs
+          selectedIndex={selectedIndex}
+          onSelect={(i) => void navigate({ to: TABS[i].to, params: { appId } })}
+          aria-label="App sections"
+          className="w-fit border border-border/80 bg-card/70"
+        >
+          {TABS.map((tab, i) => (
+            <TabsItem key={tab.to} index={i} label={tab.label} />
           ))}
-        </ul>
-      </nav>
+        </Tabs>
+      </div>
 
       <Outlet />
 
@@ -177,8 +178,7 @@ function AppLayout() {
           <AlertDialogHeader>
             <AlertDialogTitle>Stop {app.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              Its container is removed and its domains stop answering until you deploy again. Settings,
-              variables and deployment history are kept.
+              The container is removed and domains stop answering until the next deploy. Settings and history stay intact.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -42,6 +42,7 @@ fn member_from_row(r: &sqlx::sqlite::SqliteRow) -> Member {
         user_id: r.get("user_id"),
         name: r.get("name"),
         email: r.get("email"),
+        avatar_url: r.get("avatar_url"),
         role: Role::parse(r.get("role")).unwrap_or(Role::Viewer),
         joined_at: r.get("joined_at"),
         last_login_at: r.get("last_login_at"),
@@ -51,7 +52,7 @@ fn member_from_row(r: &sqlx::sqlite::SqliteRow) -> Member {
 /// Members of an organization, or just one of them.
 async fn members(state: &AppState, org_id: &str, user_id: Option<&str>) -> ApiResult<Vec<Member>> {
     let rows = sqlx::query(
-        "SELECT u.id AS user_id, u.name, u.email, m.role, m.created_at AS joined_at, u.last_login_at
+        "SELECT u.id AS user_id, u.name, u.email, u.avatar_url, m.role, m.created_at AS joined_at, u.last_login_at
            FROM memberships m JOIN users u ON u.id = m.user_id
           WHERE m.org_id = ?1 AND (?2 IS NULL OR m.user_id = ?2)
           ORDER BY m.created_at",
@@ -386,6 +387,7 @@ mod tests {
             user_id: id.into(),
             name: "N".into(),
             email: "n@example.com".into(),
+            avatar_url: None,
             role,
             joined_at: String::new(),
             last_login_at: None,

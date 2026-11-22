@@ -26,8 +26,9 @@ import { useShape } from "@/lib/shape-context";
 // switch never flips itself, it only calls onToggle.
 // ---------------------------------------------------------------------------
 
-interface SwitchProps extends HTMLAttributes<HTMLDivElement> {
-  label: string;
+interface SwitchProps extends Omit<HTMLAttributes<HTMLDivElement>, "id"> {
+  id?: string;
+  label?: string;
   checked: boolean;
   /** Called by a click, the keyboard, or a drag released past the
    *  midpoint. Update `checked` here. */
@@ -70,7 +71,7 @@ const THUMB_OFFSET = 2;
 const DRAG_DEAD_ZONE = 2;
 
 const Switch = forwardRef<HTMLDivElement, SwitchProps>(
-  ({ label, checked, onToggle, disabled = false, thumbTransition, size, className, ...props }, ref) => {
+  ({ id, label, checked, onToggle, disabled = false, thumbTransition, size, className, "aria-label": ariaLabel, ...props }, ref) => {
     const labelId = useId();
     const hasMounted = useRef(false);
     const [hovered, setHovered] = useState(false);
@@ -251,10 +252,8 @@ const Switch = forwardRef<HTMLDivElement, SwitchProps>(
           // The whole row is the pointer target. touch-none stops the browser
           // from claiming a horizontal drag as a scroll (which would cancel
           // it); select-none keeps a drag from selecting the label.
-          "relative z-10 flex items-center cursor-pointer select-none touch-none",
-          sizeClasses.gap,
-          sizeClasses.px,
-          sizeClasses.variant === "compact" ? "py-1" : "py-2",
+          "relative z-10 inline-flex items-center cursor-pointer select-none touch-none",
+          label ? [sizeClasses.gap, sizeClasses.px, sizeClasses.variant === "compact" ? "py-1" : "py-2"] : "p-0.5",
           disabled && "opacity-50 pointer-events-none",
           className
         )}
@@ -278,8 +277,10 @@ const Switch = forwardRef<HTMLDivElement, SwitchProps>(
       >
         {/* Switch */}
         <SwitchPrimitive.Root
+          id={id}
           checked={checked}
-          aria-labelledby={labelId}
+          aria-label={ariaLabel}
+          aria-labelledby={!ariaLabel && label ? labelId : undefined}
           // Base UI passes (checked, eventDetails); narrow to () => void for our onToggle.
           onCheckedChange={() => {
             if (didDrag.current) return;
@@ -356,20 +357,22 @@ const Switch = forwardRef<HTMLDivElement, SwitchProps>(
         </SwitchPrimitive.Root>
 
         {/* Label */}
-        <span
-          id={labelId}
-          className={cn(
-            // text-box trim recenters the letterforms against the track; the
-            // track is taller than the label, so layout doesn't change.
-            "[text-box:trim-both_cap_alphabetic] transition-[color] duration-80",
-            sizeClasses.text,
-            // Brightens when on (muted → foreground over 80ms), so
-            // on/off reads in the label as well as the track color.
-            checked ? "text-foreground" : "text-muted-foreground"
-          )}
-        >
-          {label}
-        </span>
+        {label ? (
+          <span
+            id={labelId}
+            className={cn(
+              // text-box trim recenters the letterforms against the track; the
+              // track is taller than the label, so layout doesn't change.
+              "[text-box:trim-both_cap_alphabetic] transition-[color] duration-80",
+              sizeClasses.text,
+              // Brightens when on (muted → foreground over 80ms), so
+              // on/off reads in the label as well as the track color.
+              checked ? "text-foreground" : "text-muted-foreground"
+            )}
+          >
+            {label}
+          </span>
+        ) : null}
       </div>
     );
   }

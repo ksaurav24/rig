@@ -113,6 +113,12 @@ No public domain? Pick **Tailscale** (on a VM in your tailnet) or
 No domain for the app? Add one with a **Port** (for example 8081) and open
 `http://<vm-ip>:8081`, after opening that port in the firewall.
 
+## 5. Customize branding and workspace preferences
+
+- **Organization branding (`Settings → General`, Admin/Owner):** Rename your organization, upload a custom logo or link to a hosted image, pick a workspace accent color, and optionally display an environment badge (such as `Production` or `Homelab`) in the sidebar. The organization name, logo, and accent color also brand the sign-in screen, browser tab title, and favicon.
+- **Profile & avatar (`Account` in the user menu):** Update your display name and set your account avatar using built-in presets, an uploaded image, or an image link.
+- **Appearance & operator ergonomics (`Account`):** Toggle light/dark/system theme, personal accent color, compact vs. default UI density, rounded/sharp/pill corner style, classic/floating/inset sidebar with hover-peek, default landing route, timestamp style/timezone/clock format, log & terminal font size and line wrapping, and pin frequently used projects directly to the sidebar.
+
 ## Day to day
 
 | What | How |
@@ -121,7 +127,7 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 | Restart | `sudo systemctl restart rig` |
 | Settings | `/etc/rig/rig.env`, then restart |
 | Back up | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
-| CLI | `rig login https://rig.example.com`, then paste a token from **Settings → API tokens** |
+| CLI | `rig login https://rig.example.com`, then paste a token from **Account → Access tokens** |
 | Password reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` (generates a random password, signs out all sessions, and clears login rate limits) |
 | Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` |
 | Clear dashboard domain | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear` |

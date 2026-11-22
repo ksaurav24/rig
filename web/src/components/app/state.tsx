@@ -1,5 +1,6 @@
 import { CircleAlert, RotateCw, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { Badge } from '@/components/fluid/badge'
 import { Button } from '@/components/ui/button'
 import {
   Empty,
@@ -13,21 +14,39 @@ import { cn } from '@/lib/utils'
 
 export type Tone = 'ok' | 'busy' | 'warn' | 'fail' | 'idle'
 
-const DOT: Record<Tone, string> = {
-  ok: 'bg-ok',
-  busy: 'bg-busy animate-pulse',
-  warn: 'bg-warn',
-  fail: 'bg-fail',
-  idle: 'bg-idle',
+const BADGE_COLOR: Record<Tone, 'emerald' | 'blue' | 'amber' | 'red' | 'gray'> = {
+  ok: 'emerald',
+  busy: 'blue',
+  warn: 'amber',
+  fail: 'red',
+  idle: 'gray',
 }
 
-/** A state dot with its label. Colour never carries the meaning alone. */
-export function Status({ tone, children, className }: { tone: Tone; children: ReactNode; className?: string }) {
+/** A state dot with its label, built on Fluid's Badge. Colour never carries meaning alone. */
+export function Status({
+  tone,
+  children,
+  className,
+  variant = 'ghost',
+}: {
+  tone: Tone
+  children: ReactNode
+  className?: string
+  variant?: 'ghost' | 'dot' | 'solid'
+}) {
   return (
-    <span className={cn('inline-flex items-center gap-1.5 text-[0.8125rem] whitespace-nowrap', className)}>
-      <span aria-hidden="true" className={cn('size-2 shrink-0 rounded-full', DOT[tone])} />
+    <Badge
+      variant={variant}
+      color={BADGE_COLOR[tone]}
+      size="default"
+      className={cn(
+        'text-[13px] font-normal',
+        tone === 'busy' && '[&>span:first-child]:animate-pulse',
+        className,
+      )}
+    >
       {children}
-    </span>
+    </Badge>
   )
 }
 
@@ -43,13 +62,13 @@ export function EmptyState({
   action?: ReactNode
 }) {
   return (
-    <Empty className="rounded-lg border border-dashed py-14">
+    <Empty className="rounded-xl border border-dashed border-border/90 bg-card/40 py-12">
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <Icon />
         </EmptyMedia>
-        <EmptyTitle>{title}</EmptyTitle>
-        {children ? <EmptyDescription>{children}</EmptyDescription> : null}
+        <EmptyTitle className="text-[15px] font-medium">{title}</EmptyTitle>
+        {children ? <EmptyDescription className="max-w-md text-[13px]">{children}</EmptyDescription> : null}
       </EmptyHeader>
       {action ? <EmptyContent>{action}</EmptyContent> : null}
     </Empty>

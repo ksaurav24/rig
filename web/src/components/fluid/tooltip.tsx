@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
-import * as TooltipPrimitive from "@radix-ui/react-tooltip";
+import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip";
 import {
   animate,
   motion,
@@ -22,6 +22,7 @@ import {
 import { cn } from "@/lib/utils";
 import { KeyCaps } from "@/lib/key-cap";
 import { spring, exitFallbackMs } from "@/lib/springs";
+import { omit } from "@/lib/omit";
 import { fontWeights } from "@/lib/font-weight";
 import { useShape } from "@/lib/shape-context";
 
@@ -54,8 +55,7 @@ const DEFAULT_DELAY = 200;
 // Tracks whether an app-level <TooltipProvider> is above us. Each Tooltip
 // only wraps itself in a local primitive Provider when there isn't one —
 // a per-instance Provider would defeat cross-tooltip skip-delay grouping
-// (moving between adjacent tooltips would re-wait the full delay). Radix's
-// Root throws without a Provider, so the local fallback can't be dropped.
+// (moving between adjacent tooltips would re-wait the full delay).
 const TooltipGroupContext = createContext(false);
 
 interface TooltipProviderProps {
@@ -65,10 +65,6 @@ interface TooltipProviderProps {
   /** After a tooltip closes, adjacent tooltips opened within this window
    *  skip the hover delay, in ms. Defaults to 300. */
   skipDelayDuration?: number;
-  /** Closes a tooltip as soon as the pointer leaves its trigger. By default
-   *  the pointer may cross to the tooltip, and while it does, triggers in
-   *  its path don't open theirs: set this for dense rows of short labels. */
-  disableHoverableContent?: boolean;
 }
 
 /** Groups descendant Tooltips so that once one opens, moving to an adjacent
@@ -79,14 +75,12 @@ function TooltipProvider({
   children,
   delayDuration = DEFAULT_DELAY,
   skipDelayDuration = 300,
-  disableHoverableContent,
 }: TooltipProviderProps) {
   return (
     <TooltipGroupContext.Provider value={true}>
       <TooltipPrimitive.Provider
-        delayDuration={delayDuration}
-        skipDelayDuration={skipDelayDuration}
-        disableHoverableContent={disableHoverableContent}
+        delay={delayDuration}
+        timeout={skipDelayDuration}
       >
         {children}
       </TooltipPrimitive.Provider>
@@ -114,9 +108,8 @@ interface TooltipProps {
    *  ambient TooltipProvider's delayDuration when one is present. */
   delayDuration?: number;
   className?: string;
-  /** Extra classes for the portalled content element — Radix copies its
-   *  z-index onto the popper wrapper, so pass a z utility here to lift the
-   *  whole tooltip above other fixed layers (default: the --z-tooltip step, 70). */
+  /** Extra classes for the portalled positioner element — pass a z utility
+   *  here to lift the whole tooltip above other fixed layers (default: the --z-tooltip step, 70). */
   contentClassName?: string;
   /** When true, forces the tooltip open. When false, forces it closed. When undefined, uses default hover/focus behavior. */
   forceOpen?: boolean;
@@ -497,14 +490,9 @@ function GroupBubble({
   );
 }
 
-// Radix before 1.2.13 renders a tooltip's children a second time, in the
-// visually hidden copy aria-describedby points at. That copy holds no bubble
-// to animate. From 1.2.13 the role sits on the content itself, which carries
-// data-side in every version; the hidden copy never does.
-const inDescriptionCopy = (el: HTMLElement) => {
-  const described = el.closest('[role="tooltip"]');
-  return described !== null && !described.hasAttribute("data-side");
-};
+// Radix renders tooltip content a second time for screen readers and skips
+// the bubble's motion in that copy. Base UI has one copy: the one on screen.
+const inDescriptionCopy = (el: HTMLElement) => !el.isConnected;
 
 /** One fluid tooltip for a row of triggers: the first opens after the delay,
  *  then the bubble glides from trigger to trigger, changing width and label,
@@ -529,12 +517,9 @@ function TooltipGroup({
   }, [store]);
   return (
     <TooltipGroupStoreContext.Provider value={store}>
-      {/* A hoverable bubble keeps the triggers in the pointer's path from
-          opening theirs, so in a group it closes with its trigger. */}
       <TooltipProvider
         delayDuration={delayDuration}
         skipDelayDuration={skipDelayDuration}
-        disableHoverableContent
       >
         {children}
       </TooltipProvider>
@@ -545,6 +530,37 @@ function TooltipGroup({
 // ---------------------------------------------------------------------------
 // Tooltip
 // ---------------------------------------------------------------------------
+
+// Base UI unmounts a closing popup once the animations it can detect on the
+// popup element end. It misses the Motion exit spring, which it cuts.
+// A close that calls preventUnmountOnClose() in onOpenChange stays mounted
+// until the content calls actionsRef.unmount(). A close made by setting
+// `open` never reaches onOpenChange, so the root stays open until that close
+// is replayed through actionsRef.close(), which does.
+function usePopupExit(open: boolean, setOpen: (open: boolean) => void) {
+  const actionsRef = useRef<TooltipPrimitive.Root.Actions | null>(null);
+  const [rootOpen, setRootOpen] = useState(open);
+  if (open && !rootOpen) setRootOpen(true);
+  useLayoutEffect(() => {
+    if (open || !rootOpen) return;
+    // The root fills actionsRef before this effect runs; without it, close
+    // straight away rather than stay open.
+    if (actionsRef.current) actionsRef.current.close();
+    else setRootOpen(false);
+  }, [open, rootOpen]);
+  const onOpenChange = (
+    next: boolean,
+    details: { preventUnmountOnClose: () => void }
+  ) => {
+    if (!next) {
+      details.preventUnmountOnClose();
+      setRootOpen(false);
+    }
+    // A replayed close finds `open` already false: nothing to report.
+    if (next !== open) setOpen(next);
+  };
+  return { actionsRef, rootOpen: open || rootOpen, onOpenChange };
+}
 
 function Tooltip({
   content: label,
@@ -562,10 +578,14 @@ function Tooltip({
 }: TooltipProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = forceOpen !== undefined ? forceOpen : internalOpen;
-  const [mounted, setMounted] = useState(false);
-  const shape = useShape();
-  const portalContainer = useContext(TooltipPortalContainerContext);
-  const hasAmbientProvider = useContext(TooltipGroupContext);
+  const { actionsRef, rootOpen, onOpenChange } = usePopupExit(open, (v) => {
+    setInternalOpen(v);
+    onOpenChangeProp?.(v);
+  });
+  // Fallback release for the held unmount: the popup's onAnimationComplete is
+  // the primary signal, but rAF-driven animation callbacks can stall in
+  // throttled/background tabs. Armed only by a close, so a page of tooltips
+  // that never opened holds no timers. In a group the bubble first holds.
   const groupStore = useContext(TooltipGroupStoreContext);
   // A flex row escapes the bubble's text-box trim, so the label takes it
   // again: with a key cap or without, the bubble is the same height.
@@ -583,25 +603,23 @@ function Tooltip({
   const side = groupStore?.side() ?? sideProp;
   // In a group, or asked not to catch the pointer.
   const passThrough = !!groupStore || !hoverable;
-
-  // Set during the render that opens it, so the portal mounts in the same
-  // commit as `open` rather than one after.
-  if (open && !mounted) setMounted(true);
-
-  // Fallback release for the deferred unmount: onAnimationComplete is the
-  // primary signal, but rAF-driven animation callbacks can stall in
-  // throttled/background tabs. The exit tween runs at spring.fast.exit, so
-  // the fallback tracks that tier. In a group the bubble first holds.
   const exitMs = exitFallbackMs(spring.fast) + (groupStore ? GROUP_HOLD_MS : 0);
+  const openedRef = useRef(open);
   useEffect(() => {
-    if (open) return;
-    const id = setTimeout(() => setMounted(false), exitMs);
+    if (open) {
+      openedRef.current = true;
+      return;
+    }
+    if (!openedRef.current) return;
+    openedRef.current = false;
+    const id = setTimeout(() => actionsRef.current?.unmount(), exitMs);
     return () => clearTimeout(id);
-  }, [open, exitMs]);
+  }, [open, actionsRef, exitMs]);
+  const shape = useShape();
+  const portalContainer = useContext(TooltipPortalContainerContext);
+  const hasAmbientProvider = useContext(TooltipGroupContext);
 
-  const handleExitComplete = () => {
-    if (!open) setMounted(false);
-  };
+  const slideOffset = getSlideOffset(side);
 
   // Cursor-follow offset from the trigger's center, driven as a motion value
   // so per-move updates skip React re-renders.
@@ -621,89 +639,114 @@ function Tooltip({
     );
   };
 
-  const slideOffset = getSlideOffset(side);
-
-  // An explicit delayDuration overrides the ambient provider's delay; left
-  // undefined, the Root inherits it from the nearest provider.
   const tooltip = (
-    <TooltipPrimitive.Root delayDuration={delayDuration} disableHoverableContent={hoverable ? undefined : true} open={open} onOpenChange={(v) => { setInternalOpen(v); onOpenChangeProp?.(v); }}>
-      <TooltipPrimitive.Trigger onPointerMove={followCursor ? handleFollowMove : undefined}>
-        {children}
-      </TooltipPrimitive.Trigger>
-      {mounted && (
-        <TooltipPrimitive.Portal forceMount container={portalContainer ?? undefined}>
-          <TooltipPrimitive.Content
-            side={side}
-            sideOffset={sideOffset}
-            forceMount
-            // Radix sizes a wrapper around the content, and a class can't
-            // reach it. A grouped bubble that caught the pointer would cover
-            // the trigger above it in a grid or a stacked toolbar.
-            ref={(node) => {
-              if (passThrough && node?.parentElement) {
-                node.parentElement.style.pointerEvents = "none";
-              }
-            }}
-            className={cn(
-              "z-[var(--z-tooltip,70)]",
-              passThrough && "pointer-events-none",
-              contentClassName
-            )}
-          >
-            <motion.div
-              style={
-                followCursor === "y"
-                  ? { y: followOffset }
-                  : followCursor === "x"
-                    ? { x: followOffset }
-                    : undefined
-              }
-            >
-              {groupStore ? (
-                <GroupBubble
-                  store={groupStore}
-                  open={open}
-                  content={content}
-                  side={side}
-                  className={className}
-                  onExited={handleExitComplete}
-                />
-              ) : (
+    <TooltipPrimitive.Root
+      open={rootOpen}
+      onOpenChange={onOpenChange}
+      actionsRef={actionsRef}
+      // A hoverable bubble keeps the triggers in the pointer's path from
+      // opening theirs, so in a group it closes with its trigger.
+      disableHoverablePopup={passThrough ? true : undefined}
+    >
+      {/* An explicit delayDuration overrides the ambient provider's delay;
+          left undefined, the trigger inherits it from the provider. */}
+      <TooltipPrimitive.Trigger
+        render={children}
+        delay={delayDuration}
+        onPointerMove={followCursor ? handleFollowMove : undefined}
+      />
+      <TooltipPrimitive.Portal container={portalContainer ?? undefined}>
+        <TooltipPrimitive.Positioner
+          side={side}
+          sideOffset={sideOffset}
+          className={cn(
+            "z-[var(--z-tooltip,70)]",
+            passThrough && "pointer-events-none",
+            contentClassName
+          )}
+        >
+          <TooltipPrimitive.Popup
+            render={(props, state) => {
+              const exiting = state.transitionStatus === "ending";
+              const contentChildren = content;
+              const { style: baseStyle, ...baseProps } =
+                props as React.HTMLAttributes<HTMLDivElement>;
+              // motion.div has incompatible drag/animation event signatures —
+              // strip the React-DOM versions so they don't fight motion's own.
+              const rest = omit(baseProps, [
+                "onDrag",
+                "onDragStart",
+                "onDragEnd",
+                "onAnimationStart",
+                "onAnimationEnd",
+                "onAnimationIteration",
+              ]);
+              return (
+                // Outer wrapper carries Base UI's popup props plus the
+                // cursor-follow motion value; the inner box keeps the
+                // enter/exit slide so the two transforms don't fight.
                 <motion.div
-                  className={cn(
-                    "bg-foreground",
-                    bubbleText,
-                    shape.bg,
-                    className
-                  )}
-                  style={{ fontVariationSettings: fontWeights.normal }}
-                  initial={{ opacity: 0, ...slideOffset }}
-                  animate={{
-                    opacity: open ? 1 : 0,
-                    x: 0,
-                    y: 0,
+                  {...rest}
+                  style={{
+                    ...(baseStyle as React.CSSProperties | undefined),
+                    ...(followCursor === "y"
+                      ? { y: followOffset }
+                      : followCursor === "x"
+                        ? { x: followOffset }
+                        : {}),
                   }}
-                  transition={open ? spring.fast : spring.fast.exit}
-                  onAnimationComplete={handleExitComplete}
                 >
-                  {content}
+                  {groupStore ? (
+                    <GroupBubble
+                      store={groupStore}
+                      open={open}
+                      content={contentChildren}
+                      side={side}
+                      className={className}
+                      onExited={() => actionsRef.current?.unmount()}
+                    />
+                  ) : (
+                    <motion.div
+                      className={cn(
+                        "bg-foreground",
+                        bubbleText,
+                        shape.bg,
+                        className
+                      )}
+                      style={{ fontVariationSettings: fontWeights.normal }}
+                      initial={{ opacity: 0, ...slideOffset }}
+                      // Both targets name x and y: an exit target without one
+                      // starts a separate, instant animation back to 0 whose
+                      // completion would release the unmount below too early.
+                      animate={
+                        exiting
+                          ? { opacity: 0, x: 0, y: 0, ...slideOffset }
+                          : { opacity: 1, x: 0, y: 0 }
+                      }
+                      transition={exiting ? spring.fast.exit : spring.fast}
+                      onAnimationComplete={() => {
+                        if (exiting) actionsRef.current?.unmount();
+                      }}
+                    >
+                      {contentChildren}
+                    </motion.div>
+                  )}
                 </motion.div>
-              )}
-            </motion.div>
-          </TooltipPrimitive.Content>
-        </TooltipPrimitive.Portal>
-      )}
+              );
+            }}
+          />
+        </TooltipPrimitive.Positioner>
+      </TooltipPrimitive.Portal>
     </TooltipPrimitive.Root>
   );
 
-  // Fallback: Radix's Root requires a Provider above it, so without an
-  // ambient TooltipProvider each instance carries its own with the library's
-  // default delay. Grouped skip-delay needs the shared app-level
-  // TooltipProvider.
+  // Fallback: without an ambient TooltipProvider, give this instance its own
+  // so a bare <Tooltip> keeps the library's default delay. Grouped skip-delay
+  // needs the shared app-level TooltipProvider.
   if (hasAmbientProvider) return tooltip;
 
   return (
-    <TooltipPrimitive.Provider delayDuration={delayDuration ?? DEFAULT_DELAY}>
+    <TooltipPrimitive.Provider delay={delayDuration ?? DEFAULT_DELAY}>
       {tooltip}
     </TooltipPrimitive.Provider>
   );

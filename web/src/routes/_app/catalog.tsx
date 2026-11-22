@@ -7,7 +7,8 @@ import { api, unwrap, type Schemas } from '@/api/client'
 import { meQuery, projectsQuery } from '@/api/queries'
 import { Page } from '@/components/app/page'
 import { EmptyState } from '@/components/app/state'
-import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/fluid/badge'
+import { Card, CardGroup } from '@/components/fluid/card'
 import {
   Dialog,
   DialogContent,
@@ -15,19 +16,21 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import { Tabs, TabsItem } from '@/components/fluid/tabs'
+import { Tooltip } from '@/components/fluid/tooltip'
+import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { CATALOG, CATALOG_CATEGORIES, type CatalogCategory, type CatalogTemplate } from '@/lib/catalog'
 import { hasRole } from '@/lib/nav'
-import { cn } from '@/lib/utils'
+
+const CATEGORIES = ['all', ...CATALOG_CATEGORIES] as const
 
 export const Route = createFileRoute('/_app/catalog')({
   staticData: { crumb: 'Catalog' },
-  // ?project=<id> arrives from a project's "Create service" menu and
-  // preselects that project in the deploy form.
   validateSearch: (search: Record<string, unknown>): { project?: string } =>
     typeof search.project === 'string' ? { project: search.project } : {},
   loader: ({ context }) => {
@@ -54,30 +57,29 @@ function CatalogPage() {
     [category, needle],
   )
 
+  const catIndex = CATEGORIES.indexOf(category)
+
   return (
-    <Page
-      title="Catalog"
-      description="Ready-made apps that run as a single container. Rig fills in the image, port, storage and secrets."
-    >
+    <Page title="Catalog">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="-mx-4 flex gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Category">
-          {(['all', ...CATALOG_CATEGORIES] as const).map((c) => (
-            <Button
-              key={c}
-              size="sm"
-              variant={category === c ? 'secondary' : 'ghost'}
-              aria-pressed={category === c}
-              className={cn('shrink-0', category === c && 'ring-1 ring-border')}
-              onClick={() => setCategory(c)}
-            >
-              {c === 'all' ? 'All' : c}
-            </Button>
-          ))}
+        <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
+          <Tabs
+            size="compact"
+            selectedIndex={catIndex}
+            onSelect={(i) => setCategory(CATEGORIES[i])}
+            aria-label="Category"
+            className="w-fit border border-border/80 bg-card/70"
+          >
+            {CATEGORIES.map((c, i) => (
+              <TabsItem key={c} index={i} label={c === 'all' ? 'All' : c} />
+            ))}
+          </Tabs>
         </div>
         <div className="relative sm:w-64">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 z-10 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="search"
+            size="compact"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search apps"
@@ -89,16 +91,19 @@ function CatalogPage() {
 
       {shown.length === 0 ? (
         <EmptyState icon={Search} title="No apps match">
-          Try another word, or deploy any image from a project.
+          Try another search term, or deploy any image directly from a project.
         </EmptyState>
       ) : (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {shown.map((t) => (
-            <li key={t.id}>
-              <TemplateCard template={t} canDeploy={canDeploy} onDeploy={() => setPicked(t)} />
-            </li>
+        <CardGroup
+          columns={3}
+          border="outlined"
+          separated
+          className="grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+        >
+          {shown.map((t, index) => (
+            <TemplateCard key={t.id} index={index} template={t} canDeploy={canDeploy} onDeploy={() => setPicked(t)} />
           ))}
-        </ul>
+        </CardGroup>
       )}
 
       <DeployDialog template={picked} onClose={() => setPicked(null)} />
@@ -110,7 +115,7 @@ function Monogram({ name }: { name: string }) {
   return (
     <span
       aria-hidden
-      className="grid size-9 shrink-0 place-items-center rounded-md border bg-muted font-mono text-sm font-semibold text-foreground"
+      className="grid size-9 shrink-0 place-items-center rounded-lg border border-border/80 bg-surface font-mono text-xs font-semibold tracking-wider text-foreground uppercase"
     >
       {name.slice(0, 2)}
     </span>
@@ -118,59 +123,90 @@ function Monogram({ name }: { name: string }) {
 }
 
 function TemplateCard({
+  index,
   template: t,
   canDeploy,
   onDeploy,
 }: {
+  index: number
   template: CatalogTemplate
   canDeploy: boolean
   onDeploy: () => void
 }) {
   const secrets = t.variables.filter((v) => v.generate).length
   return (
-    <article className="flex h-full flex-col gap-3 rounded-lg border bg-card p-4 transition-colors hover:border-foreground/20">
-      <header className="flex items-start gap-3">
-        <Monogram name={t.name} />
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate font-medium">{t.name}</h2>
-          <p className="text-[0.8125rem] text-muted-foreground">{t.category}</p>
-        </div>
-        <a
-          href={t.website}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="rounded-sm p-1 text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          aria-label={`${t.name} website`}
-        >
-          <ArrowUpRight className="size-4" />
-        </a>
-      </header>
-      <p className="flex-1 text-muted-foreground">{t.description}</p>
-      <footer className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-3 text-xs text-muted-foreground">
-          <span className="truncate font-mono" title={t.image}>
+    <Card index={index} className="flex h-full flex-col justify-between gap-3 bg-card p-4">
+      <div className="flex flex-col gap-3">
+        <header className="flex items-start gap-3">
+          <Monogram name={t.name} />
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-[14px] font-medium text-foreground">{t.name}</h2>
+            <p className="text-[12px] text-muted-foreground">{t.category}</p>
+          </div>
+          <Tooltip content={`Open ${t.name} website`}>
+            <a
+              href={t.website}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="relative z-10 rounded-md p-1 text-muted-foreground transition-colors hover:bg-hover hover:text-foreground focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)] focus-visible:outline-none"
+              aria-label={`${t.name} website`}
+            >
+              <ArrowUpRight className="size-4" />
+            </a>
+          </Tooltip>
+        </header>
+        <p className="text-[13px] leading-relaxed text-muted-foreground">{t.description}</p>
+      </div>
+
+      <footer className="flex flex-col gap-2.5 pt-2 border-t border-border/60">
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 truncate font-mono text-[11.5px] text-muted-foreground" title={t.image}>
             {t.image}
           </span>
-          {t.volumes.length ? (
-            <span className="flex shrink-0 items-center gap-1" title="Keeps data in a persistent volume">
-              <HardDrive className="size-3.5" />
-              <span className="sr-only">Persistent storage</span>
-            </span>
-          ) : null}
-          {secrets ? (
-            <span className="flex shrink-0 items-center gap-1" title="Rig generates its secrets">
-              <KeyRound className="size-3.5" />
-              <span className="sr-only">Generated secrets</span>
-            </span>
+          {canDeploy ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onDeploy}
+              aria-label={`Deploy ${t.name}`}
+              className="relative z-10 shrink-0"
+            >
+              Deploy
+            </Button>
           ) : null}
         </div>
-        {canDeploy ? (
-          <Button size="sm" variant="outline" onClick={onDeploy} aria-label={`Deploy ${t.name}`}>
-            Deploy
-          </Button>
+        {(t.volumes.length > 0 || secrets > 0) ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {t.volumes.length > 0 ? (
+              <Tooltip content="Persistent storage volume configured automatically">
+                <Badge
+                  variant="solid"
+                  color="gray"
+                  size="compact"
+                  icon={HardDrive}
+                  className="relative z-10 font-normal text-muted-foreground"
+                >
+                  Storage
+                </Badge>
+              </Tooltip>
+            ) : null}
+            {secrets > 0 ? (
+              <Tooltip content="Secrets generated automatically on deploy">
+                <Badge
+                  variant="solid"
+                  color="gray"
+                  size="compact"
+                  icon={KeyRound}
+                  className="relative z-10 font-normal text-muted-foreground"
+                >
+                  Auto-secrets
+                </Badge>
+              </Tooltip>
+            ) : null}
+          </div>
         ) : null}
       </footer>
-    </article>
+    </Card>
   )
 }
 
@@ -185,7 +221,7 @@ function generatePassword(): string {
 function DeployDialog({ template, onClose }: { template: CatalogTemplate | null; onClose: () => void }) {
   return (
     <Dialog open={template !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent size="lg">
         {template ? <DeployForm key={template.id} template={template} onClose={onClose} /> : null}
       </DialogContent>
     </Dialog>
@@ -197,12 +233,9 @@ function DeployForm({ template: t, onClose }: { template: CatalogTemplate; onClo
   const navigate = useNavigate()
   const { data: projects, isPending } = useQuery(projectsQuery)
   const { project: preset } = Route.useSearch()
-  const [projectId, setProjectId] = useState<string | undefined>(
-    () => preset,
-  )
+  const [projectId, setProjectId] = useState<string | undefined>(() => preset)
   const project =
     (projectId && projects?.some((p) => p.id === projectId) ? projectId : undefined) ?? projects?.[0]?.id
-  const projectItems = (projects ?? []).map((p) => ({ value: p.id, label: p.name }))
   const asked = t.variables.filter((v) => v.required && v.value === undefined && !v.generate)
 
   const deploy = useMutation({
@@ -267,7 +300,7 @@ function DeployForm({ template: t, onClose }: { template: CatalogTemplate; onClo
       <DialogHeader>
         <DialogTitle>Deploy {t.name}</DialogTitle>
         <DialogDescription>
-          Runs <span className="font-mono text-foreground">{t.image}</span> with {t.memoryMb} MB of memory.
+          Runs <span className="font-mono text-foreground">{t.image}</span> · {t.memoryMb} MB RAM.
         </DialogDescription>
       </DialogHeader>
       <FieldGroup>
@@ -278,14 +311,12 @@ function DeployForm({ template: t, onClose }: { template: CatalogTemplate; onClo
           </Field>
           <Field>
             <FieldLabel htmlFor="cat-project">Project</FieldLabel>
-            <Select items={projectItems} value={project} onValueChange={(v) => setProjectId(v as string)}>
-              <SelectTrigger id="cat-project" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
+            <Select value={project ?? ''} onValueChange={(v) => setProjectId(v)}>
+              <SelectTrigger id="cat-project" className="w-full" />
               <SelectContent>
-                {projectItems.map((p) => (
-                  <SelectItem key={p.value} value={p.value}>
-                    {p.label}
+                {(projects ?? []).map((p, i) => (
+                  <SelectItem key={p.id} index={i} value={p.id}>
+                    {p.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -305,26 +336,26 @@ function DeployForm({ template: t, onClose }: { template: CatalogTemplate; onClo
             {v.description ? <FieldDescription>{v.description}</FieldDescription> : null}
           </Field>
         ))}
-        <dl className="grid gap-2 rounded-md border bg-muted/40 p-3 text-[0.8125rem]">
+        <dl className="grid gap-2 rounded-lg border border-border/80 bg-surface/60 p-3 text-[12.5px]">
           <div className="flex gap-2">
-            <dt className="w-28 shrink-0 text-muted-foreground">Storage</dt>
+            <dt className="w-24 shrink-0 text-muted-foreground">Storage</dt>
             <dd className="min-w-0 font-mono text-xs leading-5 break-all">
-              {t.volumes.length ? t.volumes.join(', ') : 'None (stateless)'}
+              {t.volumes.length ? t.volumes.join(', ') : 'Stateless'}
             </dd>
           </div>
           {generated.length ? (
             <div className="flex gap-2">
-              <dt className="w-28 shrink-0 text-muted-foreground">Generated</dt>
+              <dt className="w-24 shrink-0 text-muted-foreground">Secrets</dt>
               <dd className="min-w-0">
                 <span className="font-mono text-xs">{generated.map((v) => v.key).join(', ')}</span>
-                <span className="block text-muted-foreground">Stored encrypted. Reveal them in the app's Environment tab.</span>
+                <span className="block text-muted-foreground">Generated &amp; encrypted; reveal under Environment.</span>
               </dd>
             </div>
           ) : null}
         </dl>
       </FieldGroup>
       <DialogFooter>
-        <Button type="button" variant="ghost" onClick={onClose}>
+        <Button type="button" variant="outline" onClick={onClose}>
           Cancel
         </Button>
         <Button type="submit" disabled={deploy.isPending || !project}>

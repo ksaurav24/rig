@@ -51,11 +51,23 @@ pub struct ErrorDetail {
 
 // ---------------------------------------------------------------- setup/auth
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PublicBranding {
+    pub org_name: String,
+    pub logo_url: Option<String>,
+    pub accent_color: String,
+    pub env_label: Option<String>,
+    pub env_color: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SetupStatus {
     /// False until the first owner account has been created.
     pub setup_complete: bool,
     pub version: String,
+    /// Public branding of the primary organization once setup is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branding: Option<PublicBranding>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -123,6 +135,8 @@ pub struct User {
     pub id: String,
     pub email: String,
     pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -130,6 +144,51 @@ pub struct Organization {
     pub id: String,
     pub name: String,
     pub slug: String,
+    #[serde(default)]
+    pub logo_url: Option<String>,
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+    #[serde(default)]
+    pub env_label: Option<String>,
+    #[serde(default)]
+    pub env_color: Option<String>,
+}
+
+fn default_accent_color() -> String {
+    "emerald".into()
+}
+
+/// Update organization branding and workspace metadata. Omitted fields are kept.
+/// Send an empty string for `logo_url`, `env_label`, or `env_color` to clear it.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct UpdateOrganizationRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub logo_url: Option<String>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
+    pub env_label: Option<String>,
+    #[serde(default)]
+    pub env_color: Option<String>,
+}
+
+/// Update the signed-in user's display name or avatar. Omitted fields are kept.
+/// Send an empty string for `avatar_url` to reset to initials.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct UpdateProfileRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// Upload an image (PNG, JPEG, WebP, GIF, or SVG) encoded as base64.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UploadImageRequest {
+    pub content_type: String,
+    pub data_base64: String,
 }
 
 /// The signed-in principal. `csrf_token` must be echoed in `x-rig-csrf`
@@ -665,6 +724,8 @@ pub struct Member {
     pub user_id: String,
     pub name: String,
     pub email: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub role: Role,
     pub joined_at: String,
     pub last_login_at: Option<String>,

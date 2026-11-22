@@ -2,6 +2,7 @@
 
 import { forwardRef, type HTMLAttributes } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
+import type { IconComponent } from "@/lib/icon-context";
 import { cn } from "@/lib/utils";
 import { useShape } from "@/lib/shape-context";
 import { useSizeVariant } from "@/lib/size-context";
@@ -89,6 +90,8 @@ interface BadgeProps
   extends Omit<HTMLAttributes<HTMLSpanElement>, "color">,
     Omit<VariantProps<typeof badgeVariants>, "size"> {
   color?: BadgeColor;
+  /** Optional leading icon aligned vertically with the label. */
+  icon?: IconComponent;
   /** Omitted, the badge follows the surrounding SizeProvider. Legacy
    *  sm/md/lg values still resolve. */
   size?: BadgeSize;
@@ -101,6 +104,7 @@ const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
       variant = "solid",
       size: sizeProp,
       color = "gray",
+      icon: Icon,
       children,
       style,
       ...props
@@ -154,6 +158,14 @@ const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
               height: dotSize,
               backgroundColor: dotColor,
             }}
+          />
+        )}
+        {Icon && (
+          <Icon
+            size={size === "compact" ? 11 : 12}
+            strokeWidth={1.75}
+            aria-hidden
+            className="shrink-0"
           />
         )}
         {/* text-box needs a block container. The badge root is a flex

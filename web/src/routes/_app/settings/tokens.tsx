@@ -4,9 +4,22 @@ import { KeyRound, Plus, Trash2 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { meQuery, tokensQuery } from '@/api/queries'
-import { CopyButton } from '@/components/app/copy-button'
 import { Page, Panel } from '@/components/app/page'
 import { EmptyState, ErrorState } from '@/components/app/state'
+import { Badge } from '@/components/fluid/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { InputCopy } from '@/components/fluid/input-copy'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,22 +30,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { timeAgo } from '@/lib/format'
 import { hasRole, ROLES } from '@/lib/nav'
 
@@ -52,6 +52,11 @@ export const Route = createFileRoute('/_app/settings/tokens')({
   component: TokensPage,
 })
 
+function isExpired(expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false
+  return new Date(expiresAt).getTime() < Date.now()
+}
+
 function TokensPage() {
   const tokens = useQuery(tokensQuery)
   const [creating, setCreating] = useState(false)
@@ -68,14 +73,15 @@ function TokensPage() {
   return (
     <Page
       title="Access tokens"
-      description="Tokens let the CLI, MCP clients and scripts act as you. A token can never do more than your own role allows."
+      description="Personal tokens for the CLI, MCP clients, and automation."
       actions={tokens.data?.length ? newButton : undefined}
+      className="max-w-4xl"
     >
       {tokens.isPending ? (
         <Panel>
           <div className="space-y-2">
             {Array.from({ length: 3 }, (_, i) => (
-              <Skeleton key={i} className="h-8" />
+              <Skeleton key={i} className="h-9" />
             ))}
           </div>
         </Panel>
@@ -83,7 +89,7 @@ function TokensPage() {
         <ErrorState error={tokens.error} onRetry={() => void tokens.refetch()} />
       ) : tokens.data.length === 0 ? (
         <EmptyState icon={KeyRound} title="No access tokens" action={newButton}>
-          Create one to sign the CLI in or connect an MCP client.
+          Create a token to authenticate the Rig CLI or an MCP client.
         </EmptyState>
       ) : (
         <Panel flush>
@@ -99,28 +105,37 @@ function TokensPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {tokens.data.map((t) => (
-                <TableRow key={t.id}>
-                  <TableCell className="max-w-48 truncate pl-4 font-medium">{t.name}</TableCell>
-                  <TableCell>
-                    <code className="text-[0.8125rem] text-muted-foreground">{t.prefix}…</code>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary" className="capitalize">
-                      {t.role}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="hidden text-muted-foreground sm:table-cell">{timeAgo(t.last_used_at)}</TableCell>
-                  <TableCell className="hidden text-muted-foreground md:table-cell">
-                    {t.expires_at ? timeAgo(t.expires_at) : 'Never'}
-                  </TableCell>
-                  <TableCell className="pr-4 text-right">
-                    <Button variant="ghost" size="icon-sm" aria-label={`Revoke ${t.name}`} onClick={() => setRevoking(t)}>
-                      <Trash2 />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {tokens.data.map((t, index) => {
+                const expired = isExpired(t.expires_at)
+                return (
+                  <TableRow key={t.id} index={index}>
+                    <TableCell className="max-w-48 truncate pl-4 font-medium text-foreground">{t.name}</TableCell>
+                    <TableCell>
+                      <code className="text-[12.5px] text-muted-foreground">{t.prefix}…</code>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="solid" color="gray" size="compact" className="capitalize">
+                        {t.role}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="hidden text-muted-foreground sm:table-cell">{timeAgo(t.last_used_at)}</TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      {expired ? (
+                        <Badge variant="solid" color="amber" size="compact">
+                          Expired
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground">{t.expires_at ? timeAgo(t.expires_at) : 'Never'}</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="pr-4 text-right">
+                      <Button variant="ghost" size="icon-sm" aria-label={`Revoke ${t.name}`} onClick={() => setRevoking(t)}>
+                        <Trash2 />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
             </TableBody>
           </Table>
         </Panel>
@@ -166,28 +181,25 @@ function CreateTokenDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent size="sm">
         <form onSubmit={submit} className="contents">
           <DialogHeader>
             <DialogTitle>New access token</DialogTitle>
-            <DialogDescription>The secret is shown once, right after you create it.</DialogDescription>
+            <DialogDescription>The secret is displayed once right after creation.</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor="token-name">Name</FieldLabel>
               <Input id="token-name" name="name" required maxLength={60} placeholder="Laptop CLI" autoFocus autoComplete="off" />
-              <FieldDescription>Where the token will be used, so you can tell them apart later.</FieldDescription>
             </Field>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="token-role">Role</FieldLabel>
-                <Select items={allowed} value={effectiveRole} onValueChange={(v) => setRole(v as Role)}>
-                  <SelectTrigger id="token-role" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
+                <Select value={effectiveRole} onValueChange={(v) => setRole(v as Role)}>
+                  <SelectTrigger id="token-role" className="w-full" />
                   <SelectContent>
-                    {allowed.map((r) => (
-                      <SelectItem key={r.value} value={r.value}>
+                    {allowed.map((r, i) => (
+                      <SelectItem key={r.value} index={i} value={r.value}>
                         {r.label}
                       </SelectItem>
                     ))}
@@ -196,13 +208,11 @@ function CreateTokenDialog({
               </Field>
               <Field>
                 <FieldLabel htmlFor="token-expiry">Expires after</FieldLabel>
-                <Select items={EXPIRY} value={expiry} onValueChange={(v) => setExpiry(v as string)}>
-                  <SelectTrigger id="token-expiry" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
+                <Select value={expiry} onValueChange={(v) => setExpiry(v)}>
+                  <SelectTrigger id="token-expiry" className="w-full" />
                   <SelectContent>
-                    {EXPIRY.map((x) => (
-                      <SelectItem key={x.value} value={x.value}>
+                    {EXPIRY.map((x, i) => (
+                      <SelectItem key={x.value} index={i} value={x.value}>
                         {x.label}
                       </SelectItem>
                     ))}
@@ -210,9 +220,7 @@ function CreateTokenDialog({
                 </Select>
               </Field>
             </div>
-            <p className="text-[0.8125rem] text-muted-foreground">
-              {ROLES.find((r) => r.value === effectiveRole)?.hint}.
-            </p>
+            <FieldDescription>{ROLES.find((r) => r.value === effectiveRole)?.hint}.</FieldDescription>
           </FieldGroup>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
@@ -230,22 +238,19 @@ function CreateTokenDialog({
 }
 
 function SecretDialog({ created, onClose }: { created: Schemas['CreatedApiToken'] | null; onClose: () => void }) {
+  const cliCmd = `rig login --url ${window.location.origin} --token <token>`
   return (
     <Dialog open={created !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent>
+      <DialogContent size="lg">
         <DialogHeader>
           <DialogTitle>Copy your token now</DialogTitle>
           <DialogDescription>
-            Rig stores only a hash, so this is the one time the secret for “{created?.token.name}” is shown.
+            Shown once for “{created?.token.name}”. Rig stores only its hash.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-1 rounded-md border bg-muted/50 py-1 pr-1 pl-3">
-          <code className="min-w-0 flex-1 overflow-x-auto py-1 text-[0.8125rem] whitespace-nowrap">{created?.secret}</code>
-          <CopyButton value={created?.secret ?? ''} label="Copy token" />
-        </div>
-        <div className="rounded-md border bg-muted/50 px-3 py-2">
-          <p className="mb-1 text-[0.8125rem] text-muted-foreground">Sign the CLI in with it:</p>
-          <code className="text-[0.8125rem] break-all">rig login --url {window.location.origin} --token &lt;token&gt;</code>
+        <div className="grid gap-3">
+          <InputCopy label="Token secret" value={created?.secret ?? ''} />
+          <InputCopy label="CLI sign-in command" value={cliCmd} size="compact" />
         </div>
         <DialogFooter>
           <Button onClick={onClose}>I have copied it</Button>
@@ -272,7 +277,7 @@ function RevokeDialog({ token, onClose }: { token: Token | null; onClose: () => 
         <AlertDialogHeader>
           <AlertDialogTitle>Revoke “{token?.name}”?</AlertDialogTitle>
           <AlertDialogDescription>
-            Anything using this token stops working immediately. This cannot be undone.
+            Anything using this token stops authenticating immediately. This cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

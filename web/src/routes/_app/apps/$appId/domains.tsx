@@ -7,6 +7,19 @@ import { api, unwrap, type Schemas } from '@/api/client'
 import { domainsQuery, meQuery, networkQuery } from '@/api/queries'
 import { Panel } from '@/components/app/page'
 import { EmptyState, ErrorState } from '@/components/app/state'
+import { Badge } from '@/components/fluid/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,20 +31,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { timeAgo } from '@/lib/format'
 import { hasRole } from '@/lib/nav'
 
@@ -46,16 +47,21 @@ const TLS_LABEL: Record<TlsMode, string> = {
   off: 'Off',
 }
 
+const TLS_HINT: Record<TlsMode, string> = {
+  auto: 'Public certificate via Let’s Encrypt. Point DNS at this server first.',
+  internal: 'Signed by Rig’s built-in CA for private networks.',
+  tailscale: 'Trusted HTTPS certificate for this machine’s .ts.net name.',
+  off: 'Plain HTTP without TLS.',
+}
+
 const ACCESS_LABEL: Record<Access, string> = {
   public: 'Anyone',
   lan: 'Local network',
   tailscale: 'Tailnet',
 }
 
-const items = <T extends string>(labels: Record<T, string>) =>
-  (Object.keys(labels) as T[]).map((value) => ({ value, label: labels[value] }))
-const TLS_ITEMS = items(TLS_LABEL)
-const ACCESS_ITEMS = items(ACCESS_LABEL)
+const TLS_KEYS = Object.keys(TLS_LABEL) as TlsMode[]
+const ACCESS_KEYS = Object.keys(ACCESS_LABEL) as Access[]
 
 function domainUrl(d: Pick<Domain, 'host' | 'tls_mode' | 'port'>) {
   return `${d.tls_mode === 'off' ? 'http' : 'https'}://${d.host}${d.port ? `:${d.port}` : ''}`
@@ -84,16 +90,15 @@ function AppDomains() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-        <p className="text-muted-foreground">Addresses that route to this app. Each one gets its own certificate.</p>
-        {domains.data?.length ? addButton : null}
-      </div>
+      {domains.data?.length ? (
+        <div className="flex items-center justify-end">{addButton}</div>
+      ) : null}
 
       {domains.isPending ? (
         <Panel>
           <div className="space-y-2">
             {Array.from({ length: 2 }, (_, i) => (
-              <Skeleton key={i} className="h-8" />
+              <Skeleton key={i} className="h-9" />
             ))}
           </div>
         </Panel>
@@ -101,7 +106,7 @@ function AppDomains() {
         <ErrorState error={domains.error} onRetry={() => void domains.refetch()} />
       ) : domains.data.length === 0 ? (
         <EmptyState icon={Globe} title="No domains yet" action={addButton}>
-          Add a domain to reach this app over HTTPS without remembering a port.
+          Add a domain to route HTTPS traffic to this app with automatic certificates.
         </EmptyState>
       ) : (
         <Panel flush>
@@ -116,14 +121,14 @@ function AppDomains() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {domains.data.map((d) => (
-                <TableRow key={d.id}>
+              {domains.data.map((d, index) => (
+                <TableRow key={d.id} index={index}>
                   <TableCell className="pl-4">
                     <a
                       href={domainUrl(d)}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex max-w-72 items-center gap-1 font-medium underline-offset-4 hover:underline"
+                      className="inline-flex max-w-72 items-center gap-1.5 font-mono text-[13px] font-medium text-foreground underline-offset-4 hover:underline"
                     >
                       <span className="truncate">
                         {d.host}
@@ -132,7 +137,11 @@ function AppDomains() {
                       <ExternalLink className="size-3 shrink-0 text-muted-foreground" aria-hidden />
                     </a>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{TLS_LABEL[d.tls_mode]}</TableCell>
+                  <TableCell>
+                    <Badge variant="solid" color={d.tls_mode === 'off' ? 'gray' : 'emerald'} size="compact">
+                      {TLS_LABEL[d.tls_mode]}
+                    </Badge>
+                  </TableCell>
                   <TableCell className="hidden text-muted-foreground md:table-cell">{ACCESS_LABEL[d.access]}</TableCell>
                   <TableCell className="hidden text-muted-foreground sm:table-cell">{timeAgo(d.created_at)}</TableCell>
                   <TableCell className="pr-4 text-right">
@@ -171,8 +180,7 @@ function AddDomainDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        {/* Mounted only while open, so the form always starts empty. */}
+      <DialogContent size="lg">
         {open ? <AddDomainForm appId={appId} onClose={() => onOpenChange(false)} /> : null}
       </DialogContent>
     </Dialog>
@@ -187,7 +195,6 @@ function AddDomainForm({ appId, onClose }: { appId: string; onClose: () => void 
   const network = useQuery(networkQuery)
   const tailnetName = network.data?.tailscale?.dns_name ?? null
 
-  // A tailnet address is one machine name, so each app needs its own port.
   function fillTailnetName() {
     if (!tailnetName) return
     setHost(tailnetName)
@@ -220,7 +227,7 @@ function AddDomainForm({ appId, onClose }: { appId: string; onClose: () => void 
     <form onSubmit={submit} className="contents">
       <DialogHeader>
         <DialogTitle>Add domain</DialogTitle>
-        <DialogDescription>Point the domain at this server, then add it here to start serving the app.</DialogDescription>
+        <DialogDescription>Point DNS at this server before enabling automatic TLS.</DialogDescription>
       </DialogHeader>
       <FieldGroup>
         <Field>
@@ -247,21 +254,19 @@ function AddDomainForm({ appId, onClose }: { appId: string; onClose: () => void 
               >
                 Use {tailnetName}
               </button>{' '}
-              to reach the app from your tailnet with a trusted certificate.
+              for Tailscale access.
             </FieldDescription>
           ) : null}
         </Field>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field>
             <FieldLabel htmlFor="domain-access">Reachable by</FieldLabel>
-            <Select items={ACCESS_ITEMS} value={access} onValueChange={(v) => setAccess(v as Access)}>
-              <SelectTrigger id="domain-access" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
+            <Select value={access} onValueChange={(v) => setAccess(v as Access)}>
+              <SelectTrigger id="domain-access" aria-label="Reachable by" className="w-full" />
               <SelectContent>
-                {ACCESS_ITEMS.map((item) => (
-                  <SelectItem key={item.value} value={item.value}>
-                    {item.label}
+                {ACCESS_KEYS.map((key, i) => (
+                  <SelectItem key={key} index={i} value={key}>
+                    {ACCESS_LABEL[key]}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -281,41 +286,24 @@ function AddDomainForm({ appId, onClose }: { appId: string; onClose: () => void 
             />
           </Field>
         </div>
-        <FieldDescription className="-mt-2">
-          Others are turned away with 403. Leave the port empty to use the standard one
-          {tls === 'tailscale' ? '; a tailnet name needs a port of its own per app' : ''}.
-        </FieldDescription>
+        {tls === 'tailscale' ? (
+          <FieldDescription className="-mt-1.5">
+            Each app on your tailnet hostname needs its own port.
+          </FieldDescription>
+        ) : null}
         <Field>
           <FieldLabel htmlFor="domain-tls">TLS</FieldLabel>
-          <Select items={TLS_ITEMS} value={tls} onValueChange={(v) => setTls(v as TlsMode)}>
-            <SelectTrigger id="domain-tls" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
+          <Select value={tls} onValueChange={(v) => setTls(v as TlsMode)}>
+            <SelectTrigger id="domain-tls" aria-label="TLS" className="w-full" />
             <SelectContent>
-              {TLS_ITEMS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
+              {TLS_KEYS.map((key, i) => (
+                <SelectItem key={key} index={i} value={key}>
+                  {TLS_LABEL[key]}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          <FieldDescription>
-            <span className="block">
-              <strong className="font-medium text-foreground">Automatic</strong> is a public certificate from Let’s
-              Encrypt. The domain’s DNS must point at this server.
-            </span>
-            <span className="mt-1 block">
-              <strong className="font-medium text-foreground">Private CA</strong> is a certificate from Rig’s own
-              authority, for private networks.
-            </span>
-            <span className="mt-1 block">
-              <strong className="font-medium text-foreground">Tailscale</strong> is a trusted certificate for this
-              machine’s .ts.net name.
-            </span>
-            <span className="mt-1 block">
-              <strong className="font-medium text-foreground">Off</strong> serves plain HTTP.
-            </span>
-          </FieldDescription>
+          <FieldDescription>{TLS_HINT[tls]}</FieldDescription>
         </Field>
       </FieldGroup>
       <DialogFooter>
@@ -359,7 +347,7 @@ function RemoveDomainDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Remove {domain?.host}?</AlertDialogTitle>
           <AlertDialogDescription>
-            The app stops answering on this address and its certificate is discarded. You can add the domain again later.
+            This address stops routing to the app and its certificate is discarded. You can add it back later.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

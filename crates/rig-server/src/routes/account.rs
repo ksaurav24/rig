@@ -3,10 +3,18 @@
 use axum::{Json, extract::State, http::StatusCode};
 use rig_api::{
     ErrorBody, PasswordConfirm, RecoveryCodes, TotpCode, TotpDisable, TotpEnrollment, TotpStatus,
+    UpdateProfileRequest, UploadImageRequest, User,
 };
 use sqlx::Row;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use super::{
+    auth::validate_name,
+    org::{
+        delete_media_if_owned, store_media, validate_and_decode_image, validate_avatar_preset,
+        validate_external_image_url,
+    },
+};
 use crate::{
     auth::{self, Auth, Via, Viewer},
     crypto,
@@ -17,11 +25,116 @@ use crate::{
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
+        .routes(routes!(update_profile))
+        .routes(routes!(upload_avatar, delete_avatar))
         .routes(routes!(totp_status))
         .routes(routes!(totp_setup))
         .routes(routes!(totp_enable))
         .routes(routes!(totp_disable))
         .routes(routes!(totp_regenerate))
+}
+
+async fn load_user(state: &AppState, user_id: &str) -> ApiResult<User> {
+    let row = sqlx::query("SELECT id, email, name, avatar_url FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(User {
+        id: row.get("id"),
+        email: row.get("email"),
+        name: row.get("name"),
+        avatar_url: row.get("avatar_url"),
+    })
+}
+
+/// Update your own display name or avatar (built-in preset, image URL, or empty to reset).
+#[utoipa::path(patch, path = "/api/v1/account/profile", tag = "account",
+    request_body = UpdateProfileRequest,
+    responses((status = 200, body = User), (status = 422, body = ErrorBody)))]
+async fn update_profile(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+    Json(req): Json<UpdateProfileRequest>,
+) -> ApiResult<Json<User>> {
+    let current = load_user(&state, &auth.user_id).await?;
+
+    let next_name = match req.name {
+        Some(n) => validate_name("name", &n, 80)?,
+        None => current.name.clone(),
+    };
+
+    let (next_avatar, avatar_changed) = match req.avatar_url {
+        None => (current.avatar_url.clone(), false),
+        Some(ref s) if s.trim().is_empty() => (None, true),
+        Some(ref s) if s.trim().starts_with("preset:") => {
+            (Some(validate_avatar_preset(s)?), true)
+        }
+        Some(ref s) => (Some(validate_external_image_url(s)?), true),
+    };
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET name = ?, avatar_url = ? WHERE id = ?")
+        .bind(&next_name)
+        .bind(&next_avatar)
+        .bind(&auth.user_id)
+        .execute(&mut *tx)
+        .await?;
+    if avatar_changed && current.avatar_url != next_avatar {
+        delete_media_if_owned(&mut tx, &auth.org_id, current.avatar_url.as_deref()).await?;
+    }
+    tx.commit().await?;
+
+    auth.audit(&state, "account.profile_update", None, None)
+        .await?;
+    Ok(Json(load_user(&state, &auth.user_id).await?))
+}
+
+/// Upload a custom avatar image for your account.
+#[utoipa::path(post, path = "/api/v1/account/avatar", tag = "account",
+    request_body = UploadImageRequest,
+    responses((status = 200, body = User), (status = 422, body = ErrorBody)))]
+async fn upload_avatar(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+    Json(req): Json<UploadImageRequest>,
+) -> ApiResult<Json<User>> {
+    let (content_type, bytes) = validate_and_decode_image(&req)?;
+    let current = load_user(&state, &auth.user_id).await?;
+
+    let mut tx = state.db.begin().await?;
+    let url = store_media(&mut tx, &auth.org_id, &content_type, &bytes, false).await?;
+    sqlx::query("UPDATE users SET avatar_url = ? WHERE id = ?")
+        .bind(&url)
+        .bind(&auth.user_id)
+        .execute(&mut *tx)
+        .await?;
+    delete_media_if_owned(&mut tx, &auth.org_id, current.avatar_url.as_deref()).await?;
+    tx.commit().await?;
+
+    auth.audit(&state, "account.avatar_upload", None, Some(&content_type))
+        .await?;
+    Ok(Json(load_user(&state, &auth.user_id).await?))
+}
+
+/// Remove your custom avatar and reset to initials.
+#[utoipa::path(delete, path = "/api/v1/account/avatar", tag = "account",
+    responses((status = 200, body = User)))]
+async fn delete_avatar(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+) -> ApiResult<Json<User>> {
+    let current = load_user(&state, &auth.user_id).await?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET avatar_url = NULL WHERE id = ?")
+        .bind(&auth.user_id)
+        .execute(&mut *tx)
+        .await?;
+    delete_media_if_owned(&mut tx, &auth.org_id, current.avatar_url.as_deref()).await?;
+    tx.commit().await?;
+
+    auth.audit(&state, "account.avatar_remove", None, None)
+        .await?;
+    Ok(Json(load_user(&state, &auth.user_id).await?))
 }
 
 const MAX_CODE_FAILURES: i64 = 8;

@@ -88,7 +88,7 @@ It is a Rust binary with a React dashboard, Caddy as the proxy, SQLite as its da
 | Builds | Dockerfile; [Railpack](https://railpack.com) via BuildKit (built into Docker; a temporary BuildKit container on Podman) | Same auto-detect on both engines, no idle RAM |
 | Proxy and TLS | [Caddy](https://caddyserver.com) driven by its [admin API](https://caddyserver.com/docs/api) | Atomic config, automatic HTTPS, Tailscale certs |
 | Frontend | React + Vite, static files served by Rig | No Node runtime on the server |
-| Frontend libs | TanStack Router and Query, shadcn/ui, Cmd+K palette | Fast, keyboard-first UX |
+| Frontend libs | TanStack Router and Query, Fluid Functionalism primitives & shadcn/ui, Cmd+K palette | Fast, keyboard-first, customizable UX |
 | Live data | Server-Sent Events | Logs, status, metrics |
 | Web terminal | [xterm.js](https://xtermjs.org) over WebSocket | Shell into containers |
 | API contract | [utoipa](https://github.com/juhaku/utoipa) OpenAPI → TypeScript client (dashboard) and Rust client (CLI) | No drift between API, UI and CLI |

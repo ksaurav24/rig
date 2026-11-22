@@ -1,13 +1,7 @@
 import { Monitor, Moon, Sun } from 'lucide-react'
-import { useTheme, type Theme } from '@/lib/theme'
+import { DropdownContent, DropdownMenu, DropdownTrigger, MenuItem } from '@/components/fluid/dropdown'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { useTheme, type Theme } from '@/lib/theme'
 
 export const THEMES = [
   { value: 'light', label: 'Light', icon: Sun },
@@ -17,22 +11,26 @@ export const THEMES = [
 
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme()
+  const checkedIndex = THEMES.findIndex((t) => t.value === theme)
+
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Change theme" />}>
+      <DropdownTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Change theme" />}>
         <Sun className="dark:hidden" />
         <Moon className="hidden dark:block" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-40">
-        <DropdownMenuRadioGroup value={theme} onValueChange={(value: Theme) => setTheme(value)}>
-          {THEMES.map(({ value, label, icon: Icon }) => (
-            <DropdownMenuRadioItem key={value} value={value}>
-              <Icon />
-              {label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
+      </DropdownTrigger>
+      <DropdownContent align="end" checkedIndex={checkedIndex >= 0 ? checkedIndex : undefined} className="w-44">
+        {THEMES.map(({ value, label, icon }, index) => (
+          <MenuItem
+            key={value}
+            index={index}
+            icon={icon}
+            label={label}
+            checked={theme === value}
+            onSelect={() => setTheme(value as Theme)}
+          />
+        ))}
+      </DropdownContent>
     </DropdownMenu>
   )
 }

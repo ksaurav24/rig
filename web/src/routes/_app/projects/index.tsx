@@ -1,16 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link, createFileRoute } from '@tanstack/react-router'
-import { Boxes, Plus } from 'lucide-react'
+import { createFileRoute } from '@tanstack/react-router'
+import { Boxes, Pin, PinOff, Plus } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Schemas } from '@/api/client'
 import { appsQuery, databasesQuery, meQuery, projectsQuery } from '@/api/queries'
 import { Page } from '@/components/app/page'
 import { NewProjectDialog } from '@/components/app/project-dialogs'
-import { EmptyState, ErrorState, type Tone } from '@/components/app/state'
+import { EmptyState, ErrorState, Status, type Tone } from '@/components/app/state'
+import { Card, CardGroup } from '@/components/fluid/card'
+import { Tooltip } from '@/components/fluid/tooltip'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { timeAgo } from '@/lib/format'
 import { hasRole } from '@/lib/nav'
+import { usePreferences } from '@/lib/preferences'
 import { APP_STATUS, DATABASE_STATUS } from '@/lib/status'
 import { cn } from '@/lib/utils'
 
@@ -29,13 +32,20 @@ export const Route = createFileRoute('/_app/projects/')({
 interface Summary {
   apps: number
   databases: number
-  /** Worst tone among the project's services, for the corner dot. */
+  /** Worst tone among the project's services. */
   tone: Tone | null
   issues: number
   lastChange: string | null
 }
 
 const TONE_RANK: Record<Tone, number> = { fail: 4, warn: 3, busy: 2, ok: 1, idle: 0 }
+
+function normalizedSlug(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
 
 function ProjectsPage() {
   const projects = useQuery(projectsQuery)
@@ -81,15 +91,11 @@ function ProjectsPage() {
   const error = projects.error
 
   return (
-    <Page
-      title="Projects"
-      description="Each project groups the apps and databases behind one product."
-      actions={projects.data?.length ? newProject : undefined}
-    >
+    <Page title="Projects" actions={projects.data?.length ? newProject : undefined}>
       {pending ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }, (_, i) => (
-            <Skeleton key={i} className="h-[132px] rounded-lg" />
+            <Skeleton key={i} className="h-[118px] rounded-xl" />
           ))}
         </div>
       ) : error ? (
@@ -97,17 +103,26 @@ function ProjectsPage() {
       ) : projects.data!.length === 0 ? (
         <EmptyState icon={Boxes} title="No projects yet" action={newProject}>
           {canEdit
-            ? 'Start with a project, then add apps and databases to it. Services in one project share a private network.'
-            : 'Nothing has been set up yet. Ask an admin or developer to create a project.'}
+            ? 'Create a project to group the apps and databases of a service on a shared private network.'
+            : 'Ask an admin or developer to create a project.'}
         </EmptyState>
       ) : (
-        <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {projects.data!.map((project) => (
-            <li key={project.id}>
-              <ProjectCard project={project} summary={summaries.get(project.id)} loading={apps.isPending || databases.isPending} />
-            </li>
+        <CardGroup
+          columns={3}
+          border="outlined"
+          separated
+          className="grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+        >
+          {projects.data!.map((project, index) => (
+            <ProjectCard
+              key={project.id}
+              index={index}
+              project={project}
+              summary={summaries.get(project.id)}
+              loading={apps.isPending || databases.isPending}
+            />
           ))}
-        </ul>
+        </CardGroup>
       )}
 
       <NewProjectDialog open={creating} onOpenChange={setCreating} />
@@ -115,15 +130,28 @@ function ProjectsPage() {
   )
 }
 
-const DOT: Record<Tone, string> = {
-  ok: 'bg-ok',
-  busy: 'bg-busy animate-pulse',
-  warn: 'bg-warn',
-  fail: 'bg-fail',
-  idle: 'bg-muted-foreground/40',
+function statusLabel(summary: Summary | undefined, empty: boolean): { tone: Tone; label: string } | null {
+  if (empty) return { tone: 'idle', label: 'Empty' }
+  if (!summary?.tone) return null
+  if (summary.issues > 0) return { tone: summary.tone, label: `${summary.issues} issue${summary.issues === 1 ? '' : 's'}` }
+  if (summary.tone === 'busy') return { tone: 'busy', label: 'Deploying' }
+  if (summary.tone === 'ok') return { tone: 'ok', label: 'Healthy' }
+  return { tone: 'idle', label: 'Idle' }
 }
 
-function ProjectCard({ project, summary, loading }: { project: Project; summary?: Summary; loading: boolean }) {
+function ProjectCard({
+  index,
+  project,
+  summary,
+  loading,
+}: {
+  index: number
+  project: Project
+  summary?: Summary
+  loading: boolean
+}) {
+  const { isProjectPinned, togglePinnedProject } = usePreferences()
+  const pinned = isProjectPinned(project.id)
   const apps = summary?.apps ?? project.app_count
   const dbs = summary?.databases ?? 0
   const empty = !loading && apps === 0 && dbs === 0
@@ -131,42 +159,62 @@ function ProjectCard({ project, summary, loading }: { project: Project; summary?
     `${apps} app${apps === 1 ? '' : 's'}`,
     loading ? null : `${dbs} database${dbs === 1 ? '' : 's'}`,
   ].filter(Boolean)
+  const showSlug = !project.description && project.slug !== normalizedSlug(project.name)
+  const state = statusLabel(summary, empty)
 
   return (
-    <Link
-      to="/projects/$projectId"
-      params={{ projectId: project.id }}
-      className={cn(
-        'flex h-full min-h-[132px] flex-col rounded-lg bg-card p-4 outline-none',
-        'shadow-[0_0_0_1px_var(--border)] transition-[box-shadow,background-color] duration-150',
-        'hover:shadow-[0_0_0_1px_var(--ring)] focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)]',
-      )}
+    <Card
+      index={index}
+      href={`/projects/${project.id}`}
+      label={project.name}
+      className="group/project flex h-full min-h-[116px] flex-col justify-between gap-4 bg-card p-4"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate font-medium">{project.name}</div>
-          <div className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-muted-foreground">
-            {project.description || <span className="font-mono text-[12px]">{project.slug}</span>}
-          </div>
+          <div className="truncate text-[14.5px] font-medium text-foreground">{project.name}</div>
+          {project.description ? (
+            <div className="mt-1 line-clamp-2 text-[12.5px] leading-snug text-muted-foreground">
+              {project.description}
+            </div>
+          ) : showSlug ? (
+            <div className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">{project.slug}</div>
+          ) : null}
         </div>
-        {summary?.tone ? (
-          <span
-            className={cn('mt-1.5 size-2 shrink-0 rounded-full', DOT[summary.tone])}
-            aria-label={summary.issues ? `${summary.issues} need attention` : 'All healthy'}
-          />
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {state ? (
+            <Status tone={state.tone} variant="ghost" className="shrink-0 text-[12px] text-muted-foreground">
+              {state.label}
+            </Status>
+          ) : null}
+          <Tooltip content={pinned ? 'Unpin from sidebar' : 'Pin to sidebar'}>
+            <button
+              type="button"
+              aria-label={pinned ? `Unpin ${project.name}` : `Pin ${project.name}`}
+              aria-pressed={pinned}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                togglePinnedProject(project.id)
+              }}
+              className={cn(
+                'relative z-10 grid size-6 place-items-center rounded-md text-muted-foreground transition-opacity hover:bg-hover hover:text-foreground',
+                pinned ? 'text-primary opacity-100' : 'opacity-0 group-hover/project:opacity-100 focus-visible:opacity-100',
+              )}
+            >
+              {pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+            </button>
+          </Tooltip>
+        </div>
       </div>
-      <div className="mt-auto flex items-center justify-between gap-3 pt-5 text-[12.5px] text-muted-foreground">
+
+      <div className="flex items-center justify-between gap-3 text-[12.5px] text-muted-foreground">
         {empty ? (
-          <span>Empty. Add the first service</span>
+          <span>Add your first service</span>
         ) : (
-          <span className="tabular-nums">
-            {counts.join(' · ')}
-            {summary?.issues ? <span className="text-fail"> · {summary.issues} need attention</span> : null}
-          </span>
+          <span className="tabular-nums">{counts.join(' · ')}</span>
         )}
-        <span className="shrink-0">{timeAgo(summary?.lastChange ?? project.created_at)}</span>
+        <span className="shrink-0 text-[12px]">{timeAgo(summary?.lastChange ?? project.created_at)}</span>
       </div>
-    </Link>
+    </Card>
   )
 }

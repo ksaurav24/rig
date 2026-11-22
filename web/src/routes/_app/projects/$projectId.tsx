@@ -1,9 +1,26 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, createFileRoute, notFound, useNavigate } from '@tanstack/react-router'
-import { AppWindow, ChevronDown, ChevronRight, Database, Ellipsis, GitBranch, LayoutGrid, Package, Pencil, Plus, Trash2 } from 'lucide-react'
+import {
+  AppWindow,
+  Archive,
+  ChevronDown,
+  ChevronRight,
+  Database,
+  Ellipsis,
+  GitBranch,
+  KeyRound,
+  LayoutGrid,
+  Package,
+  Pencil,
+  Pin,
+  PinOff,
+  Plus,
+  Trash2,
+} from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Schemas } from '@/api/client'
 import { appsQuery, databasesQuery, meQuery, projectsQuery } from '@/api/queries'
+import { BackupsSheet } from '@/components/app/backups-sheet'
 import { CopyButton } from '@/components/app/copy-button'
 import { NewAppDialog } from '@/components/app/new-app-dialog'
 import { NewDatabaseDialog } from '@/components/app/new-database-dialog'
@@ -11,19 +28,22 @@ import { Page, Panel } from '@/components/app/page'
 import { DeleteProjectDialog, EditProjectDialog } from '@/components/app/project-dialogs'
 import { EngineMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
-import { Button } from '@/components/ui/button'
 import {
+  DropdownContent,
   DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+  DropdownSeparator,
+  DropdownTrigger,
+  MenuItem,
+} from '@/components/fluid/dropdown'
+import { Tooltip } from '@/components/fluid/tooltip'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { timeAgo } from '@/lib/format'
 import { hasRole } from '@/lib/nav'
+import { usePreferences } from '@/lib/preferences'
 import { APP_STATUS, DATABASE_STATUS } from '@/lib/status'
 import { cn } from '@/lib/utils'
+import { ConnectionDialog } from '@/routes/_app/databases/index'
 
 type App = Schemas['App']
 type Db = Schemas['Database']
@@ -32,7 +52,6 @@ export const Route = createFileRoute('/_app/projects/$projectId')({
   loader: async ({ context, params }) => {
     void context.queryClient.prefetchQuery(appsQuery)
     void context.queryClient.prefetchQuery(databasesQuery)
-    // There is no single-project endpoint; the list is small and cached.
     const projects = await context.queryClient.ensureQueryData(projectsQuery)
     const project = projects.find((p) => p.id === params.projectId)
     if (!project) throw notFound()
@@ -68,6 +87,7 @@ function ProjectPage() {
   const apps = useQuery(appsQuery)
   const databases = useQuery(databasesQuery)
   const { data: me } = useQuery(meQuery)
+  const { isProjectPinned, togglePinnedProject } = usePreferences()
   const canEdit = me ? hasRole(me.role, 'developer') : false
   const canDelete = me ? hasRole(me.role, 'admin') : false
 
@@ -75,6 +95,8 @@ function ProjectPage() {
   const [addingDb, setAddingDb] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [connectingDb, setConnectingDb] = useState<Db | null>(null)
+  const [backingUpDb, setBackingUpDb] = useState<Db | null>(null)
 
   const project = projects.data?.find((p) => p.id === projectId) ?? null
   const projectApps = useMemo(() => (apps.data ?? []).filter((a) => a.project_id === projectId), [apps.data, projectId])
@@ -83,7 +105,6 @@ function ProjectPage() {
     [databases.data, projectId],
   )
 
-  // Deleted elsewhere while open: the cached list no longer has it.
   if (!project) {
     if (projects.isPending) return <Skeleton className="m-8 h-40" />
     return (
@@ -105,22 +126,22 @@ function ProjectPage() {
 
   const create = canEdit ? (
     <DropdownMenu>
-      <DropdownMenuTrigger render={<Button />}>
+      <DropdownTrigger render={<Button />}>
         <Plus data-icon="inline-start" />
         Create service
-        <ChevronDown data-icon="inline-end" className="opacity-60" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        <MenuEntry icon={AppWindow} title="App" hint="From GitHub, a Git URL or an image" onClick={() => setAddingApp(true)} />
-        <MenuEntry icon={Database} title="Database" hint="Postgres, MySQL, Redis and more" onClick={() => setAddingDb(true)} />
-        <DropdownMenuSeparator />
-        <MenuEntry
+        <ChevronDown data-icon="inline-end" className="opacity-70" />
+      </DropdownTrigger>
+      <DropdownContent align="end" className="w-56">
+        <MenuItem index={0} icon={AppWindow} label="App" onSelect={() => setAddingApp(true)} />
+        <MenuItem index={1} icon={Database} label="Database" onSelect={() => setAddingDb(true)} />
+        <DropdownSeparator />
+        <MenuItem
+          index={2}
           icon={LayoutGrid}
-          title="From template"
-          hint="One-click apps from the catalog"
-          onClick={() => void navigate({ to: '/catalog', search: { project: project.id } })}
+          label="From template"
+          onSelect={() => void navigate({ to: '/catalog', search: { project: project.id } })}
         />
-      </DropdownMenuContent>
+      </DropdownContent>
     </DropdownMenu>
   ) : null
 
@@ -134,26 +155,38 @@ function ProjectPage() {
       description={project.description || undefined}
       actions={
         <div className="flex items-center gap-1.5">
+          <Tooltip content={isProjectPinned(project.id) ? 'Unpin from sidebar' : 'Pin to sidebar'}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={isProjectPinned(project.id) ? 'Unpin project from sidebar' : 'Pin project to sidebar'}
+              aria-pressed={isProjectPinned(project.id)}
+              onClick={() => togglePinnedProject(project.id)}
+              className={isProjectPinned(project.id) ? 'text-primary' : undefined}
+            >
+              {isProjectPinned(project.id) ? <PinOff /> : <Pin />}
+            </Button>
+          </Tooltip>
           {canEdit ? (
             <DropdownMenu>
-              <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Project actions" />}>
+              <DropdownTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Project actions" />}>
                 <Ellipsis />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setEditing(true)}>
-                  <Pencil />
-                  Rename or describe
-                </DropdownMenuItem>
+              </DropdownTrigger>
+              <DropdownContent align="end" className="w-48">
+                <MenuItem index={0} icon={Pencil} label="Edit project" onSelect={() => setEditing(true)} />
                 {canDelete ? (
                   <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onClick={() => setDeleting(true)}>
-                      <Trash2 />
-                      Delete project
-                    </DropdownMenuItem>
+                    <DropdownSeparator />
+                    <MenuItem
+                      index={1}
+                      icon={Trash2}
+                      label="Delete project"
+                      destructive
+                      onSelect={() => setDeleting(true)}
+                    />
                   </>
                 ) : null}
-              </DropdownMenuContent>
+              </DropdownContent>
             </DropdownMenu>
           ) : null}
           {empty ? null : create}
@@ -163,7 +196,7 @@ function ProjectPage() {
       {pending ? (
         <Panel flush>
           {Array.from({ length: 3 }, (_, i) => (
-            <div key={i} className="flex items-center gap-3 border-b px-4 py-3 last:border-0">
+            <div key={i} className="flex items-center gap-3 border-b border-border/80 px-4 py-3 last:border-0">
               <Skeleton className="size-8 rounded-md" />
               <Skeleton className="h-4 w-48" />
             </div>
@@ -186,31 +219,37 @@ function ProjectPage() {
         />
       ) : (
         <div className="grid gap-6">
-          <Panel flush title="Apps" description={projectApps.length ? undefined : 'No apps yet.'}>
+          <Panel flush title="Apps">
             {projectApps.length ? (
-              <ul className="divide-y">
+              <ul className="divide-y divide-border/80">
                 {projectApps.map((app) => (
                   <AppRow key={app.id} app={app} />
                 ))}
               </ul>
             ) : canEdit ? (
               <InlineAdd onClick={() => setAddingApp(true)}>Add an app</InlineAdd>
-            ) : null}
+            ) : (
+              <p className="px-4 py-3 text-[13px] text-muted-foreground">No apps yet.</p>
+            )}
           </Panel>
-          <Panel
-            flush
-            title="Databases"
-            description={projectDbs.length ? 'Reachable from this project’s apps by the host name shown.' : 'No databases yet.'}
-          >
+          <Panel flush title="Databases">
             {projectDbs.length ? (
-              <ul className="divide-y">
+              <ul className="divide-y divide-border/80">
                 {projectDbs.map((db) => (
-                  <DbRow key={db.id} db={db} />
+                  <DbRow
+                    key={db.id}
+                    db={db}
+                    canEdit={canEdit}
+                    onConnect={() => setConnectingDb(db)}
+                    onBackups={() => setBackingUpDb(db)}
+                  />
                 ))}
               </ul>
             ) : canEdit ? (
               <InlineAdd onClick={() => setAddingDb(true)}>Add a database</InlineAdd>
-            ) : null}
+            ) : (
+              <p className="px-4 py-3 text-[13px] text-muted-foreground">No databases yet.</p>
+            )}
           </Panel>
         </div>
       )}
@@ -225,29 +264,14 @@ function ProjectPage() {
         onClose={() => setDeleting(false)}
         onDeleted={() => void navigate({ to: '/projects' })}
       />
+      <ConnectionDialog database={connectingDb} onClose={() => setConnectingDb(null)} />
+      <BackupsSheet
+        database={backingUpDb && (databases.data?.find((d) => d.id === backingUpDb.id) ?? backingUpDb)}
+        canBackup={canEdit}
+        canManage={canDelete}
+        onClose={() => setBackingUpDb(null)}
+      />
     </Page>
-  )
-}
-
-function MenuEntry({
-  icon: Icon,
-  title,
-  hint,
-  onClick,
-}: {
-  icon: typeof AppWindow
-  title: string
-  hint: string
-  onClick: () => void
-}) {
-  return (
-    <DropdownMenuItem onClick={onClick} className="items-start gap-2.5 py-2">
-      <Icon className="mt-0.5" />
-      <span>
-        <span className="block font-medium">{title}</span>
-        <span className="block text-[12px] text-muted-foreground">{hint}</span>
-      </span>
-    </DropdownMenuItem>
   )
 }
 
@@ -256,7 +280,7 @@ function InlineAdd({ onClick, children }: { onClick: () => void; children: strin
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13px] text-muted-foreground outline-none hover:bg-hover hover:text-foreground focus-visible:bg-hover"
+      className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:bg-hover"
     >
       <Plus className="size-3.5" aria-hidden="true" />
       {children}
@@ -284,33 +308,33 @@ function FirstService({
     )
   }
   const tile =
-    'flex flex-col items-start gap-3 rounded-lg bg-card p-5 text-left outline-none shadow-[0_0_0_1px_var(--border)] transition-[box-shadow] duration-150 hover:shadow-[0_0_0_1px_var(--ring)] focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)]'
+    'flex flex-col items-start gap-3 rounded-xl bg-card p-5 text-left outline-none shadow-[var(--shadow-2)] transition-[box-shadow,background-color] duration-150 hover:bg-hover hover:shadow-[0_0_0_1px_var(--ring)] focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)]'
   return (
     <div className="grid gap-4">
       <div>
-        <h2 className="font-medium">Add the first service</h2>
-        <p className="text-[13px] text-muted-foreground">Everything in this project shares a private network.</p>
+        <h2 className="text-[15px] font-medium">Add your first service</h2>
+        <p className="text-[13px] text-muted-foreground">Apps and databases here share a private network.</p>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
         <button type="button" onClick={onApp} className={tile}>
           <AppWindow className="size-5 text-muted-foreground" aria-hidden="true" />
           <span>
-            <span className="block font-medium">App</span>
-            <span className="block text-[13px] text-muted-foreground">Deploy from GitHub, a Git URL or a Docker image.</span>
+            <span className="block font-medium text-foreground">App</span>
+            <span className="mt-0.5 block text-[12.5px] text-muted-foreground">GitHub repo, Git URL, or Docker image.</span>
           </span>
         </button>
         <button type="button" onClick={onDb} className={tile}>
           <Database className="size-5 text-muted-foreground" aria-hidden="true" />
           <span>
-            <span className="block font-medium">Database</span>
-            <span className="block text-[13px] text-muted-foreground">Postgres, MySQL, MariaDB, Redis or MongoDB with backups.</span>
+            <span className="block font-medium text-foreground">Database</span>
+            <span className="mt-0.5 block text-[12.5px] text-muted-foreground">Postgres, MySQL, MariaDB, Redis, or MongoDB.</span>
           </span>
         </button>
         <Link to="/catalog" search={{ project: projectId }} className={tile}>
           <LayoutGrid className="size-5 text-muted-foreground" aria-hidden="true" />
           <span>
-            <span className="block font-medium">Template</span>
-            <span className="block text-[13px] text-muted-foreground">Ready-made apps like n8n or Uptime Kuma.</span>
+            <span className="block font-medium text-foreground">Template</span>
+            <span className="mt-0.5 block text-[12.5px] text-muted-foreground">One-click self-hosted apps from the catalog.</span>
           </span>
         </Link>
       </div>
@@ -320,7 +344,7 @@ function FirstService({
 
 function ServiceIcon({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={cn('grid size-8 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground', className)}>
+    <span className={cn('grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground', className)}>
       {children}
     </span>
   )
@@ -338,24 +362,24 @@ function AppRow({ app }: { app: App }) {
       <Link
         to="/apps/$appId"
         params={{ appId: app.id }}
-        className="group flex items-center gap-3 px-4 py-3 outline-none hover:bg-hover focus-visible:bg-hover"
+        className="group flex items-center gap-3 px-4 py-3 transition-colors outline-none hover:bg-hover focus-visible:bg-hover"
       >
         <ServiceIcon>
           <AppWindow className="size-4" aria-hidden="true" />
         </ServiceIcon>
         <div className="min-w-0 flex-1">
-          <div className="truncate font-medium">{app.name}</div>
-          <div className="flex items-center gap-1.5 text-[12.5px] text-muted-foreground">
+          <div className="truncate font-medium text-foreground">{app.name}</div>
+          <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
             <Source className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate font-mono text-[12px]">{source}</span>
+            <span className="truncate font-mono">{source}</span>
           </div>
         </div>
-        <span className="hidden max-w-56 truncate text-[13px] text-muted-foreground md:block">
+        <span className="hidden max-w-56 truncate font-mono text-[12px] text-muted-foreground md:block">
           {app.domains[0] ?? ''}
           {app.domains.length > 1 ? ` +${app.domains.length - 1}` : ''}
         </span>
-        <span className="hidden w-24 text-right text-[13px] text-muted-foreground lg:block">{timeAgo(app.updated_at)}</span>
-        <Status tone={look.tone} className="w-28 justify-end">
+        <span className="hidden w-24 text-right text-[12.5px] text-muted-foreground lg:block">{timeAgo(app.updated_at)}</span>
+        <Status tone={look.tone} className="w-24 justify-end">
           {look.label}
         </Status>
         <ChevronRight className="size-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5" aria-hidden="true" />
@@ -364,7 +388,17 @@ function AppRow({ app }: { app: App }) {
   )
 }
 
-function DbRow({ db }: { db: Db }) {
+function DbRow({
+  db,
+  canEdit,
+  onConnect,
+  onBackups,
+}: {
+  db: Db
+  canEdit: boolean
+  onConnect: () => void
+  onBackups: () => void
+}) {
   const look = DATABASE_STATUS[db.status]
   const address = `${db.host}:${db.port}`
   return (
@@ -373,25 +407,40 @@ function DbRow({ db }: { db: Db }) {
         <EngineMark engine={db.engine} className="size-4" />
       </ServiceIcon>
       <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">{db.name}</div>
-        <div className="flex items-center gap-1 text-[12.5px] text-muted-foreground">
-          <span className="truncate font-mono text-[12px]">{address}</span>
+        <div className="truncate font-medium text-foreground">{db.name}</div>
+        <div className="flex items-center gap-1 text-[12px] text-muted-foreground">
+          <span className="truncate font-mono">{address}</span>
           <CopyButton value={address} label="Copy address" />
         </div>
       </div>
-      <span className="hidden text-[13px] text-muted-foreground md:block">
+      <span className="hidden text-[12.5px] text-muted-foreground md:block">
         {db.engine} {db.version}
       </span>
-      <Status tone={look.tone} className="w-28 justify-end">
+      <Status tone={look.tone} className="w-24 justify-end">
         {look.label}
       </Status>
-      <Link
-        to="/databases"
-        className="text-[13px] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        aria-label={`Manage ${db.name}`}
-      >
-        Manage
-      </Link>
+      {canEdit ? (
+        <div className="flex shrink-0 items-center gap-1">
+          <Tooltip content="Connection details">
+            <Button variant="ghost" size="icon-sm" aria-label={`Connection details for ${db.name}`} onClick={onConnect}>
+              <KeyRound />
+            </Button>
+          </Tooltip>
+          <Tooltip content="Backups">
+            <Button variant="ghost" size="icon-sm" aria-label={`Backups for ${db.name}`} onClick={onBackups}>
+              <Archive />
+            </Button>
+          </Tooltip>
+        </div>
+      ) : (
+        <Link
+          to="/databases"
+          className="text-[12.5px] text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          aria-label={`Manage ${db.name}`}
+        >
+          Manage
+        </Link>
+      )}
     </li>
   )
 }

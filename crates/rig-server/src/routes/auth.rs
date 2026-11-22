@@ -8,7 +8,7 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use rig_api::{
     ApiToken, AuditEntry, CreateApiTokenRequest, CreatedApiToken, ErrorBody, LoginRequest, Me,
-    Organization, Role, SetupRequest, SetupStatus, User,
+    Organization, PublicBranding, Role, SetupRequest, SetupStatus, User,
 };
 use sqlx::Row;
 use std::net::SocketAddr;
@@ -110,9 +110,28 @@ pub fn slugify(name: &str) -> String {
 #[utoipa::path(get, path = "/api/v1/setup", tag = "auth",
     responses((status = 200, body = SetupStatus)))]
 async fn setup_status(State(state): State<AppState>) -> ApiResult<Json<SetupStatus>> {
+    let setup_complete = setup::is_complete(&state).await?;
+    let branding = if setup_complete {
+        sqlx::query(
+            "SELECT name, logo_url, accent_color, env_label, env_color
+             FROM organizations ORDER BY created_at LIMIT 1",
+        )
+        .fetch_optional(&state.db)
+        .await?
+        .map(|row| PublicBranding {
+            org_name: row.get("name"),
+            logo_url: row.get("logo_url"),
+            accent_color: row.get("accent_color"),
+            env_label: row.get("env_label"),
+            env_color: row.get("env_color"),
+        })
+    } else {
+        None
+    };
     Ok(Json(SetupStatus {
-        setup_complete: setup::is_complete(&state).await?,
+        setup_complete,
         version: env!("CARGO_PKG_VERSION").into(),
+        branding,
     }))
 }
 
@@ -221,11 +240,16 @@ async fn complete_setup(
                 id: user_id,
                 email,
                 name,
+                avatar_url: None,
             },
             org: Organization {
                 id: org_id,
                 name: org_name,
                 slug,
+                logo_url: None,
+                accent_color: "emerald".into(),
+                env_label: None,
+                env_color: None,
             },
             role: Role::Owner,
             csrf_token,
@@ -252,7 +276,7 @@ async fn login(
     auth::check_rate(&state, &email_key, MAX_LOGIN_FAILURES_PER_EMAIL).await?;
 
     let row = sqlx::query(
-        "SELECT u.id, u.name, u.password_hash, u.disabled, u.totp_secret
+        "SELECT u.id, u.name, u.avatar_url, u.password_hash, u.disabled, u.totp_secret
          FROM users u WHERE u.email = ?",
     )
     .bind(&email)
@@ -320,7 +344,7 @@ async fn login(
     }
     auth::clear_failures(&state, &email_key).await?;
     let m = sqlx::query(
-        "SELECT o.id, o.name, o.slug, m.role FROM memberships m
+        "SELECT o.id, o.name, o.slug, o.logo_url, o.accent_color, o.env_label, o.env_color, m.role FROM memberships m
          JOIN organizations o ON o.id = m.org_id
          WHERE m.user_id = ? ORDER BY m.created_at LIMIT 1",
     )
@@ -334,6 +358,10 @@ async fn login(
         id: m.get("id"),
         name: m.get("name"),
         slug: m.get("slug"),
+        logo_url: m.get("logo_url"),
+        accent_color: m.get("accent_color"),
+        env_label: m.get("env_label"),
+        env_color: m.get("env_color"),
     };
     let role = Role::parse(m.get("role"))
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("bad role")))?;
@@ -366,6 +394,7 @@ async fn login(
                 id: user_id,
                 email,
                 name: row.get("name"),
+                avatar_url: row.get("avatar_url"),
             },
             org,
             role,
@@ -398,7 +427,8 @@ async fn logout(
     responses((status = 200, body = Me), (status = 401, body = ErrorBody)))]
 async fn me(State(state): State<AppState>, auth: Auth<Viewer>) -> ApiResult<Json<Me>> {
     let row = sqlx::query(
-        "SELECT u.name AS user_name, o.name AS org_name, o.slug
+        "SELECT u.name AS user_name, u.avatar_url,
+                o.name AS org_name, o.slug, o.logo_url, o.accent_color, o.env_label, o.env_color
          FROM users u, organizations o WHERE u.id = ? AND o.id = ?",
     )
     .bind(&auth.user_id)
@@ -410,11 +440,16 @@ async fn me(State(state): State<AppState>, auth: Auth<Viewer>) -> ApiResult<Json
             id: auth.user_id,
             email: auth.email,
             name: row.get("user_name"),
+            avatar_url: row.get("avatar_url"),
         },
         org: Organization {
             id: auth.org_id,
             name: row.get("org_name"),
             slug: row.get("slug"),
+            logo_url: row.get("logo_url"),
+            accent_color: row.get("accent_color"),
+            env_label: row.get("env_label"),
+            env_color: row.get("env_color"),
         },
         role: auth.role,
         csrf_token: auth.csrf_token.unwrap_or_default(),

@@ -1,4 +1,3 @@
-import { BrandMark } from '@/components/app/service-icons'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import { ExternalLink, GitBranch, Lock, Trash2 } from 'lucide-react'
@@ -8,7 +7,12 @@ import { api, unwrap, type Schemas } from '@/api/client'
 import { githubQuery, githubReposQuery, meQuery } from '@/api/queries'
 import { CopyButton } from '@/components/app/copy-button'
 import { Page, Panel } from '@/components/app/page'
+import { BrandMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState } from '@/components/app/state'
+import { Banner, BannerDescription, BannerTitle } from '@/components/fluid/banner'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { InputCopy } from '@/components/fluid/input-copy'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,8 +24,6 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
 import { timeAgo } from '@/lib/format'
@@ -41,7 +43,8 @@ function GithubPage() {
   return (
     <Page
       title="GitHub"
-      description="Connect a GitHub App so Rig can clone private repositories and deploy on every push."
+      description="Clone private repositories and deploy automatically on push."
+      className="max-w-4xl"
     >
       {status.isPending ? (
         <Panel>
@@ -74,7 +77,6 @@ function Connect({ admin }: { admin: boolean }) {
         }),
       ),
     onSuccess: (m) => {
-      // GitHub's manifest flow is a plain form POST from the browser.
       if (!form.current || !manifestInput.current) return
       form.current.action = m.post_url
       manifestInput.current.value = m.manifest
@@ -88,27 +90,27 @@ function Connect({ admin }: { admin: boolean }) {
   }
 
   return (
-    <Panel title="Connect GitHub" description="One App for the organization. Every project can then pick its repositories.">
-      <div className="grid gap-6 md:grid-cols-[1fr_minmax(0,22rem)] md:gap-10">
+    <Panel title="Connect GitHub App" description="One GitHub App shared across all projects.">
+      <div className="grid gap-6 md:grid-cols-[1fr_minmax(0,21rem)] md:gap-10">
         <ol className="grid gap-4 text-[13px]">
           {[
-            ['Create the App', 'Rig registers a private GitHub App for you. It asks only to read code and receive push events.'],
-            ['Install it', 'Choose which repositories or organizations the App can see. You can change this at any time.'],
-            ['Pick a repository', 'New apps list those repositories, and every push to the chosen branch redeploys.'],
+            ['Create the App', 'Registers a private GitHub App with read-only code and push webhook permissions.'],
+            ['Install it', 'Pick which repositories or organizations the App can access.'],
+            ['Deploy on push', 'New apps list those repos and redeploy automatically on push.'],
           ].map(([title, body], i) => (
             <li key={title} className="flex gap-3">
               <span className="grid size-6 shrink-0 place-items-center rounded-full bg-muted font-mono text-[12px] text-muted-foreground tabular-nums">
                 {i + 1}
               </span>
               <span>
-                <span className="block font-medium">{title}</span>
+                <span className="block font-medium text-foreground">{title}</span>
                 <span className="block text-muted-foreground">{body}</span>
               </span>
             </li>
           ))}
         </ol>
         {admin ? (
-          <form onSubmit={submit} className="md:border-l md:pl-10">
+          <form onSubmit={submit} className="md:border-l md:border-border/80 md:pl-8">
             <FieldGroup>
               <Field>
                 <FieldLabel htmlFor="gh-org">Organization (optional)</FieldLabel>
@@ -116,10 +118,10 @@ function Connect({ admin }: { admin: boolean }) {
                   id="gh-org"
                   value={organization}
                   onChange={(e) => setOrganization(e.target.value)}
-                  placeholder="Leave empty for your own account"
+                  placeholder="Personal account if empty"
                   autoComplete="off"
                 />
-                <FieldDescription>The GitHub organization that will own the App.</FieldDescription>
+                <FieldDescription>GitHub org that will own the App.</FieldDescription>
               </Field>
               <Button type="submit" loading={start.isPending}>
                 <BrandMark name="github" data-icon="inline-start" />
@@ -128,8 +130,8 @@ function Connect({ admin }: { admin: boolean }) {
             </FieldGroup>
           </form>
         ) : (
-          <p className="text-[13px] text-muted-foreground md:border-l md:pl-10">
-            Only an admin can connect GitHub. Until then, public repositories deploy through a Git URL.
+          <p className="text-[13px] text-muted-foreground md:border-l md:border-border/80 md:pl-8">
+            Only an admin can connect GitHub. Public repositories still work via Git URL.
           </p>
         )}
       </div>
@@ -177,15 +179,14 @@ function Connected({ status, admin }: { status: GithubStatus; admin: boolean }) 
           </div>
         }
       >
-        <p className="text-sm text-muted-foreground">
-          Apps built from a repository this App is installed on clone with a short-lived token. Turn on{' '}
-          <span className="font-medium text-foreground">Deploy on push</span> in an app's settings to deploy
-          every new commit on its branch.
+        <p className="text-[13px] text-muted-foreground">
+          Private repositories clone with short-lived installation tokens. Enable{' '}
+          <span className="font-medium text-foreground">Deploy on push</span> in an app&apos;s Settings tab.
         </p>
       </Panel>
 
       {admin && (
-        <Panel title="Repositories" description="What the App can read right now." flush>
+        <Panel title="Repositories" flush>
           {repos.isPending ? (
             <div className="space-y-2 p-4">
               <Skeleton className="h-8" />
@@ -196,19 +197,16 @@ function Connected({ status, admin }: { status: GithubStatus; admin: boolean }) 
               <ErrorState error={repos.error} onRetry={() => repos.refetch()} />
             </div>
           ) : repos.data.length === 0 ? (
-            <EmptyState
-              icon={GitBranch}
-              title="Not installed anywhere yet"
-            >
+            <EmptyState icon={GitBranch} title="No repositories installed">
               Install the App on the repositories you want to deploy.
             </EmptyState>
           ) : (
-            <ul className="divide-y">
+            <ul className="divide-y divide-border/80">
               {repos.data.map((r) => (
-                <li key={r.full_name} className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{r.full_name}</span>
+                <li key={r.full_name} className="flex min-w-0 items-center gap-3 px-4 py-2.5 text-[13px]">
+                  <span className="min-w-0 flex-1 truncate font-medium text-foreground">{r.full_name}</span>
                   {r.private && <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-label="Private" />}
-                  <span className="hidden shrink-0 text-muted-foreground sm:inline">{r.default_branch}</span>
+                  <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">{r.default_branch}</span>
                   <CopyButton value={r.clone_url} label="Copy clone URL" />
                 </li>
               ))}
@@ -222,8 +220,7 @@ function Connected({ status, admin }: { status: GithubStatus; admin: boolean }) 
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect GitHub?</AlertDialogTitle>
             <AlertDialogDescription>
-              Rig forgets the App's keys. Private repositories stop cloning and pushes stop deploying. The App
-              stays on GitHub until you delete it there.
+              Rig removes the App&apos;s keys. Private repos stop cloning and push deploys stop. Delete the App on GitHub too if no longer needed.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -242,23 +239,18 @@ function Connected({ status, admin }: { status: GithubStatus; admin: boolean }) 
 function Polling({ status }: { status: GithubStatus }) {
   const webhook = typeof window === 'undefined' ? status.webhook_url : window.location.origin + status.webhook_url
   return (
-    <Panel title="When GitHub can't reach this server">
-      <div className="space-y-3 text-sm text-muted-foreground">
-        <p>
-          {status.poll_interval > 0
-            ? `Rig also checks each deploy-on-push branch every ${status.poll_interval} seconds, so servers on a private network still deploy new commits.`
-            : 'Branch polling is off on this server (--poll-interval 0).'}
-        </p>
-        {status.app && (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0">Webhook</span>
-            <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">
-              {webhook}
-            </code>
-            <CopyButton value={webhook} label="Copy webhook URL" />
-          </div>
-        )}
-      </div>
-    </Panel>
+    <Banner status="info" contrast="low">
+      <BannerTitle>Private network fallback</BannerTitle>
+      <BannerDescription>
+        {status.poll_interval > 0
+          ? `Rig polls deploy-on-push branches every ${status.poll_interval}s when GitHub webhooks cannot reach this server.`
+          : 'Branch polling is disabled on this server (--poll-interval 0).'}
+      </BannerDescription>
+      {status.app ? (
+        <div className="mt-2.5 max-w-lg">
+          <InputCopy value={webhook} size="compact" />
+        </div>
+      ) : null}
+    </Banner>
   )
 }

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { backupsQuery } from '@/api/queries'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
+import { Tooltip } from '@/components/fluid/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,7 +19,6 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { bytes, fullDate, timeAgo } from '@/lib/format'
 import { BACKUP_STATUS } from '@/lib/status'
 
@@ -66,11 +66,11 @@ function Body({ database, canBackup, canManage }: { database: Database; canBacku
 
   return (
     <>
-      <SheetHeader className="border-b pr-12">
+      <SheetHeader className="border-b border-border/80 pr-12">
         <SheetTitle>Backups of {database.name}</SheetTitle>
         <SheetDescription>
-          Stored on this server under the Rig data directory. Download them to keep a copy somewhere else.
-          {database.engine === 'redis' ? ' Redis backups can be downloaded but not yet restored from here.' : null}
+          Stored on this server. Download copies to keep them off-host.
+          {database.engine === 'redis' ? ' Redis backups are download-only.' : null}
         </SheetDescription>
         {canBackup ? (
           <div className="flex items-center gap-3 pt-2">
@@ -78,7 +78,7 @@ function Body({ database, canBackup, canManage }: { database: Database; canBacku
               {running || take.isPending ? <Spinner data-icon="inline-start" /> : <Archive data-icon="inline-start" />}
               {running ? 'Backing up' : 'Back up now'}
             </Button>
-            {stopped ? <span className="text-[0.8125rem] text-muted-foreground">Start the database first.</span> : null}
+            {stopped ? <span className="text-[12.5px] text-muted-foreground">Start the database first.</span> : null}
           </div>
         ) : null}
       </SheetHeader>
@@ -97,11 +97,11 @@ function Body({ database, canBackup, canManage }: { database: Database; canBacku
         ) : backups.data.length === 0 ? (
           <div className="p-4">
             <EmptyState icon={Archive} title="No backups yet">
-              {canBackup ? 'Take one before changes you might want to undo.' : 'An admin or developer can take one.'}
+              {canBackup ? 'Take a snapshot before risky changes.' : 'An admin or developer can take a backup.'}
             </EmptyState>
           </div>
         ) : (
-          <ul className="divide-y">
+          <ul className="divide-y divide-border/80">
             {backups.data.map((b) => (
               <BackupRow key={b.id} backup={b} canManage={canManage} onAsk={setPending} />
             ))}
@@ -132,11 +132,11 @@ function BackupRow({
             {timeAgo(b.created_at)}
           </span>
           {b.size_bytes != null ? (
-            <span className="text-[0.8125rem] text-muted-foreground tabular-nums">{bytes(b.size_bytes)}</span>
+            <span className="text-[12.5px] text-muted-foreground tabular-nums">{bytes(b.size_bytes)}</span>
           ) : null}
         </div>
         {b.status === 'failed' && b.error ? (
-          <p className="mt-0.5 line-clamp-2 text-[0.8125rem] text-destructive" title={b.error}>
+          <p className="mt-0.5 line-clamp-2 text-[12.5px] text-destructive" title={b.error}>
             {b.error}
           </p>
         ) : (
@@ -149,7 +149,7 @@ function BackupRow({
         <div className="flex shrink-0 items-center gap-0.5">
           {b.status === 'ok' ? (
             <>
-              <Action label="Download">
+              <Tooltip content="Download">
                 <a
                   href={`/api/v1/backups/${b.id}/download`}
                   download
@@ -158,9 +158,9 @@ function BackupRow({
                 >
                   <Download />
                 </a>
-              </Action>
+              </Tooltip>
               {b.restorable ? (
-                <Action label="Restore">
+                <Tooltip content="Restore">
                   <Button
                     variant="ghost"
                     size="icon-sm"
@@ -169,12 +169,12 @@ function BackupRow({
                   >
                     <RotateCcw />
                   </Button>
-                </Action>
+                </Tooltip>
               ) : null}
             </>
           ) : null}
           {b.status !== 'running' ? (
-            <Action label="Delete">
+            <Tooltip content="Delete">
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -183,20 +183,11 @@ function BackupRow({
               >
                 <Trash2 />
               </Button>
-            </Action>
+            </Tooltip>
           ) : null}
         </div>
       ) : null}
     </li>
-  )
-}
-
-function Action({ label, children }: { label: string; children: React.ReactElement }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger render={children} />
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
   )
 }
 
@@ -235,8 +226,8 @@ function ConfirmDialog({
           <AlertDialogTitle>{isRestore ? `Restore ${database.name}?` : 'Delete this backup?'}</AlertDialogTitle>
           <AlertDialogDescription>
             {isRestore
-              ? `Everything in ${database.name} is replaced with the backup from ${when}. Changes made since then are lost. Take a fresh backup first if you might need them.`
-              : `The backup from ${when} is erased from the server. This cannot be undone.`}
+              ? `Everything in ${database.name} will be replaced with the backup from ${when}. Changes made since then will be lost.`
+              : `The backup from ${when} will be permanently deleted from the server.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

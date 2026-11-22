@@ -3,7 +3,6 @@ import { useState, type FormEvent } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { databaseEnginesQuery, databasesQuery, projectsQuery } from '@/api/queries'
 import { EngineMark } from '@/components/app/service-icons'
-import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -11,10 +10,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 
@@ -44,8 +44,6 @@ export function NewDatabaseDialog({
   const projectName = projects.find((p) => p.id === project)?.name
   const versions = engines.data?.find((e) => e.engine === engine)?.versions ?? []
   const effectiveVersion = version && versions.includes(version) ? version : versions[0]
-  const projectItems = projects.map((p) => ({ value: p.id, label: p.name }))
-  const versionItems = versions.map((v) => ({ value: v, label: v }))
 
   const create = useMutation({
     mutationFn: (body: Schemas['CreateDatabaseRequest']) => unwrap(api.POST('/api/v1/databases', { body })),
@@ -65,13 +63,12 @@ export function NewDatabaseDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent size="lg">
         <form onSubmit={submit} className="contents">
           <DialogHeader>
             <DialogTitle>New database</DialogTitle>
             <DialogDescription>
-              {fixedProject && projectName ? `Added to ${projectName}. ` : ''}Rig generates the user and a strong
-              password; you can read them from the connection details afterwards.
+              {fixedProject && projectName ? `In ${projectName}. ` : ''}Credentials are generated automatically.
             </DialogDescription>
           </DialogHeader>
           <FieldGroup>
@@ -112,18 +109,16 @@ export function NewDatabaseDialog({
               <Field>
                 <FieldLabel htmlFor="db-name">Name</FieldLabel>
                 <Input id="db-name" name="name" required maxLength={64} placeholder={`${engine}-main`} autoFocus autoComplete="off" spellCheck={false} />
-                <FieldDescription>Also the hostname apps in the project connect to.</FieldDescription>
+                <FieldDescription>Also used as the internal hostname.</FieldDescription>
               </Field>
               <Field>
                 <FieldLabel htmlFor="db-version">Version</FieldLabel>
-                <Select items={versionItems} value={effectiveVersion} onValueChange={(v) => setVersion(v as string)}>
-                  <SelectTrigger id="db-version" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
+                <Select value={effectiveVersion ?? ''} onValueChange={(v) => setVersion(v)}>
+                  <SelectTrigger id="db-version" className="w-full" />
                   <SelectContent>
-                    {versionItems.map((v) => (
-                      <SelectItem key={v.value} value={v.value}>
-                        {v.label}
+                    {versions.map((v, i) => (
+                      <SelectItem key={v} index={i} value={v}>
+                        {v}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -136,14 +131,12 @@ export function NewDatabaseDialog({
                 {projects.length === 0 ? (
                   <FieldDescription>Create a project first; databases belong to one.</FieldDescription>
                 ) : (
-                  <Select items={projectItems} value={project} onValueChange={(v) => setProjectId(v as string)}>
-                    <SelectTrigger id="db-project" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
+                  <Select value={project ?? ''} onValueChange={(v) => setProjectId(v)}>
+                    <SelectTrigger id="db-project" className="w-full" />
                     <SelectContent>
-                      {projectItems.map((p) => (
-                        <SelectItem key={p.value} value={p.value}>
-                          {p.label}
+                      {projects.map((p, i) => (
+                        <SelectItem key={p.id} index={i} value={p.id}>
+                          {p.name}
                         </SelectItem>
                       ))}
                     </SelectContent>

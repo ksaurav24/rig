@@ -4,9 +4,24 @@ import { KeyRound, Trash2, UserPlus } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { membersQuery, meQuery } from '@/api/queries'
-import { CopyButton } from '@/components/app/copy-button'
 import { Page, Panel } from '@/components/app/page'
 import { ErrorState } from '@/components/app/state'
+import { UserAvatar } from '@/components/app/user-avatar'
+import { Badge } from '@/components/fluid/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/fluid/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
+import { InputCopy } from '@/components/fluid/input-copy'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
+import { Tooltip } from '@/components/fluid/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,23 +32,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { timeAgo } from '@/lib/format'
 import { hasRole, ROLES } from '@/lib/nav'
 
@@ -55,20 +56,19 @@ function TeamPage() {
   const [handover, setHandover] = useState<Handover | null>(null)
   const [confirm, setConfirm] = useState<Confirm | null>(null)
 
-  // Mirrors the server's rule; the server still enforces it.
   const canManage = (m: Member) =>
     !!me && m.user_id !== me.user.id && (me.role === 'owner' || !hasRole(m.role, 'admin'))
 
   return (
     <Page
       title="Team"
-      description="People who can sign in to this Rig. Rig sends no email: adding someone gives you a temporary password to pass on."
       actions={
         <Button onClick={() => setAdding(true)}>
           <UserPlus data-icon="inline-start" />
           Add member
         </Button>
       }
+      className="max-w-4xl"
     >
       {members.isPending ? (
         <Panel>
@@ -92,20 +92,33 @@ function TeamPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {members.data.map((m) => (
-                <TableRow key={m.user_id}>
+              {members.data.map((m, index) => (
+                <TableRow key={m.user_id} index={index}>
                   <TableCell className="pl-4">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-medium">{m.name}</span>
-                      {m.user_id === me?.user.id ? <Badge variant="outline">You</Badge> : null}
+                    <div className="flex items-center gap-3">
+                      <UserAvatar
+                        name={m.name}
+                        avatarUrl={m.avatar_url}
+                        className="size-8 shrink-0 rounded-lg"
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate font-medium text-foreground">{m.name}</span>
+                          {m.user_id === me?.user.id ? (
+                            <Badge variant="solid" color="emerald" size="compact">
+                              You
+                            </Badge>
+                          ) : null}
+                        </div>
+                        <div className="truncate text-[12.5px] text-muted-foreground">{m.email}</div>
+                      </div>
                     </div>
-                    <div className="truncate text-[0.8125rem] text-muted-foreground">{m.email}</div>
                   </TableCell>
                   <TableCell>
                     {canManage(m) && me ? (
                       <RoleSelect member={m} myRole={me.role} />
                     ) : (
-                      <Badge variant="secondary" className="capitalize">
+                      <Badge variant="solid" color="gray" size="compact" className="capitalize">
                         {m.role}
                       </Badge>
                     )}
@@ -115,38 +128,28 @@ function TeamPage() {
                   </TableCell>
                   <TableCell className="pr-4 text-right whitespace-nowrap">
                     {canManage(m) ? (
-                      <>
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                aria-label={`Reset password for ${m.name}`}
-                                onClick={() => setConfirm({ kind: 'reset', member: m })}
-                              />
-                            }
+                      <div className="inline-flex items-center gap-0.5">
+                        <Tooltip content="Reset password">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Reset password for ${m.name}`}
+                            onClick={() => setConfirm({ kind: 'reset', member: m })}
                           >
                             <KeyRound />
-                          </TooltipTrigger>
-                          <TooltipContent>Reset password</TooltipContent>
+                          </Button>
                         </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                aria-label={`Remove ${m.name}`}
-                                onClick={() => setConfirm({ kind: 'remove', member: m })}
-                              />
-                            }
+                        <Tooltip content="Remove member">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Remove ${m.name}`}
+                            onClick={() => setConfirm({ kind: 'remove', member: m })}
                           >
                             <Trash2 />
-                          </TooltipTrigger>
-                          <TooltipContent>Remove member</TooltipContent>
+                          </Button>
                         </Tooltip>
-                      </>
+                      </div>
                     ) : null}
                   </TableCell>
                 </TableRow>
@@ -172,17 +175,19 @@ function RoleSelect({ member, myRole }: { member: Member; myRole: Role }) {
     meta: { success: `${member.name}'s role updated` },
     onSettled: () => queryClient.invalidateQueries({ queryKey: membersQuery.queryKey }),
   })
-  // Show the choice at once; a failure refetches and snaps back.
   const value = update.isPending ? update.variables : member.role
 
   return (
-    <Select items={allowed} value={value} onValueChange={(v) => v !== member.role && update.mutate(v as Role)}>
-      <SelectTrigger size="sm" className="w-32" aria-label={`Role for ${member.name}`} disabled={update.isPending}>
-        <SelectValue />
-      </SelectTrigger>
+    <Select
+      size="compact"
+      value={value}
+      disabled={update.isPending}
+      onValueChange={(v) => v !== member.role && update.mutate(v as Role)}
+    >
+      <SelectTrigger className="w-32" aria-label={`Role for ${member.name}`} />
       <SelectContent>
-        {allowed.map((r) => (
-          <SelectItem key={r.value} value={r.value}>
+        {allowed.map((r, i) => (
+          <SelectItem key={r.value} index={i} value={r.value}>
             {r.label}
           </SelectItem>
         ))}
@@ -223,11 +228,11 @@ function AddMemberDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent size="sm">
         <form onSubmit={submit} className="contents">
           <DialogHeader>
             <DialogTitle>Add member</DialogTitle>
-            <DialogDescription>You get a temporary password to pass on. They can change it under Account.</DialogDescription>
+            <DialogDescription>Rig generates a temporary password to share with them.</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
@@ -237,17 +242,15 @@ function AddMemberDialog({
             <Field>
               <FieldLabel htmlFor="member-email">Email</FieldLabel>
               <Input id="member-email" name="email" type="email" required maxLength={254} autoComplete="off" />
-              <FieldDescription>Used to sign in. Rig never sends mail to it.</FieldDescription>
+              <FieldDescription>Sign-in identifier only; no email is sent.</FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="member-role">Role</FieldLabel>
-              <Select items={allowed} value={role} onValueChange={(v) => setRole(v as Role)}>
-                <SelectTrigger id="member-role" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={role} onValueChange={(v) => setRole(v as Role)}>
+                <SelectTrigger id="member-role" className="w-full" />
                 <SelectContent>
-                  {allowed.map((r) => (
-                    <SelectItem key={r.value} value={r.value}>
+                  {allowed.map((r, i) => (
+                    <SelectItem key={r.value} index={i} value={r.value}>
                       {r.label}
                     </SelectItem>
                   ))}
@@ -274,20 +277,14 @@ function AddMemberDialog({
 function HandoverDialog({ handover, onClose }: { handover: Handover | null; onClose: () => void }) {
   return (
     <Dialog open={handover !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent>
+      <DialogContent size="sm">
         <DialogHeader>
-          <DialogTitle>Pass on this password</DialogTitle>
+          <DialogTitle>Share temporary password</DialogTitle>
           <DialogDescription>
-            This is the one time it is shown. {handover?.member.name} signs in at {window.location.origin} with{' '}
-            {handover?.member.email}.
+            Shown once. {handover?.member.name} signs in at {window.location.origin} with {handover?.member.email}.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-1 rounded-md border bg-muted/50 py-1 pr-1 pl-3">
-          <code className="min-w-0 flex-1 overflow-x-auto py-1 text-[0.8125rem] whitespace-nowrap">
-            {handover?.temporary_password}
-          </code>
-          <CopyButton value={handover?.temporary_password ?? ''} label="Copy password" />
-        </div>
+        <InputCopy value={handover?.temporary_password ?? ''} />
         <DialogFooter>
           <Button onClick={onClose}>I have copied it</Button>
         </DialogFooter>
@@ -333,8 +330,8 @@ function ConfirmDialog({
           <AlertDialogTitle>{removing ? `Remove ${name}?` : `Reset ${name}'s password?`}</AlertDialogTitle>
           <AlertDialogDescription>
             {removing
-              ? 'They are signed out and their access tokens stop working immediately. Anything they deployed stays.'
-              : 'Their current password stops working and they are signed out everywhere. You get a new temporary password to pass on.'}
+              ? 'Signs them out immediately and revokes their access tokens. Deployed apps remain unaffected.'
+              : 'Invalidates their current password and active sessions, generating a new temporary password.'}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

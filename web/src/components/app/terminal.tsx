@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { Status } from '@/components/app/state'
 import { Button } from '@/components/ui/button'
+import { usePreferences } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
 
 type Phase = 'connecting' | 'open' | 'closed'
@@ -57,6 +58,9 @@ function currentTheme(): ITheme {
  */
 export default function Terminal({ appId, className }: { appId: string; className?: string }) {
   const host = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Xterm | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+  const { prefs } = usePreferences()
   const [phase, setPhase] = useState<Phase>('connecting')
   const [reason, setReason] = useState('')
   const [attempt, setAttempt] = useState(0)
@@ -70,12 +74,14 @@ export default function Terminal({ appId, className }: { appId: string; classNam
     const term = new Xterm({
       cursorBlink: true,
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono') || 'monospace',
-      fontSize: 13,
+      fontSize: prefs.logFontSize,
       lineHeight: 1.25,
       scrollback: 5000,
       theme: currentTheme(),
     })
     const fit = new FitAddon()
+    termRef.current = term
+    fitRef.current = fit
     term.loadAddon(fit)
     term.open(el)
     fit.fit()
@@ -134,12 +140,21 @@ export default function Terminal({ appId, className }: { appId: string; classNam
       socket.onclose = null
       socket.close()
       term.dispose()
+      termRef.current = null
+      fitRef.current = null
     }
   }, [appId, attempt])
 
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.fontSize = prefs.logFontSize
+    fitRef.current?.fit()
+  }, [prefs.logFontSize])
+
   return (
-    <div className={cn('flex min-h-0 flex-col overflow-hidden rounded-lg border bg-surface', className)}>
-      <div className="flex h-9 shrink-0 items-center gap-3 border-b bg-card pr-1 pl-3">
+    <div className={cn('flex min-h-0 flex-col overflow-hidden rounded-xl bg-surface shadow-[var(--shadow-2)]', className)}>
+      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-border/80 bg-card pr-2 pl-3">
         <div className="min-w-0 flex-1 truncate text-[0.8125rem] text-muted-foreground" aria-live="polite">
           {phase === 'open' ? (
             <Status tone="ok">Connected</Status>

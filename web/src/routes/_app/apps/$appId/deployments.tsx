@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { Rocket, Undo2 } from 'lucide-react'
+import { Play, Undo2 } from 'lucide-react'
 import { useEffect } from 'react'
 
 import { api, type Schemas, unwrap } from '@/api/client'
@@ -8,6 +8,7 @@ import { deploymentsQuery, meQuery } from '@/api/queries'
 import { LogViewer } from '@/components/app/log-viewer'
 import { Panel } from '@/components/app/page'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
+import { Banner, BannerDescription } from '@/components/fluid/banner'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '@/components/ui/spinner'
@@ -50,23 +51,23 @@ function Deployments() {
   if (deployments.data.length === 0) {
     return (
       <Panel>
-        <EmptyState icon={Rocket} title="Not deployed yet">
-          Press Deploy to build and start this app. Its output streams here.
+        <EmptyState icon={Play} title="Not deployed yet">
+          Use Deploy above to build and start this app. Output streams here.
         </EmptyState>
       </Panel>
     )
   }
 
-  // Default to the newest, which is the one in progress if there is one.
   const selected = deployments.data.find((d) => d.id === selectedId) ?? deployments.data[0]
 
   return (
     <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
       <Panel flush className="lg:max-h-[calc(100dvh-17rem)] lg:overflow-y-auto">
-        <ul className="divide-y">
+        <ul className="divide-y divide-border/80">
           {deployments.data.map((d) => {
             const s = DEPLOYMENT_STATUS[d.status]
             const active = d.id === selected.id
+            const took = d.started_at ? duration(d.started_at, d.finished_at) : null
             return (
               <li key={d.id}>
                 <button
@@ -74,8 +75,8 @@ function Deployments() {
                   aria-current={active ? 'true' : undefined}
                   onClick={() => void navigate({ search: { d: d.id }, replace: true })}
                   className={cn(
-                    'flex w-full flex-col gap-1 px-4 py-2.5 text-left text-[0.8125rem] transition-colors outline-none hover:bg-muted/50 focus-visible:bg-muted/50',
-                    active && 'bg-muted/70 hover:bg-muted/70',
+                    'flex w-full flex-col gap-1 px-4 py-3 text-left text-[13px] transition-colors outline-none hover:bg-hover focus-visible:bg-hover',
+                    active && 'bg-active hover:bg-active',
                   )}
                 >
                   <span className="flex items-center justify-between gap-3">
@@ -83,13 +84,20 @@ function Deployments() {
                     <time
                       dateTime={d.created_at}
                       title={fullDate(d.created_at)}
-                      className="shrink-0 text-muted-foreground"
+                      className="shrink-0 text-[12px] text-muted-foreground"
                     >
                       {timeAgo(d.created_at)}
                     </time>
                   </span>
-                  <span className="truncate text-muted-foreground">
-                    {d.commit_msg ?? d.image_ref ?? triggerLabel(d.trigger)}
+                  <span className="flex items-center justify-between gap-2 text-[12px] text-muted-foreground">
+                    <span className="truncate font-mono">
+                      {d.commit_sha ? `${d.commit_sha.slice(0, 7)} ` : ''}
+                      {d.commit_msg ?? d.image_ref ?? triggerLabel(d.trigger)}
+                    </span>
+                    <span className="shrink-0 tabular-nums">
+                      {triggerLabel(d.trigger)}
+                      {took ? ` · ${took}` : ''}
+                    </span>
                   </span>
                 </button>
               </li>
@@ -111,7 +119,6 @@ function DeploymentDetail({ deployment: d }: { deployment: Deployment }) {
   const inProgress = deploymentInProgress(d.status)
   const s = DEPLOYMENT_STATUS[d.status]
 
-  // The stream's end event arrives before the next poll would notice.
   useEffect(() => {
     if (result) void queryClient.invalidateQueries({ queryKey: ['apps'] })
   }, [result, queryClient])
@@ -130,10 +137,10 @@ function DeploymentDetail({ deployment: d }: { deployment: Deployment }) {
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[0.8125rem]">
-          <dt className="text-muted-foreground">Started by</dt>
-          <dd>{triggerLabel(d.trigger)}</dd>
+      <div className="flex flex-wrap items-start justify-between gap-4 rounded-xl bg-card px-4 py-3 shadow-[var(--shadow-2)]">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[13px]">
+          <dt className="text-muted-foreground">Trigger</dt>
+          <dd className="font-medium text-foreground">{triggerLabel(d.trigger)}</dd>
           {d.commit_sha ? (
             <>
               <dt className="text-muted-foreground">Commit</dt>
@@ -149,9 +156,9 @@ function DeploymentDetail({ deployment: d }: { deployment: Deployment }) {
               <dd className="truncate font-mono text-xs leading-5">{d.image_ref}</dd>
             </>
           ) : null}
-          <dt className="text-muted-foreground">Took</dt>
+          <dt className="text-muted-foreground">Duration</dt>
           <dd className="tabular-nums">
-            {d.started_at ? duration(d.started_at, d.finished_at) : 'Waiting in the queue'}
+            {d.started_at ? duration(d.started_at, d.finished_at) : 'Queued'}
           </dd>
         </dl>
         {canRollback ? (
@@ -163,14 +170,14 @@ function DeploymentDetail({ deployment: d }: { deployment: Deployment }) {
       </div>
 
       {d.error ? (
-        <p role="alert" className="rounded-md border border-fail/30 bg-fail/5 px-3 py-2 text-[0.8125rem] text-fail">
-          {d.error}
-        </p>
+        <Banner role="alert" status="error" contrast="high">
+          <BannerDescription>{d.error}</BannerDescription>
+        </Banner>
       ) : null}
 
       <LogViewer
         lines={lines}
-        className="h-[calc(100dvh-26rem)] min-h-72"
+        className="h-[calc(100dvh-27rem)] min-h-72"
         status={
           inProgress && state !== 'ended' ? (
             <Status tone="busy">{s.label}</Status>
@@ -180,7 +187,7 @@ function DeploymentDetail({ deployment: d }: { deployment: Deployment }) {
             <Status tone={s.tone}>{s.label}</Status>
           )
         }
-        empty={inProgress ? 'Waiting for output.' : 'This deployment produced no output.'}
+        empty={inProgress ? 'Waiting for output.' : 'No build output recorded.'}
       />
     </div>
   )

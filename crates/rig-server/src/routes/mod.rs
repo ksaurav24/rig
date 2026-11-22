@@ -7,6 +7,7 @@ pub mod github;
 pub mod hooks;
 mod members;
 mod metrics;
+mod org;
 mod projects;
 pub mod system;
 mod terminal;
@@ -41,6 +42,7 @@ fn api() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(auth::router())
         .merge(account::router())
+        .merge(org::router())
         .merge(projects::router())
         .merge(apps::router())
         .merge(databases::router())

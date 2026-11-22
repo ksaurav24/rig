@@ -8,7 +8,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { Slot } from "@radix-ui/react-slot";
+import { Button as ButtonPrimitive } from "@base-ui/react/button";
 import { cva, type VariantProps } from "class-variance-authority";
 import type { IconComponent } from "@/lib/icon-context";
 import { cn } from "@/lib/utils";
@@ -95,6 +95,7 @@ interface ButtonProps
   /** Omitted, the button follows the surrounding SizeProvider (default 36px,
    *  compact 28px). Legacy sm/md/lg values still resolve. */
   size?: ButtonSize;
+  /** When true, the given single React-element child becomes the rendered element (slot-style). */
   asChild?: boolean;
   /** Base UI's spelling of `asChild`: the element to render as, with the
    *  button's children as its label. Accepted so code written either way
@@ -198,23 +199,29 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     // nativeButton is accepted for Base UI parity and ignored (see its doc).
     const props = omit(rest, ["nativeButton"]);
 
-    // asChild: the user's element becomes the root, but the button's internal
-    // structure (bg layer, content wrapper, spinner, icons) must survive. Slot
-    // requires exactly one child, so instead of Slottable we clone the user's
-    // element with our internals as its children — the element's own children
-    // become the label inside the content wrapper.
-    // `render` is the same thing written the Base UI way: its element is the
-    // root and the children, when given, are the label (otherwise the
-    // element keeps its own).
+    // asChild: the user's element becomes the root while the button's internal
+    // structure (bg layer, content wrapper, spinner, icons) survives as its
+    // children — the element's own children become the label. We clone the
+    // element directly instead of routing through ButtonPrimitive's `render`:
+    // Base UI would bolt button semantics (role="button", Space activation)
+    // onto e.g. a link, where plain-link output is wanted.
+    // `render` is the same thing written the Base UI way, and takes the same
+    // path: its element is the root and the children, when given, are the
+    // label (otherwise the element keeps its own).
+    type SlotElement = ReactElement<{
+      children?: ReactNode;
+      className?: string;
+      style?: React.CSSProperties;
+      ref?: React.Ref<HTMLButtonElement>;
+    }>;
     const asChildElement =
       render && isValidElement(render)
         ? children === undefined
-          ? (render as ReactElement<{ children?: ReactNode }>)
-          : cloneElement(render as ReactElement<{ children?: ReactNode }>, undefined, children)
+          ? (render as SlotElement)
+          : cloneElement(render as SlotElement, undefined, children)
         : asChild && isValidElement(children)
-          ? (children as ReactElement<{ children?: ReactNode }>)
+          ? (children as SlotElement)
           : null;
-    const Comp = asChildElement ? Slot : "button";
     const label = asChildElement ? asChildElement.props.children : children;
     // Resolve the size: explicit prop (legacy aliases mapped onto the
     // canonical ladder) > surrounding SizeProvider > default.
@@ -331,32 +338,46 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       </>
     );
 
+    const rootClassName = cn(
+      buttonVariants({
+        variant,
+        size: resolvedSize,
+        iconLeft: !isIconOnly && !!LeadingIcon,
+        // Key caps at the end take a trailing icon's tighter padding.
+        iconRight: !isIconOnly && (!!TrailingIcon || hasShortcut),
+      }),
+      shape.button,
+      className
+    );
+
+    if (asChildElement) {
+      const childProps = asChildElement.props;
+      return cloneElement(
+        asChildElement,
+        {
+          ...props,
+          ref,
+          className: cn(rootClassName, childProps.className),
+          style: { ...style, ...childProps.style },
+        },
+        internals
+      );
+    }
+
     return (
-      <Comp
-        ref={ref}
-        className={cn(
-          buttonVariants({
-            variant,
-            size: resolvedSize,
-            iconLeft: !isIconOnly && !!LeadingIcon,
-            // Key caps at the end take a trailing icon's tighter padding.
-            iconRight: !isIconOnly && (!!TrailingIcon || hasShortcut),
-          }),
-          shape.button,
-          className
-        )}
-        // asChild roots (e.g. an anchor) don't take the disabled attribute —
-        // Slot would spread it onto the element as invalid HTML.
-        disabled={asChildElement ? undefined : disabled || loading}
+      <ButtonPrimitive
+        // Base UI's `ButtonPrimitive` forwards to an HTMLButtonElement;
+        // keep the public ref type narrow so consumers see the right type.
+        ref={ref as React.Ref<HTMLButtonElement>}
+        className={rootClassName}
+        disabled={disabled || loading}
         aria-busy={loading || undefined}
         aria-keyshortcuts={hasShortcut ? ariaKeyShortcuts(shortcut) : undefined}
         style={style}
         {...props}
       >
-        {asChildElement
-          ? cloneElement(asChildElement, undefined, internals)
-          : internals}
-      </Comp>
+        {internals}
+      </ButtonPrimitive>
     );
   }
 );
