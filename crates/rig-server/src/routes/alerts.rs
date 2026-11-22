@@ -98,7 +98,8 @@ async fn create_channel(
     Json(req): Json<CreateAlertChannelRequest>,
 ) -> ApiResult<(StatusCode, Json<CreatedAlertChannel>)> {
     let name = validate_name("channel name", &req.name, 60)?;
-    let url = alerts::validate_url(&req.url).map_err(|e| ApiError::Validation(e.to_string()))?;
+    let url = alerts::validate_url(&req.url, state.config.allow_private_alerts)
+        .map_err(|e| ApiError::Validation(e.to_string()))?;
     let events = encode_events(&req.events)?;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alert_channels WHERE org_id = ?")
         .bind(&auth.org_id)
@@ -111,6 +112,7 @@ async fn create_channel(
     }
     let id = new_id();
     let secret = random_token(24);
+    let secret_enc = state.vault.encrypt(&secret)?;
     let host = url.host_str().unwrap_or_default().to_owned();
     sqlx::query(
         "INSERT INTO alert_channels (id, org_id, name, url_enc, url_host, signing_secret, events)
@@ -121,7 +123,7 @@ async fn create_channel(
     .bind(&name)
     .bind(state.vault.encrypt(url.as_str())?)
     .bind(&host)
-    .bind(&secret)
+    .bind(&secret_enc)
     .bind(&events)
     .execute(&state.db)
     .await?;

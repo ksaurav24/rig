@@ -19,6 +19,12 @@ pub struct Config {
     pub github_web: String,
     /// Seconds between branch polls; 0 turns polling off.
     pub poll_interval: u64,
+    /// Allow alert webhooks to connect to loopback/private/link-local addresses.
+    pub allow_private_alerts: bool,
+    /// Allow Git clone and poller to connect to loopback/private/link-local addresses.
+    pub allow_private_git: bool,
+    /// Serve the interactive Scalar API docs at `/api/docs` (authenticated).
+    pub enable_api_docs: bool,
 }
 
 #[derive(Clone)]

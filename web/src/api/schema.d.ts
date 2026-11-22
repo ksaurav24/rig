@@ -1477,6 +1477,8 @@ export interface components {
             error: components["schemas"]["ErrorDetail"];
         };
         ErrorDetail: {
+            /** @description Short-lived single-use challenge token returned when `code == "second_factor_required"`. */
+            challenge_token?: string | null;
             /** @description Stable machine-readable code, e.g. `unauthorized`, `validation`. */
             code: string;
             /** @description Human-readable message, safe to show in the UI. */
@@ -1549,13 +1551,15 @@ export interface components {
             ts: string;
         };
         LoginRequest: {
+            /** @description Single-use challenge token from step 1 of two-factor sign-in. */
+            challenge_token?: string | null;
             /**
              * @description The authenticator code or a recovery code, when the account has a
              *     second factor. A login without one answers 401 `second_factor_required`.
              */
             code?: string | null;
-            email: string;
-            password: string;
+            email?: string;
+            password?: string;
         };
         /**
          * @description The signed-in principal. `csrf_token` must be echoed in `x-rig-csrf`
@@ -1563,6 +1567,8 @@ export interface components {
          */
         Me: {
             csrf_token: string;
+            /** @description True when the account has a temporary password that must be changed before continuing. */
+            must_change_password?: boolean;
             org: components["schemas"]["Organization"];
             role: components["schemas"]["Role"];
             user: components["schemas"]["User"];
@@ -1694,7 +1700,7 @@ export interface components {
             branding?: components["schemas"]["PublicBranding"] | null;
             /** @description False until the first owner account has been created. */
             setup_complete: boolean;
-            version: string;
+            version?: string | null;
         };
         /**
          * @description Where an app's image comes from.

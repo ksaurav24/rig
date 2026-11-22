@@ -67,6 +67,7 @@ fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
             error: ErrorDetail {
                 code: code.into(),
                 message: message.into(),
+                challenge_token: None,
             },
         }),
     )
@@ -283,6 +284,7 @@ async fn start_mock_server() -> (String, Arc<MockState>) {
                     },
                     role: Role::Owner,
                     csrf_token: "csrf-secret".into(),
+                    must_change_password: false,
                 })
                 .into_response()
             }),

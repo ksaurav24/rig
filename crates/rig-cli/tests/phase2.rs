@@ -71,6 +71,7 @@ fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
             error: ErrorDetail {
                 code: code.into(),
                 message: message.into(),
+                challenge_token: None,
             },
         }),
     )
@@ -317,6 +318,7 @@ async fn start_phase2_server() -> (String, Arc<StateData>) {
                     },
                     role: Role::Owner,
                     csrf_token: "csrf".into(),
+                    must_change_password: false,
                 })
                 .into_response();
                 res.headers_mut()

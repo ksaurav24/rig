@@ -257,6 +257,18 @@ async fn delete_project(
                 .into(),
         ));
     }
+    let starting: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM databases WHERE project_id = ? AND (status = 'creating' OR busy_op IS NOT NULL)",
+    )
+    .bind(&id)
+    .fetch_one(&state.db)
+    .await?;
+    if starting > 0 {
+        return Err(ApiError::Conflict(
+            "a database in this project is still starting or busy. Wait for it to finish, then delete"
+                .into(),
+        ));
+    }
 
     let apps: Vec<String> = sqlx::query_scalar("SELECT id FROM apps WHERE project_id = ?")
         .bind(&id)
@@ -278,18 +290,6 @@ async fn delete_project(
                     "could not remove the project's volumes ({e:#}). Nothing was deleted"
                 ))
             })?;
-    }
-    let starting: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM databases WHERE project_id = ? AND status = 'creating'",
-    )
-    .bind(&id)
-    .fetch_one(&state.db)
-    .await?;
-    if starting > 0 {
-        return Err(ApiError::Conflict(
-            "a database in this project is still starting. Wait for it to finish, then delete"
-                .into(),
-        ));
     }
     if let Some(target) = &move_to {
         for r in &db_rows {

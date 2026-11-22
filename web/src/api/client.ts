@@ -7,12 +7,14 @@ export type Schemas = components['schemas']
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  readonly challengeToken?: string
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, challengeToken?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.challengeToken = challengeToken
   }
 }
 
@@ -31,6 +33,13 @@ const csrf: Middleware = {
       request.headers.set('x-rig-csrf', csrfToken)
     }
     return request
+  },
+  onResponse({ response }) {
+    const rotated = response.headers.get('x-rig-csrf')
+    if (rotated) {
+      csrfToken = rotated
+    }
+    return response
   },
 }
 
@@ -66,5 +75,6 @@ export async function unwrap<T>(call: Promise<Result<T>>): Promise<T> {
     response.status,
     detail?.code ?? 'error',
     detail?.message ?? messageFor(response.status),
+    detail?.challenge_token ?? undefined,
   )
 }

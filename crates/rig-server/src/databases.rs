@@ -120,7 +120,10 @@ impl EngineSpec {
                 ("MONGO_INITDB_ROOT_PASSWORD", password),
                 ("MONGO_INITDB_DATABASE", db),
             ],
-            DatabaseEngine::Redis => &[],
+            // Pass the Redis password in the container environment and feed it
+            // via stdin to `redis-server -` so it never appears in container
+            // argv or host `/proc/<pid>/cmdline`.
+            DatabaseEngine::Redis => &[("REDIS_PASSWORD", password)],
         };
         pairs
             .iter()
@@ -128,15 +131,13 @@ impl EngineSpec {
             .collect()
     }
 
-    fn command(&self, password: &str) -> Option<Vec<String>> {
+    fn command(&self) -> Option<Vec<String>> {
         match self.engine {
             DatabaseEngine::Redis => Some(
                 [
-                    "redis-server",
-                    "--appendonly",
-                    "yes",
-                    "--requirepass",
-                    password,
+                    "sh",
+                    "-c",
+                    r#"printf 'requirepass %s\n' "$REDIS_PASSWORD" | exec docker-entrypoint.sh redis-server - --appendonly yes"#,
                 ]
                 .map(String::from)
                 .to_vec(),
@@ -287,7 +288,7 @@ async fn start(state: &AppState, id: &str) -> Result<(String, u16)> {
         ]),
         memory_mb: Some(DEFAULT_DATABASE_MEMORY_MB),
         cpu_millis: None,
-        command: spec.command(&password),
+        command: spec.command(),
         network: Some(deploy::project_network(&row.project_id)),
         aliases: vec![row.slug.clone()],
         volumes: vec![(row.volume.clone(), spec.data_dir.to_string())],
@@ -383,7 +384,7 @@ pub async fn destroy_project(state: &AppState, project_id: &str) -> Result<()> {
         .await
 }
 
-/// Databases caught mid-start by a restart will never finish on their own.
+/// Databases caught mid-start or mid-operation by a restart will never finish on their own.
 pub async fn recover(state: &AppState) -> Result<()> {
     sqlx::query(
         "UPDATE databases
@@ -393,6 +394,9 @@ pub async fn recover(state: &AppState) -> Result<()> {
     )
     .execute(&state.db)
     .await?;
+    sqlx::query("UPDATE databases SET busy_op = NULL WHERE busy_op IS NOT NULL")
+        .execute(&state.db)
+        .await?;
     Ok(())
 }
 
@@ -439,7 +443,13 @@ mod tests {
             redis.url("default", "s3", "cache", 6379, "0"),
             "redis://default:s3@cache:6379/0"
         );
-        assert!(redis.env("default", "s3", "0").is_empty());
-        assert_eq!(redis.command("s3").unwrap().last().unwrap(), "s3");
+        assert_eq!(
+            redis.env("default", "s3", "0"),
+            vec![("REDIS_PASSWORD".into(), "s3".into())]
+        );
+        // Password must never appear in the container command line.
+        let cmd = redis.command().unwrap();
+        assert!(cmd.iter().all(|a| !a.contains("s3")));
+        assert!(cmd.iter().any(|a| a.contains("redis-server -")));
     }
 }

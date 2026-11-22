@@ -33,7 +33,7 @@ function LoginPage() {
   const { data: status } = useQuery(setupStatusQuery)
   const [error, setError] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [credentials, setCredentials] = useState<{ email: string; password: string } | null>(null)
+  const [challenge, setChallenge] = useState<{ email: string; token: string } | null>(null)
   const [useRecovery, setUseRecovery] = useState(false)
 
   const branding = status?.branding
@@ -57,14 +57,14 @@ function LoginPage() {
       await navigate({ to: next ?? getDefaultHome() })
     },
     onError: (e, body) => {
-      if (e instanceof ApiError && e.code === 'second_factor_required') {
-        setCredentials({ email: body.email, password: body.password })
+      if (e instanceof ApiError && e.code === 'second_factor_required' && e.challengeToken) {
+        setChallenge({ email: body.email ?? '', token: e.challengeToken })
         return
       }
       if (e instanceof ApiError && e.status === 401) {
         setError(
           body.code
-            ? 'That code did not work. Codes change every 30 seconds.'
+            ? 'That code did not work, or the sign-in session expired. Try again.'
             : 'That email and password do not match.',
         )
         return
@@ -77,14 +77,19 @@ function LoginPage() {
     e.preventDefault()
     setError('')
     const form = new FormData(e.currentTarget)
-    if (credentials) {
-      login.mutate({ ...credentials, code: String(form.get('code') ?? '').trim() })
+    if (challenge) {
+      login.mutate({
+        email: '',
+        password: '',
+        challenge_token: challenge.token,
+        code: String(form.get('code') ?? '').trim(),
+      })
       return
     }
     login.mutate({ email: String(form.get('email')), password: String(form.get('password')) })
   }
 
-  if (credentials) {
+  if (challenge) {
     return (
       <AuthLayout
         mode="login"
@@ -96,7 +101,7 @@ function LoginPage() {
             : 'Enter the six-digit code from your authenticator app.'
         }
         branding={branding}
-        version={status?.version}
+        version={status?.version ?? undefined}
       >
         <form onSubmit={submit} key={useRecovery ? 'recovery' : 'totp'} className="space-y-5">
           <div className="flex items-center gap-2.5 rounded-xl border border-border/80 bg-surface/60 px-3.5 py-2.5 text-[12.5px] text-muted-foreground">
@@ -106,7 +111,7 @@ function LoginPage() {
               <ShieldCheck className="size-4 shrink-0 text-primary" />
             )}
             <span className="truncate">
-              Signing in as <span className="font-medium text-foreground">{credentials.email}</span>
+              Signing in as <span className="font-medium text-foreground">{challenge.email}</span>
             </span>
           </div>
 
@@ -123,7 +128,7 @@ function LoginPage() {
                 aria-invalid={error ? true : undefined}
                 className="font-mono text-base tracking-[0.2em]"
                 {...(useRecovery
-                  ? { placeholder: 'xxxx-xxxx', maxLength: 12 }
+                  ? { placeholder: 'xxxx-xxxx-xxxx-xxxx', maxLength: 32 }
                   : { inputMode: 'numeric' as const, pattern: '[0-9 ]{6,7}', placeholder: '123 456', maxLength: 7 })}
               />
               {error ? <FieldError>{error}</FieldError> : null}
@@ -151,7 +156,7 @@ function LoginPage() {
               onClick={() => {
                 setError('')
                 setUseRecovery(false)
-                setCredentials(null)
+                setChallenge(null)
               }}
             >
               <ArrowLeft className="size-3.5" />
@@ -170,7 +175,7 @@ function LoginPage() {
       title={branding?.org_name ? `Sign in to ${branding.org_name}` : 'Sign in'}
       description="Enter your account email and password to open the dashboard."
       branding={branding}
-      version={status?.version}
+      version={status?.version ?? undefined}
     >
       <form onSubmit={submit} noValidate={false}>
         <FieldGroup>

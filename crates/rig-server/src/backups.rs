@@ -8,9 +8,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use rig_api::DatabaseEngine;
 use sqlx::Row;
-use tokio::fs;
+use tokio::{
+    fs,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+};
 
 use crate::{
+    crypto::{BACKUP_CHUNK_SIZE, BACKUP_MAGIC, Vault},
     runtime::ExecOutcome,
     state::{AppState, now},
 };
@@ -215,6 +219,113 @@ pub async fn run(state: AppState, backup_id: String, database_id: String) {
     }
 }
 
+/// Encrypt `reader` into `dest` using Rig's chunked XChaCha20-Poly1305 format
+/// (`RIGBK1\0\0` || 16-byte stream base || sequence of `[u32 ct_len][u8 is_final][ct]`).
+/// Returns total plaintext bytes written.
+async fn write_encrypted_stream(
+    vault: &Vault,
+    mut reader: impl AsyncRead + Unpin,
+    mut dest: fs::File,
+) -> Result<u64> {
+    let mut base = [0u8; 16];
+    rand::fill(&mut base[..]);
+    dest.write_all(BACKUP_MAGIC).await?;
+    dest.write_all(&base).await?;
+
+    let mut total: u64 = 0;
+    let mut chunk_index: u64 = 0;
+    let mut buf = vec![0u8; BACKUP_CHUNK_SIZE];
+    loop {
+        let mut filled = 0;
+        while filled < buf.len() {
+            let n = reader.read(&mut buf[filled..]).await?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        let is_final = filled < buf.len();
+        let ct = vault.encrypt_chunk(&base, chunk_index, is_final, &buf[..filled])?;
+        let ct_len = u32::try_from(ct.len()).context("backup chunk too large")?;
+        dest.write_all(&ct_len.to_le_bytes()).await?;
+        dest.write_all(&[u8::from(is_final)]).await?;
+        dest.write_all(&ct).await?;
+        total = total.saturating_add(filled as u64);
+        chunk_index += 1;
+        if is_final {
+            break;
+        }
+    }
+    dest.flush().await?;
+    dest.sync_all().await?;
+    Ok(total)
+}
+
+/// Opens a backup file for reading, transparently decrypting `RIGBK1\0\0`
+/// chunked AEAD files while remaining backward-compatible with legacy plaintext dumps.
+pub async fn open_decrypted(
+    vault: Vault,
+    path: &Path,
+) -> Result<tokio::io::DuplexStream> {
+    let mut file = fs::File::open(path).await.context("opening the backup")?;
+    let mut header = [0u8; 8];
+    let n = file.read(&mut header).await.context("reading backup header")?;
+    let (mut writer, reader) = tokio::io::duplex(BACKUP_CHUNK_SIZE * 2);
+    if n == 8 && &header == BACKUP_MAGIC {
+        let mut base = [0u8; 16];
+        file.read_exact(&mut base)
+            .await
+            .context("reading backup stream nonce")?;
+        tokio::spawn(async move {
+            let mut chunk_index: u64 = 0;
+            loop {
+                let mut len_buf = [0u8; 4];
+                if file.read_exact(&mut len_buf).await.is_err() {
+                    // Truncated stream: drop writer early (incomplete)
+                    return;
+                }
+                let ct_len = u32::from_le_bytes(len_buf) as usize;
+                // Cap per-chunk ciphertext size (64 KiB + 16-byte Poly1305 tag).
+                if ct_len > BACKUP_CHUNK_SIZE + 64 {
+                    return;
+                }
+                let mut flag = [0u8; 1];
+                if file.read_exact(&mut flag).await.is_err() {
+                    return;
+                }
+                let is_final = flag[0] != 0;
+                let mut ct = vec![0u8; ct_len];
+                if file.read_exact(&mut ct).await.is_err() {
+                    return;
+                }
+                let Ok(pt) = vault.decrypt_chunk(&base, chunk_index, is_final, &ct) else {
+                    tracing::error!("backup decryption failed at chunk {chunk_index}");
+                    return;
+                };
+                if !pt.is_empty() && writer.write_all(&pt).await.is_err() {
+                    return;
+                }
+                chunk_index += 1;
+                if is_final {
+                    let _ = writer.shutdown().await;
+                    return;
+                }
+            }
+        });
+    } else {
+        // Legacy unencrypted backup file: forward the bytes already read plus the rest.
+        let prefix = header[..n].to_vec();
+        tokio::spawn(async move {
+            if !prefix.is_empty() && writer.write_all(&prefix).await.is_err() {
+                return;
+            }
+            let _ = tokio::io::copy(&mut file, &mut writer).await;
+            let _ = writer.shutdown().await;
+        });
+    }
+    Ok(reader)
+}
+
 async fn dump(state: &AppState, backup_id: &str, database_id: &str) -> Result<(PathBuf, i64)> {
     let t = target(state, database_id).await?;
     let tools = tooling(t.engine, &t.username, &t.password, &t.db_name);
@@ -223,10 +334,15 @@ async fn dump(state: &AppState, backup_id: &str, database_id: &str) -> Result<(P
     let path = dir.join(format!("{backup_id}.{}", tools.extension));
     let file = create_private_file(&path).await?;
 
+    let (pipe_writer, pipe_reader) = tokio::io::duplex(BACKUP_CHUNK_SIZE * 2);
+    let vault = state.vault.clone();
+    let enc_task = tokio::spawn(async move { write_encrypted_stream(&vault, pipe_reader, file).await });
+
     let outcome = state
         .runtime
-        .exec(&t.container_id, tools.dump, tools.env, None, Box::pin(file))
+        .exec(&t.container_id, tools.dump, tools.env, None, Box::pin(pipe_writer))
         .await;
+    let enc_result = enc_task.await.context("encrypting backup stream")?;
     let outcome = match outcome {
         Ok(o) if o.success() => o,
         Ok(o) => {
@@ -239,12 +355,18 @@ async fn dump(state: &AppState, backup_id: &str, database_id: &str) -> Result<(P
         }
     };
     drop(outcome);
-    let size = fs::metadata(&path).await.context("reading the dump")?.len();
-    if size == 0 {
+    let plaintext_size = match enc_result {
+        Ok(sz) => sz,
+        Err(e) => {
+            fs::remove_file(&path).await.ok();
+            return Err(e);
+        }
+    };
+    if plaintext_size == 0 {
         fs::remove_file(&path).await.ok();
         bail!("the dump came back empty");
     }
-    Ok((path, i64::try_from(size).unwrap_or(i64::MAX)))
+    Ok((path, i64::try_from(plaintext_size).unwrap_or(i64::MAX)))
 }
 
 /// Load a backup into its database, replacing what is there.
@@ -254,14 +376,14 @@ pub async fn restore(state: &AppState, database_id: &str, path: &Path) -> Result
     let Some(cmd) = tools.restore else {
         bail!("this engine cannot be restored in place yet");
     };
-    let file = fs::File::open(path).await.context("opening the backup")?;
+    let reader = open_decrypted(state.vault.clone(), path).await?;
     let outcome = state
         .runtime
         .exec(
             &t.container_id,
             cmd,
             tools.env,
-            Some(Box::pin(file)),
+            Some(Box::pin(reader)),
             Box::pin(tokio::io::sink()),
         )
         .await?;
@@ -337,5 +459,54 @@ mod tests {
             );
             assert_eq!(t.restore.is_some(), restorable(engine));
         }
+    }
+
+    #[tokio::test]
+    async fn encrypted_backup_round_trip_and_tamper_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::ephemeral();
+        // Payload spanning multiple 64 KiB chunks.
+        let mut plain = vec![0u8; BACKUP_CHUNK_SIZE * 2 + 1234];
+        for (i, b) in plain.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        plain[100..112].copy_from_slice(b"SUPER_SECRET");
+
+        let enc_path = dir.path().join("backup.dump");
+        let file = create_private_file(&enc_path).await.unwrap();
+        let written = write_encrypted_stream(&vault, plain.as_slice(), file)
+            .await
+            .unwrap();
+        assert_eq!(written, plain.len() as u64);
+
+        let on_disk = std::fs::read(&enc_path).unwrap();
+        assert!(on_disk.starts_with(BACKUP_MAGIC));
+        assert!(
+            !on_disk.windows(12).any(|w| w == b"SUPER_SECRET"),
+            "plaintext must not appear on disk"
+        );
+
+        let mut reader = open_decrypted(vault.clone(), &enc_path).await.unwrap();
+        let mut recovered = Vec::new();
+        reader.read_to_end(&mut recovered).await.unwrap();
+        assert_eq!(recovered, plain);
+
+        // Tampering with ciphertext causes decryption to fail (truncated/empty stream).
+        let mut tampered = on_disk.clone();
+        *tampered.last_mut().unwrap() ^= 0xff;
+        let bad_path = dir.path().join("tampered.dump");
+        std::fs::write(&bad_path, &tampered).unwrap();
+        let mut reader = open_decrypted(vault.clone(), &bad_path).await.unwrap();
+        let mut bad_out = Vec::new();
+        reader.read_to_end(&mut bad_out).await.unwrap();
+        assert_ne!(bad_out, plain);
+
+        // Legacy unencrypted dumps remain readable.
+        let legacy_path = dir.path().join("legacy.sql");
+        std::fs::write(&legacy_path, b"CREATE TABLE t(x INT);").unwrap();
+        let mut reader = open_decrypted(vault, &legacy_path).await.unwrap();
+        let mut legacy_out = Vec::new();
+        reader.read_to_end(&mut legacy_out).await.unwrap();
+        assert_eq!(legacy_out, b"CREATE TABLE t(x INT);");
     }
 }

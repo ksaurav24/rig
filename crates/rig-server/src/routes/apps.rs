@@ -25,9 +25,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    auth::{Admin, Auth, Developer, MinRole, Viewer},
+    auth::{self, Admin, Auth, Developer, MinRole, Viewer},
     crypto::random_token,
-    deploy::{self, NewDeployment, validate_git_url, validate_relative_path},
+    deploy::{self, NewDeployment, validate_git_url_with, validate_relative_path},
     error::{ApiError, ApiResult},
     proxy,
     routes::auth::{slugify, validate_name},
@@ -470,12 +470,24 @@ struct Source {
     dockerfile_path: String,
 }
 
+#[cfg(test)]
 fn validate_source(
     kind: SourceKind,
     image: Option<&str>,
     git_url: Option<&str>,
     git_branch: Option<&str>,
     dockerfile_path: Option<&str>,
+) -> ApiResult<Source> {
+    validate_source_with(kind, image, git_url, git_branch, dockerfile_path, false)
+}
+
+fn validate_source_with(
+    kind: SourceKind,
+    image: Option<&str>,
+    git_url: Option<&str>,
+    git_branch: Option<&str>,
+    dockerfile_path: Option<&str>,
+    allow_private_git: bool,
 ) -> ApiResult<Source> {
     let dockerfile_path = dockerfile_path
         .map(str::trim)
@@ -491,7 +503,7 @@ fn validate_source(
         }),
         SourceKind::Git => {
             let url = git_url.unwrap_or_default().trim();
-            validate_git_url(url).map_err(ApiError::validation)?;
+            validate_git_url_with(url, allow_private_git).map_err(ApiError::validation)?;
             let branch = match git_branch.map(str::trim).filter(|b| !b.is_empty()) {
                 Some(b) => Some(validate_branch(b)?),
                 None => None,
@@ -515,12 +527,13 @@ async fn create_app(
     Json(req): Json<CreateAppRequest>,
 ) -> ApiResult<(StatusCode, Json<App>)> {
     let name = validate_name("app name", &req.name, 64)?;
-    let source = validate_source(
+    let source = validate_source_with(
         req.source_kind,
         req.image.as_deref(),
         req.git_url.as_deref(),
         req.git_branch.as_deref(),
         req.dockerfile_path.as_deref(),
+        state.config.allow_private_git,
     )?;
     let port = validate_port(req.port)?;
     let memory_mb = req
@@ -600,6 +613,7 @@ async fn create_app(
 
     let id = new_id();
     let at = now();
+    let webhook_secret_enc = state.vault.encrypt(&random_token(24))?;
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO apps (id, org_id, project_id, server_id, name, slug, source_kind, image, git_url,
@@ -622,7 +636,7 @@ async fn create_app(
     .bind(memory_mb.map(i64::from))
     .bind(cpu_millis.map(i64::from))
     .bind(&health_path)
-    .bind(random_token(24))
+    .bind(&webhook_secret_enc)
     .bind(&at)
     .bind(&at)
     .execute(&mut *tx)
@@ -689,7 +703,7 @@ async fn update_app(
         Some(n) => validate_name("app name", n, 64)?,
         None => app.name.clone(),
     };
-    let source = validate_source(
+    let source = validate_source_with(
         app.source_kind,
         req.image.as_deref().or(app.image.as_deref()),
         req.git_url.as_deref().or(app.git_url.as_deref()),
@@ -698,6 +712,7 @@ async fn update_app(
         req.dockerfile_path
             .as_deref()
             .or(Some(&app.dockerfile_path)),
+        state.config.allow_private_git,
     )?;
     let port = validate_port(req.port.unwrap_or(app.port))?;
     let memory_mb = match req.memory_mb {
@@ -851,7 +866,16 @@ async fn start_deployment<R: MinRole>(
             image_id,
         },
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        if deploy::is_active_deploy_conflict(&e) {
+            ApiError::Conflict(
+                "a deployment is already in progress for this app. Wait for it to finish".into(),
+            )
+        } else {
+            e.into()
+        }
+    })?;
     sqlx::query("UPDATE apps SET status = 'deploying', updated_at = ? WHERE id = ?")
         .bind(now())
         .bind(app_id)
@@ -875,13 +899,14 @@ async fn get_webhook(
     auth: Auth<Developer>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<AppWebhook>> {
-    let secret: Option<String> =
+    let secret_enc: Option<String> =
         sqlx::query_scalar("SELECT webhook_secret FROM apps WHERE id = ? AND org_id = ?")
             .bind(&id)
             .bind(&auth.org_id)
             .fetch_optional(&state.db)
             .await?;
-    let secret = secret.ok_or(ApiError::NotFound("app not found"))?;
+    let secret_enc = secret_enc.ok_or(ApiError::NotFound("app not found"))?;
+    let secret = state.vault.decrypt(&secret_enc)?;
     auth.audit(&state, "app.webhook.reveal", Some(&id), None)
         .await?;
     Ok(Json(webhook(&id, secret)))
@@ -896,10 +921,11 @@ async fn rotate_webhook(
     Path(id): Path<String>,
 ) -> ApiResult<Json<AppWebhook>> {
     let secret = random_token(24);
+    let secret_enc = state.vault.encrypt(&secret)?;
     let done = sqlx::query(
         "UPDATE apps SET webhook_secret = ?, updated_at = ? WHERE id = ? AND org_id = ?",
     )
-    .bind(&secret)
+    .bind(&secret_enc)
     .bind(now())
     .bind(&id)
     .bind(&auth.org_id)
@@ -1290,12 +1316,18 @@ async fn deployment_logs(
         .or_else(|| headers.get("last-event-id")?.to_str().ok()?.parse().ok())
         .unwrap_or(0);
 
+    let snap = auth.snapshot();
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(async move {
         // Subscribe before reading so a line written between the read and
         // the wait still wakes this task.
         let mut activity = state.deploys.subscribe();
+        let mut auth_tick = tokio::time::interval(Duration::from_secs(30));
+        auth_tick.tick().await;
         loop {
+            if !auth::verify_still_valid(&state, &snap, rig_api::Role::Viewer).await {
+                return;
+            }
             let status: Option<String> =
                 sqlx::query_scalar("SELECT status FROM deployments WHERE id = ?")
                     .bind(&id)
@@ -1355,6 +1387,7 @@ async fn deployment_logs(
             }
             tokio::select! {
                 changed = activity.changed() => if changed.is_err() { return },
+                _ = auth_tick.tick() => {}
                 () = tx.closed() => return,
             }
         }
@@ -1451,30 +1484,45 @@ async fn app_logs(
         .map(|g| g.to_lowercase())
         .filter(|g| !g.is_empty());
 
-    let mut seq = 0i64;
-    let stream = state
-        .runtime
-        .logs_with(&container, opts)
-        // An engine error ends the stream; the dashboard reconnects.
-        .take_while(|item| std::future::ready(item.is_ok()))
-        .filter_map(move |item| {
-            let event = item.ok().and_then(|msg| {
-                if let Some(needle) = &grep
-                    && !msg.line.to_lowercase().contains(needle)
-                {
-                    return None;
+    let snap = auth.snapshot();
+    let (tx, rx) = mpsc::channel(256);
+    tokio::spawn(async move {
+        let mut raw = state.runtime.logs_with(&container, opts);
+        let mut seq = 0i64;
+        let mut auth_tick = tokio::time::interval(Duration::from_secs(30));
+        auth_tick.tick().await;
+        loop {
+            tokio::select! {
+                item = raw.next() => match item {
+                    Some(Ok(msg)) => {
+                        if let Some(needle) = &grep
+                            && !msg.line.to_lowercase().contains(needle)
+                        {
+                            continue;
+                        }
+                        seq += 1;
+                        let ev = log_event(&LogLine {
+                            seq,
+                            ts: msg.ts.unwrap_or_else(now),
+                            stream: msg.stream.to_string(),
+                            line: msg.line,
+                        });
+                        if tx.send(Ok(ev)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Err(_)) | None => return,
+                },
+                _ = auth_tick.tick() => {
+                    if !auth::verify_still_valid(&state, &snap, rig_api::Role::Viewer).await {
+                        return;
+                    }
                 }
-                seq += 1;
-                Some(Ok(log_event(&LogLine {
-                    seq,
-                    ts: msg.ts.unwrap_or_else(now),
-                    stream: msg.stream.to_string(),
-                    line: msg.line,
-                })))
-            });
-            std::future::ready(event)
-        });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+                () = tx.closed() => return,
+            }
+        }
+    });
+    Ok(sse(rx))
 }
 
 // ------------------------------------------------------------------ env vars
@@ -2077,6 +2125,7 @@ mod tests {
                 &self,
                 _: &[crate::proxy::Route],
                 _: Option<&rig_api::DashboardDomain>,
+                _: &[String],
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -2099,6 +2148,9 @@ mod tests {
                 github_api: "http://127.0.0.1".into(),
                 github_web: "http://127.0.0.1".into(),
                 poll_interval: 0,
+                allow_private_alerts: false,
+                allow_private_git: false,
+                enable_api_docs: false,
             }),
             runtime: Arc::new(StubRuntime),
             proxy: Arc::new(StubProxy),
@@ -2396,6 +2448,633 @@ mod tests {
         let restarted_dep: Deployment = res.json().await.unwrap();
         assert_eq!(restarted_dep.trigger, "api");
         assert_eq!(restarted_dep.image_ref.as_deref(), Some("nginx:3"));
+
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn security_audit_regressions_end_to_end() {
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+
+        struct StubRuntime;
+
+        #[async_trait::async_trait]
+        impl crate::runtime::Runtime for StubRuntime {
+            async fn info(&self) -> anyhow::Result<crate::runtime::EngineInfo> {
+                Ok(crate::runtime::EngineInfo {
+                    name: "stub".into(),
+                    version: "1.0".into(),
+                })
+            }
+            async fn pull(&self, _: &str, _: &crate::runtime::LogSink) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build(
+                &self,
+                _: crate::runtime::BuildSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build_plan(
+                &self,
+                _: crate::runtime::PlanSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn run(
+                &self,
+                _: &crate::runtime::ContainerSpec,
+            ) -> anyhow::Result<crate::runtime::Started> {
+                anyhow::bail!("unused")
+            }
+            async fn state(&self, _: &str) -> anyhow::Result<crate::runtime::ContainerState> {
+                Ok(crate::runtime::ContainerState::Running)
+            }
+            async fn health(&self, _: &str) -> anyhow::Result<Option<crate::runtime::Health>> {
+                Ok(None)
+            }
+            async fn start(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn stop(&self, _: &str, _: u32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn logs_with(
+                &self,
+                _: &str,
+                _: crate::runtime::LogOptions,
+            ) -> crate::runtime::LogStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_by_label(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn remove_volume(&self, _: &str) -> anyhow::Result<()> {
+                panic!("delete_project must NOT remove volumes before checking creating databases");
+            }
+            async fn remove_network(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn shell(
+                &self,
+                _: &str,
+                _: u16,
+                _: u16,
+            ) -> anyhow::Result<crate::runtime::Shell> {
+                anyhow::bail!("unused")
+            }
+            async fn image_id(&self, _: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            async fn usage(&self, _: &str) -> anyhow::Result<Option<crate::runtime::Usage>> {
+                Ok(None)
+            }
+            async fn resize_shell(&self, _: &str, _: u16, _: u16) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn exec(
+                &self,
+                _: &str,
+                _: Vec<String>,
+                _: Vec<String>,
+                _: Option<crate::runtime::ByteReader>,
+                _: crate::runtime::ByteWriter,
+            ) -> anyhow::Result<crate::runtime::ExecOutcome> {
+                anyhow::bail!("unused")
+            }
+        }
+
+        struct StubProxy;
+
+        #[async_trait::async_trait]
+        impl crate::proxy::Proxy for StubProxy {
+            async fn ready(&self) -> bool {
+                true
+            }
+            async fn apply(
+                &self,
+                _: &[crate::proxy::Route],
+                _: Option<&rig_api::DashboardDomain>,
+                _: &[String],
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn ports(&self) -> (u16, u16) {
+                (80, 443)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let vault = crate::crypto::Vault::open(dir.path()).unwrap();
+        let state = AppState {
+            db: db.clone(),
+            vault: vault.clone(),
+            config: Arc::new(crate::state::Config {
+                data_dir: dir.path().to_path_buf(),
+                secure_cookies: false,
+                github_api: "http://127.0.0.1".into(),
+                github_web: "http://127.0.0.1".into(),
+                poll_interval: 0,
+                allow_private_alerts: false,
+                allow_private_git: false,
+                enable_api_docs: false,
+            }),
+            runtime: Arc::new(StubRuntime),
+            proxy: Arc::new(StubProxy),
+            deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
+            access: crate::access::DashboardAccess::default(),
+        };
+
+        let owner_pw = "owner-super-secret-pw";
+        let owner_hash = crate::crypto::hash_password(owner_pw).unwrap();
+        let api_token = "rig_sec_test_owner_token";
+        let other_token = "rig_sec_test_other_token";
+
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('setup_complete', '1')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, name, password_hash) VALUES ('u1', 'owner@example.com', 'Owner', ?)",
+        )
+        .bind(&owner_hash)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO memberships (org_id, user_id, role) VALUES ('org1', 'u1', 'owner')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO api_tokens (id, org_id, user_id, name, token_hash, prefix, role, created_at)
+             VALUES ('tok1', 'org1', 'u1', 'cli', ?, 'rig_se', 'owner', '2026-11-22T00:00:00Z'),
+                    ('tok2', 'org1', 'u1', 'other', ?, 'rig_ot', 'owner', '2026-11-22T00:00:00Z')",
+        )
+        .bind(crate::crypto::hash_token(api_token))
+        .bind(crate::crypto::hash_token(other_token))
+        .execute(&db)
+        .await
+        .unwrap();
+        // Private media item (is_public = 0)
+        sqlx::query(
+            "INSERT INTO media (id, org_id, content_type, data, is_public)
+             VALUES ('priv1', 'org1', 'image/png', X'89504E470D0A1A0A', 0)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // Project with an app + a creating database (for RIG-SEC-09d test)
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'P1', 'p1', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, webhook_secret, created_at, updated_at)
+             VALUES ('a1', 'org1', 'p1', 'app1', 'app1', 'image', 'nginx:alpine', 'Dockerfile', 80, 'stopped', ?, '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+        )
+        .bind(vault.encrypt("whsec").unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO app_volumes (id, app_id, name, mount_path, created_at) VALUES ('v1', 'a1', 'rig-app-v1', '/data', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO databases (id, org_id, project_id, name, slug, engine, version, volume, db_name, username, password_enc, status, created_at)
+             VALUES ('db1', 'org1', 'p1', 'pg', 'pg', 'postgres', '17', 'rig-db-1', 'pg', 'pg', ?, 'creating', '2026-11-22T00:00:00Z')",
+        )
+        .bind(vault.encrypt("dbpw").unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_handle = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                crate::routes::app(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // RIG-SEC-06: /api/openapi.json requires auth; /api/docs disabled by default.
+        assert_eq!(
+            http.get(format!("{base}/api/openapi.json")).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            http.get(format!("{base}/api/openapi.json"))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            http.get(format!("{base}/api/docs"))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // RIG-SEC-17.4 & RIG-SEC-15: /api/v1/setup omits version; HSTS sent when X-Forwarded-Proto: https from loopback.
+        let setup_res = http
+            .get(format!("{base}/api/v1/setup"))
+            .header("x-forwarded-proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(setup_res.status(), StatusCode::OK);
+        assert!(setup_res.headers().contains_key("strict-transport-security"));
+        let setup_body: rig_api::SetupStatus = setup_res.json().await.unwrap();
+        assert!(setup_body.version.is_none());
+
+        // RIG-SEC-15: Private media returns 404 (not 401) unauthenticated, and Cache-Control: private authenticated.
+        assert_eq!(
+            http.get(format!("{base}/api/v1/media/priv1")).send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        let priv_res = http
+            .get(format!("{base}/api/v1/media/priv1"))
+            .bearer_auth(api_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(priv_res.status(), StatusCode::OK);
+        let cc = priv_res
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cc.starts_with("private,"), "expected private cache-control, got {cc}");
+
+        // RIG-SEC-01 & 05: Alert SSRF blocked; valid channel encrypts signing_secret at rest.
+        assert_eq!(
+            http.post(format!("{base}/api/v1/alerts/channels"))
+                .bearer_auth(api_token)
+                .json(&serde_json::json!({
+                    "name": "ssrf",
+                    "url": "http://127.0.0.1:2019/stop",
+                    "events": ["deploy_failed"]
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let ch_res = http
+            .post(format!("{base}/api/v1/alerts/channels"))
+            .bearer_auth(api_token)
+            .json(&serde_json::json!({
+                "name": "ok-hook",
+                "url": "https://hooks.slack.com/services/T/B/X",
+                "events": ["deploy_failed"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ch_res.status(), StatusCode::CREATED);
+        let created_ch: rig_api::CreatedAlertChannel = ch_res.json().await.unwrap();
+        let stored_sig: String =
+            sqlx::query_scalar("SELECT signing_secret FROM alert_channels WHERE id = ?")
+                .bind(&created_ch.channel.id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_ne!(stored_sig, created_ch.signing_secret);
+        assert_eq!(vault.decrypt(&stored_sig).unwrap(), created_ch.signing_secret);
+
+        // RIG-SEC-03: API token cannot mint new tokens, revoke OTHER tokens, manage members, or change dashboard access/domain.
+        assert_eq!(
+            http.post(format!("{base}/api/v1/tokens"))
+                .bearer_auth(api_token)
+                .json(&serde_json::json!({ "name": "backdoor", "role": "owner", "expires_in_days": null }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            http.delete(format!("{base}/api/v1/tokens/tok2"))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            http.post(format!("{base}/api/v1/members"))
+                .bearer_auth(api_token)
+                .json(&serde_json::json!({ "name": "Evil", "email": "evil@example.com", "role": "owner" }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            http.put(format!("{base}/api/v1/system/dashboard-access"))
+                .bearer_auth(api_token)
+                .json(&serde_json::json!({ "access": "public" }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            http.put(format!("{base}/api/v1/system/dashboard-domain"))
+                .bearer_auth(api_token)
+                .json(&serde_json::json!({ "host": null }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // RIG-SEC-09d: delete_project rejects creating DB BEFORE touching app volumes (StubRuntime::remove_volume would panic!).
+        assert_eq!(
+            http.delete(format!("{base}/api/v1/projects/p1?databases=delete"))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+
+        // RIG-SEC-13: 8 bad logins from IP A lock (email, IP A) with 429, while IP B can still log in!
+        for _ in 0..8 {
+            let r = http
+                .post(format!("{base}/api/v1/auth/login"))
+                .header("x-forwarded-for", "198.51.100.10")
+                .json(&serde_json::json!({ "email": "owner@example.com", "password": "wrong-password-1" }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            http.post(format!("{base}/api/v1/auth/login"))
+                .header("x-forwarded-for", "198.51.100.10")
+                .json(&serde_json::json!({ "email": "owner@example.com", "password": owner_pw }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let login_res = http
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("x-forwarded-for", "203.0.113.55")
+            .json(&serde_json::json!({ "email": "owner@example.com", "password": owner_pw }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login_res.status(), StatusCode::OK);
+        let session_cookie = login_res
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let me: rig_api::Me = login_res.json().await.unwrap();
+        assert!(!me.must_change_password);
+
+        // RIG-SEC-04: verify_password on /api/v1/account/totp/setup rate-limits after 8 failures.
+        for _ in 0..8 {
+            let r = http
+                .post(format!("{base}/api/v1/account/totp/setup"))
+                .header("cookie", &session_cookie)
+                .header("x-rig-csrf", &me.csrf_token)
+                .json(&serde_json::json!({ "password": "wrong-password" }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(
+            http.post(format!("{base}/api/v1/account/totp/setup"))
+                .header("cookie", &session_cookie)
+                .header("x-rig-csrf", &me.csrf_token)
+                .json(&serde_json::json!({ "password": owner_pw }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        // RIG-SEC-09b & 09c: add_member issues a temporary password that forces password change & rotates session/CSRF.
+        let add_res = http
+            .post(format!("{base}/api/v1/members"))
+            .header("cookie", &session_cookie)
+            .header("x-rig-csrf", &me.csrf_token)
+            .json(&serde_json::json!({
+                "name": "Dev",
+                "email": "dev@example.com",
+                "role": "developer"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(add_res.status(), StatusCode::OK);
+        let added: rig_api::MemberWithPassword = add_res.json().await.unwrap();
+
+        let dev_login = http
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("x-forwarded-for", "203.0.113.56")
+            .json(&serde_json::json!({
+                "email": "dev@example.com",
+                "password": added.temporary_password
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dev_login.status(), StatusCode::OK);
+        let dev_cookie = dev_login
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let dev_me: rig_api::Me = dev_login.json().await.unwrap();
+        assert!(dev_me.must_change_password);
+        // Blocked from regular APIs until password is changed.
+        assert_eq!(
+            http.get(format!("{base}/api/v1/projects"))
+                .header("cookie", &dev_cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        // Changing password succeeds, rotates cookie & returns rotated x-rig-csrf header!
+        let pw_change = http
+            .post(format!("{base}/api/v1/auth/password"))
+            .header("cookie", &dev_cookie)
+            .header("x-rig-csrf", &dev_me.csrf_token)
+            .json(&serde_json::json!({
+                "current_password": added.temporary_password,
+                "new_password": "new-permanent-password-123"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pw_change.status(), StatusCode::NO_CONTENT);
+        let new_dev_cookie = pw_change
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let new_csrf = pw_change
+            .headers()
+            .get("x-rig-csrf")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(new_dev_cookie, dev_cookie);
+        assert_ne!(new_csrf, dev_me.csrf_token);
+        // Old session cookie is now invalidated.
+        assert_eq!(
+            http.get(format!("{base}/api/v1/projects"))
+                .header("cookie", &dev_cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // New rotated session works immediately.
+        assert_eq!(
+            http.get(format!("{base}/api/v1/projects"))
+                .header("cookie", &new_dev_cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+
+        // RIG-SEC-09a & 05: 2FA challenge token login + Vault-keyed v2 recovery code.
+        let secret = crate::totp::new_secret();
+        sqlx::query("UPDATE users SET totp_secret = ?, totp_enabled_at = '2026-11-22T00:00:00Z' WHERE id = ?")
+            .bind(vault.encrypt(&secret).unwrap())
+            .bind(&added.member.user_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let step1 = http
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("x-forwarded-for", "203.0.113.57")
+            .json(&serde_json::json!({
+                "email": "dev@example.com",
+                "password": "new-permanent-password-123"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(step1.status(), StatusCode::UNAUTHORIZED);
+        let step1_err: ErrorBody = step1.json().await.unwrap();
+        assert_eq!(step1_err.error.code, "second_factor_required");
+        let ch_tok = step1_err
+            .error
+            .challenge_token
+            .expect("step 1 must return a server-side challenge_token");
+        // Audit log recorded step-1 password verification.
+        let chal_audit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE user_id = ? AND action = 'auth.login_challenge'",
+        )
+        .bind(&added.member.user_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(chal_audit, 1);
+
+        // Step 2 completes without re-sending password.
+        let raw_key = crate::totp::base32_decode(&secret).unwrap();
+        let totp_code = format!(
+            "{:06}",
+            crate::totp::code_at(&raw_key, crate::totp::step_of(chrono::Utc::now().timestamp()))
+        );
+        let step2 = http
+            .post(format!("{base}/api/v1/auth/login"))
+            .header("x-forwarded-for", "203.0.113.57")
+            .json(&serde_json::json!({
+                "challenge_token": ch_tok,
+                "code": totp_code
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(step2.status(), StatusCode::OK);
+        // Replaying the single-use challenge token fails.
+        assert_eq!(
+            http.post(format!("{base}/api/v1/auth/login"))
+                .header("x-forwarded-for", "203.0.113.57")
+                .json(&serde_json::json!({
+                    "challenge_token": ch_tok,
+                    "code": totp_code
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // RIG-SEC-03 self-revoke: API token CAN revoke itself (rig logout --revoke).
+        assert_eq!(
+            http.delete(format!("{base}/api/v1/tokens/tok1"))
+                .bearer_auth(api_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
 
         server_handle.abort();
     }

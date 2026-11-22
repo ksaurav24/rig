@@ -118,6 +118,27 @@ impl DockerRuntime {
     /// Podman: a throwaway BuildKit container that writes an image archive,
     /// which is then loaded into the engine.
     async fn build_plan_buildkit(&self, spec: &PlanSpec, log: &LogSink) -> Result<()> {
+        // Only permit a privileged BuildKit container when Podman is actually
+        // running rootless (confined to an unprivileged user namespace). Under
+        // rootful Podman, `privileged: true` would expose host root capabilities
+        // to untrusted repository builds.
+        let sys = self
+            .api
+            .info()
+            .await
+            .context("inspecting container engine security mode")?;
+        let is_rootless = sys
+            .security_options
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|opt| opt.eq_ignore_ascii_case("name=rootless") || opt.eq_ignore_ascii_case("rootless"));
+        if !is_rootless {
+            bail!(
+                "refusing to run a privileged BuildKit container on rootful Podman; \
+                 switch to rootless Podman or add a Dockerfile to the repository"
+            );
+        }
         self.pull(BUILDKIT_IMAGE, log).await?;
         let out_dir = spec.work_dir.join("out");
         tokio::fs::create_dir_all(&out_dir).await?;
@@ -434,6 +455,10 @@ impl Runtime for DockerRuntime {
             }),
             memory: spec.memory_mb.map(|mb| i64::from(mb) * 1024 * 1024),
             nano_cpus: spec.cpu_millis.map(|m| i64::from(m) * 1_000_000),
+            // Prevent a fork bomb inside an app/database container from exhausting host PIDs.
+            pids_limit: Some(512),
+            // Drop raw packet capability; apps/DBs do not need raw sockets.
+            cap_drop: Some(vec!["NET_RAW".into()]),
             // Apps get no extra kernel privileges and cannot regain them.
             security_opt: Some(vec!["no-new-privileges".into()]),
             ..Default::default()

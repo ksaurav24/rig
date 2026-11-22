@@ -109,6 +109,8 @@ pub struct NewDeployment<'a> {
 }
 
 /// Queue a deployment and wake the worker. Returns the deployment id.
+/// Fails with a unique constraint error (mapped to 409 Conflict) if an active
+/// deployment already exists for `d.app_id`.
 pub async fn enqueue(state: &AppState, d: NewDeployment<'_>) -> Result<String, sqlx::Error> {
     let id = new_id();
     sqlx::query(
@@ -128,6 +130,11 @@ pub async fn enqueue(state: &AppState, d: NewDeployment<'_>) -> Result<String, s
     state.deploys.queued.notify_one();
     state.deploys.touch();
     Ok(id)
+}
+
+/// Whether `e` is a SQLite unique-constraint violation from the active-deployment index.
+pub fn is_active_deploy_conflict(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
 /// Run the deployment worker until the process exits.
@@ -730,7 +737,8 @@ async fn build_from_git(
         .git_url
         .as_deref()
         .context("the app has no repository URL set")?;
-    validate_git_url(url).map_err(|m| anyhow!(m))?;
+    validate_git_url_with(url, state.config.allow_private_git).map_err(|m| anyhow!(m))?;
+    validate_git_remote_ip(url, state.config.allow_private_git).await?;
     validate_relative_path(&app.dockerfile_path).map_err(|m| anyhow!(m))?;
 
     let builds = state.config.data_dir.join("builds");
@@ -745,15 +753,11 @@ async fn build_from_git(
 
     log.line("build", format!("Cloning {url}")).await;
     let mut cmd = tokio::process::Command::new("git");
-    // Arguments are passed as an argument vector, never through a shell, and
-    // `--` ends option parsing before the URL.
-    cmd.args([
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "protocol.ext.allow=never",
-    ])
-    .args(["clone", "--depth", "1", "--single-branch", "--no-tags"]);
+    // Strict protocol allowlist, no HTTP redirects (which could hop from a public
+    // host to an internal address), and no filesystem symlinks (so host-side
+    // Railpack cannot follow a symlink to host secrets).
+    cmd.args(GIT_SAFE_CONFIG)
+        .args(["clone", "--depth", "1", "--single-branch", "--no-tags"]);
     if let Some(branch) = app.git_branch.as_deref().filter(|b| !b.is_empty()) {
         cmd.args(["--branch", branch]);
     }
@@ -782,6 +786,13 @@ async fn build_from_git(
          public or the GitHub App is installed on it",
     )?;
 
+    // Defense in depth: verify the checked-out tree contains no symlinks
+    // before reading any file or running host-side Railpack.
+    let checkout_for_check = checkout.clone();
+    tokio::task::spawn_blocking(move || verify_no_symlinks(&checkout_for_check))
+        .await
+        .context("verifying checkout safety")??;
+
     let sha = git_output(&checkout, &["rev-parse", "HEAD"])
         .await
         .unwrap_or_default();
@@ -802,10 +813,15 @@ async fn build_from_git(
             .await?;
     }
 
-    if !tokio::fs::try_exists(checkout.join(&app.dockerfile_path))
-        .await
-        .unwrap_or(false)
-    {
+    let dockerfile_meta = tokio::fs::symlink_metadata(checkout.join(&app.dockerfile_path)).await;
+    let has_dockerfile = match dockerfile_meta {
+        Ok(m) if m.file_type().is_symlink() => {
+            bail!("the Dockerfile path cannot be a symbolic link");
+        }
+        Ok(m) => m.is_file(),
+        Err(_) => false,
+    };
+    if !has_dockerfile {
         // With no Dockerfile at the default path, Railpack works out the
         // build from the source. A custom path that is missing is a mistake.
         if app.dockerfile_path != DEFAULT_DOCKERFILE {
@@ -908,11 +924,85 @@ async fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Strict git configuration flags shared by `git clone` and `git ls-remote`.
+pub const GIT_SAFE_CONFIG: &[&str] = &[
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "protocol.ssh.allow=always",
+    "-c",
+    "http.followRedirects=false",
+    "-c",
+    "core.symlinks=false",
+];
+
+/// Extract `(host, port)` from an `https://`, `ssh://`, or `git@host:path` URL.
+pub fn git_url_host_port(url: &str) -> Option<(String, u16)> {
+    if url.starts_with("https://") || url.starts_with("ssh://") {
+        let parsed = url::Url::parse(url).ok()?;
+        let host = parsed.host_str()?.to_owned();
+        let default_port = if parsed.scheme() == "ssh" { 22 } else { 443 };
+        return Some((host, parsed.port().unwrap_or(default_port)));
+    }
+    if let Some((user_host, _path)) = url.split_once(':')
+        && let Some((_user, host)) = user_host.split_once('@')
+        && !host.is_empty()
+    {
+        return Some((host.to_owned(), 22));
+    }
+    None
+}
+
+/// Resolve the Git host and refuse loopback, private, link-local, or CGNAT IPs
+/// unless `allow_private` is enabled.
+pub async fn validate_git_remote_ip(url: &str, allow_private: bool) -> Result<()> {
+    let Some((host, port)) = git_url_host_port(url) else {
+        bail!("the repository URL has no valid host");
+    };
+    crate::access::resolve_and_validate_host(&host, port, allow_private)
+        .await
+        .context("checking the repository host address")?;
+    Ok(())
+}
+
+/// Reject any symbolic links anywhere inside the checked-out worktree (ignoring `.git`).
+fn verify_no_symlinks(root: &Path) -> Result<()> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("inspecting checkout {}", dir.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name();
+            if dir == root && name == ".git" {
+                continue;
+            }
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                bail!("repository checkout contains a symbolic link, which is not allowed");
+            }
+            if ft.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Accept only remote repositories over HTTPS or SSH, blocking loopback/private
+/// hosts by default.
+#[cfg(test)]
+pub fn validate_git_url(url: &str) -> Result<(), &'static str> {
+    validate_git_url_with(url, false)
+}
+
 /// Accept only remote repositories over HTTPS or SSH.
 ///
-/// Local paths and the `file`/`ext` transports would let a repository URL
-/// read files on the server or run a command.
-pub fn validate_git_url(url: &str) -> Result<(), &'static str> {
+/// Local paths, `file`/`ext` transports, and (unless `allow_private` is true)
+/// internal/loopback hosts are rejected up front.
+pub fn validate_git_url_with(url: &str, allow_private: bool) -> Result<(), &'static str> {
     if url.len() > 512 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("the repository URL contains spaces or control characters");
     }
@@ -923,11 +1013,19 @@ pub fn validate_git_url(url: &str) -> Result<(), &'static str> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("ssh://"))
     {
-        return if rest.is_empty() || rest.starts_with('/') || rest.starts_with('-') {
-            Err("the repository URL has no host")
-        } else {
-            Ok(())
+        if rest.is_empty() || rest.starts_with('/') || rest.starts_with('-') {
+            return Err("the repository URL has no host");
+        }
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Err("the repository URL is not valid");
         };
+        let Some(host) = parsed.host_str().filter(|h| !h.is_empty()) else {
+            return Err("the repository URL has no host");
+        };
+        if !allow_private && crate::access::is_blocked_hostname(host) {
+            return Err("the repository URL cannot point to a loopback, private, or local address");
+        }
+        return Ok(());
     }
     // scp-style: git@host:owner/repo.git
     if let Some((user_host, path)) = url.split_once(':')
@@ -943,6 +1041,9 @@ pub fn validate_git_url(url: &str) -> Result<(), &'static str> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
     {
+        if !allow_private && crate::access::is_blocked_hostname(host) {
+            return Err("the repository URL cannot point to a loopback, private, or local address");
+        }
         return Ok(());
     }
     Err("use an https:// or ssh:// repository URL, or the git@host:owner/repo form")
@@ -1056,9 +1157,24 @@ mod tests {
             "http://github.com/acme/app",
             "git@github.com:/abs",
             "https://github.com/a b",
+            "https://127.0.0.1/acme/app.git",
+            "https://169.254.169.254/latest/meta-data",
+            "ssh://git@10.0.0.1/acme/app.git",
+            "git@localhost:acme/app.git",
         ] {
             assert!(validate_git_url(bad).is_err(), "{bad}");
         }
+        assert!(validate_git_url_with("https://10.0.0.1/acme/app.git", true).is_ok());
+    }
+
+    #[test]
+    fn verify_no_symlinks_rejects_symlinks_in_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "ok").unwrap();
+        assert!(verify_no_symlinks(dir.path()).is_ok());
+
+        std::os::unix::fs::symlink("/etc/passwd", dir.path().join("Dockerfile")).unwrap();
+        assert!(verify_no_symlinks(dir.path()).is_err());
     }
 
     #[test]

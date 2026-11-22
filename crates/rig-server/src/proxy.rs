@@ -36,7 +36,12 @@ pub trait Proxy: Send + Sync {
 
     /// Replace the proxy's routes with exactly `routes`, plus the
     /// dashboard on `dashboard` (or on every address over plain HTTP).
-    async fn apply(&self, routes: &[Route], dashboard: Option<&DashboardDomain>) -> Result<()>;
+    async fn apply(
+        &self,
+        routes: &[Route],
+        dashboard: Option<&DashboardDomain>,
+        blocked_cidrs: &[String],
+    ) -> Result<()>;
     /// The proxy's own (HTTP, HTTPS) ports, which domains may not claim.
     fn ports(&self) -> (u16, u16);
 }
@@ -88,8 +93,13 @@ impl Proxy for CaddyProxy {
         matches!(self.http.get(url).send().await, Ok(r) if r.status().is_success())
     }
 
-    async fn apply(&self, routes: &[Route], dashboard: Option<&DashboardDomain>) -> Result<()> {
-        let config = caddy_config(&self.opts, routes, dashboard);
+    async fn apply(
+        &self,
+        routes: &[Route],
+        dashboard: Option<&DashboardDomain>,
+        blocked_cidrs: &[String],
+    ) -> Result<()> {
+        let config = caddy_config_with_blocked(&self.opts, routes, dashboard, blocked_cidrs);
         let res = self
             .http
             .post(self.endpoint("/load")?)
@@ -123,10 +133,20 @@ impl Proxy for CaddyProxy {
 /// answers on the HTTP port for any name no app has claimed, so a fresh
 /// server is reachable at `http://<its address>`. Rig enforces its own
 /// dashboard access rules, so its route never filters by address.
+#[cfg(test)]
 pub fn caddy_config(
     opts: &CaddyOptions,
     routes: &[Route],
     dashboard: Option<&DashboardDomain>,
+) -> Value {
+    caddy_config_with_blocked(opts, routes, dashboard, &[])
+}
+
+pub fn caddy_config_with_blocked(
+    opts: &CaddyOptions,
+    routes: &[Route],
+    dashboard: Option<&DashboardDomain>,
+    blocked_cidrs: &[String],
 ) -> Value {
     let mut all: Vec<Route> = routes.to_vec();
     let mut fallback = None;
@@ -164,8 +184,18 @@ pub fn caddy_config(
                 "terminal": true,
             }));
         } else {
+            let mut allow_match = json!({
+                "host": [r.host],
+                "remote_ip": { "ranges": ranges },
+            });
+            // Container engine bridge subnets fall inside RFC1918 (172.16/12,
+            // 10/8); exclude them so a compromised container cannot reach
+            // LAN/tailnet-only apps on another project through host Caddy.
+            if !blocked_cidrs.is_empty() {
+                allow_match["not"] = json!([{ "remote_ip": { "ranges": blocked_cidrs } }]);
+            }
             entry.2.push(json!({
-                "match": [{ "host": [r.host], "remote_ip": { "ranges": ranges } }],
+                "match": [allow_match],
                 "handle": proxy,
                 "terminal": true,
             }));
@@ -348,7 +378,11 @@ pub async fn sync(state: &AppState) -> Result<()> {
     let dashboard = dashboard_domain(&state.db)
         .await
         .context("reading the dashboard domain")?;
-    state.proxy.apply(&routes, dashboard.as_ref()).await
+    let blocked = tokio::task::spawn_blocking(access::container_bridge_cidrs)
+        .await
+        .unwrap_or_default();
+    state.access.set_blocked_bridges(blocked.clone());
+    state.proxy.apply(&routes, dashboard.as_ref(), &blocked).await
 }
 
 /// Keeps the proxy in step with the database: once at startup (Caddy may
@@ -522,5 +556,20 @@ mod tests {
         let policies = &c["apps"]["tls"]["automation"]["policies"];
         assert_eq!(policies[1]["subjects"], json!(["box.tail1.ts.net"]));
         assert_eq!(policies[1]["get_certificate"][0]["via"], "tailscale");
+    }
+
+    #[test]
+    fn blocked_bridge_cidrs_added_to_restricted_routes() {
+        let lan = Route {
+            access: Access::Lan,
+            ..r("nas.lan", TlsMode::Internal, 32010)
+        };
+        let blocked = vec!["172.18.0.0/16".to_string(), "10.89.0.0/24".to_string()];
+        let c = caddy_config_with_blocked(&opts(), &[lan], None, &blocked);
+        let https = &c["apps"]["http"]["servers"]["rig_https"]["routes"];
+        assert_eq!(
+            https[0]["match"][0]["not"][0]["remote_ip"]["ranges"],
+            json!(["172.18.0.0/16", "10.89.0.0/24"])
+        );
     }
 }

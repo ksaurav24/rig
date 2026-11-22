@@ -24,7 +24,7 @@ static CSP: std::sync::OnceLock<HeaderValue> = std::sync::OnceLock::new();
 pub fn init_csp(github_web: &str) {
     let policy = format!(
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src 'self'; object-src 'none'; \
+         img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; \
          base-uri 'self'; form-action 'self' {github_web}; frame-ancestors 'none'"
     );
     let _ = CSP.set(

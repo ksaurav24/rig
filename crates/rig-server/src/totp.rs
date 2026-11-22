@@ -116,18 +116,19 @@ pub fn qr_svg(uri: &str) -> anyhow::Result<String> {
         .build())
 }
 
-/// Ten single-use recovery codes like `k3vq-9xmz`.
+/// Ten single-use recovery codes like `k3vq-9xmz-4pab-7twn` (~79 bits each,
+/// plus Vault-keyed HMAC-SHA256 storage).
 pub fn recovery_codes() -> Vec<String> {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
     (0..10)
         .map(|_| {
-            let mut buf = [0u8; 8];
+            let mut buf = [0u8; 16];
             rand::fill(&mut buf[..]);
             let s: String = buf
                 .iter()
                 .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
                 .collect();
-            format!("{}-{}", &s[..4], &s[4..])
+            format!("{}-{}-{}-{}", &s[..4], &s[4..8], &s[8..12], &s[12..])
         })
         .collect()
 }

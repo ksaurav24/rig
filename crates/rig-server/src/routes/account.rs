@@ -1,9 +1,16 @@
 //! The signed-in user's own second factor.
 
-use axum::{Json, extract::State, http::StatusCode};
+use std::net::SocketAddr;
+
+use axum::{
+    Json,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+};
+use axum_extra::extract::CookieJar;
 use rig_api::{
-    ErrorBody, PasswordConfirm, RecoveryCodes, TotpCode, TotpDisable, TotpEnrollment, TotpStatus,
-    UpdateProfileRequest, UploadImageRequest, User,
+    ErrorBody, PasswordConfirm, RecoveryCodes, SessionInfo, TotpCode, TotpDisable, TotpEnrollment,
+    TotpStatus, UpdateProfileRequest, UploadImageRequest, User,
 };
 use sqlx::Row;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -16,10 +23,10 @@ use super::{
     },
 };
 use crate::{
-    auth::{self, Auth, Via, Viewer},
+    auth::{self, Auth, CSRF_HEADER, Viewer},
     crypto,
     error::{ApiError, ApiResult},
-    state::{AppState, now},
+    state::{AppState, now, ts},
     totp,
 };
 
@@ -27,6 +34,8 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(update_profile))
         .routes(routes!(upload_avatar, delete_avatar))
+        .routes(routes!(list_sessions))
+        .routes(routes!(revoke_session))
         .routes(routes!(totp_status))
         .routes(routes!(totp_setup))
         .routes(routes!(totp_enable))
@@ -138,33 +147,48 @@ async fn delete_avatar(
 }
 
 const MAX_CODE_FAILURES: i64 = 8;
+const MAX_PASSWORD_FAILURES: i64 = 8;
+const TOTP_PENDING_TTL_MINS: i64 = 15;
 
 /// Second-factor changes need a real browser session: an API token that
 /// leaked must not be able to turn the account's protection off.
 fn session_only(auth: &Auth<Viewer>) -> ApiResult<()> {
-    match auth.via {
-        Via::Session => Ok(()),
-        Via::ApiToken => Err(ApiError::Forbidden(
-            "sign in to the dashboard to change two-factor settings",
-        )),
-    }
+    auth.require_session("sign in to the dashboard to change two-factor settings")
 }
 
-fn recovery_hash(user_id: &str, code: &str) -> String {
+/// Vault-keyed HMAC-SHA256 hash of a recovery code (`v2:<hex>`), defeating
+/// offline brute-force if only `rig.db` leaks without `master.key`.
+fn recovery_hash_v2(state: &AppState, user_id: &str, code: &str) -> String {
+    let payload = format!("{user_id}:{}", totp::normalize_recovery(code));
+    format!(
+        "v2:{}",
+        state.vault.hmac_sha256("totp-recovery", payload.as_bytes())
+    )
+}
+
+/// Legacy unsalted SHA-256 format kept only to verify codes generated prior
+/// to the v2 upgrade.
+fn recovery_hash_legacy(user_id: &str, code: &str) -> String {
     crypto::hash_token(&format!("{user_id}:{}", totp::normalize_recovery(code)))
 }
 
-async fn verify_password(state: &AppState, user_id: &str, password: String) -> ApiResult<()> {
+async fn verify_password(state: &AppState, auth: &Auth<Viewer>, password: String) -> ApiResult<()> {
+    let rate_key = format!("password:{}", auth.user_id);
+    auth::check_rate(state, &rate_key, MAX_PASSWORD_FAILURES).await?;
     let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
-        .bind(user_id)
+        .bind(&auth.user_id)
         .fetch_one(&state.db)
         .await?;
     let ok = tokio::task::spawn_blocking(move || crypto::verify_password(&password, &stored))
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     if ok {
+        auth::clear_failures(state, &rate_key).await?;
         Ok(())
     } else {
+        auth::record_failure(state, &rate_key).await?;
+        auth.audit(state, "auth.password_confirm_failed", None, None)
+            .await?;
         Err(ApiError::validation("that password is not correct"))
     }
 }
@@ -197,18 +221,34 @@ pub(crate) async fn check_code(
         .rows_affected();
         return Ok(won == 1);
     }
-    if totp::normalize_recovery(code).len() == 8 {
-        let used = sqlx::query(
+    let normalized = totp::normalize_recovery(code);
+    if normalized.len() == 16 || normalized.len() == 8 {
+        let used_v2 = sqlx::query(
             "UPDATE recovery_codes SET used_at = ?
              WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
         )
         .bind(now())
         .bind(user_id)
-        .bind(recovery_hash(user_id, code))
+        .bind(recovery_hash_v2(state, user_id, code))
         .execute(&state.db)
         .await?
         .rows_affected();
-        return Ok(used == 1);
+        if used_v2 == 1 {
+            return Ok(true);
+        }
+        if normalized.len() == 8 {
+            let used_legacy = sqlx::query(
+                "UPDATE recovery_codes SET used_at = ?
+                 WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
+            )
+            .bind(now())
+            .bind(user_id)
+            .bind(recovery_hash_legacy(user_id, code))
+            .execute(&state.db)
+            .await?
+            .rows_affected();
+            return Ok(used_legacy == 1);
+        }
     }
     Ok(false)
 }
@@ -241,7 +281,7 @@ async fn store_recovery_codes(state: &AppState, user_id: &str) -> ApiResult<Vec<
     for code in &codes {
         sqlx::query("INSERT INTO recovery_codes (user_id, code_hash) VALUES (?, ?)")
             .bind(user_id)
-            .bind(recovery_hash(user_id, code))
+            .bind(recovery_hash_v2(state, user_id, code))
             .execute(&mut *tx)
             .await?;
     }
@@ -249,14 +289,85 @@ async fn store_recovery_codes(state: &AppState, user_id: &str) -> ApiResult<Vec<
     Ok(codes)
 }
 
-/// Signs out every other session of the user, keeping the current one.
-async fn revoke_other_sessions(state: &AppState, auth: &Auth<Viewer>) -> ApiResult<()> {
-    sqlx::query("DELETE FROM sessions WHERE user_id = ? AND csrf_token != ?")
-        .bind(&auth.user_id)
-        .bind(auth.csrf_token.as_deref().unwrap_or_default())
-        .execute(&state.db)
+fn csrf_headers(csrf: &str) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(csrf) {
+        out.insert(CSRF_HEADER, v);
+    }
+    out
+}
+
+fn user_agent(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+}
+
+/// Active browser sessions for your account.
+#[utoipa::path(get, path = "/api/v1/account/sessions", tag = "account",
+    responses((status = 200, body = Vec<SessionInfo>), (status = 403, body = ErrorBody)))]
+async fn list_sessions(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+) -> ApiResult<Json<Vec<SessionInfo>>> {
+    auth.require_session("sign in to the dashboard to view active sessions")?;
+    let rows = sqlx::query(
+        "SELECT token_hash, user_agent, ip, created_at, last_active_at, expires_at
+         FROM sessions
+         WHERE user_id = ? AND expires_at > ?
+         ORDER BY created_at DESC",
+    )
+    .bind(&auth.user_id)
+    .bind(now())
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.iter()
+            .map(|r| {
+                let hash: String = r.get("token_hash");
+                SessionInfo {
+                    id: hash.chars().take(16).collect(),
+                    user_agent: r.get("user_agent"),
+                    ip: r.get("ip"),
+                    created_at: r.get("created_at"),
+                    last_active_at: r.get("last_active_at"),
+                    expires_at: r.get("expires_at"),
+                    current: hash == auth.credential_hash,
+                }
+            })
+            .collect(),
+    ))
+}
+
+/// Revoke one of your browser sessions by its short id (cannot revoke the current session; use logout).
+#[utoipa::path(delete, path = "/api/v1/account/sessions/{id}", tag = "account",
+    params(("id" = String, Path)),
+    responses((status = 204), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
+async fn revoke_session(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    auth.require_session("sign in to the dashboard to revoke sessions")?;
+    if id.len() != 16 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::NotFound("session"));
+    }
+    let prefix = format!("{id}%");
+    let deleted = sqlx::query(
+        "DELETE FROM sessions WHERE user_id = ? AND token_hash LIKE ? AND token_hash != ?",
+    )
+    .bind(&auth.user_id)
+    .bind(&prefix)
+    .bind(&auth.credential_hash)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    if deleted == 0 {
+        return Err(ApiError::NotFound("session"));
+    }
+    auth.audit(&state, "auth.session_revoked", Some(&id), None)
         .await?;
-    Ok(())
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Whether two-factor sign-in is on for you.
@@ -284,18 +395,18 @@ async fn totp_status(
 }
 
 /// Start turning on two-factor sign-in. Returns a secret and its QR code;
-/// nothing changes until it is confirmed with a code.
+/// nothing changes until it is confirmed with a code within 15 minutes.
 #[utoipa::path(post, path = "/api/v1/account/totp/setup", tag = "account",
     request_body = PasswordConfirm,
     responses((status = 200, body = TotpEnrollment), (status = 409, body = ErrorBody),
-              (status = 422, body = ErrorBody)))]
+              (status = 422, body = ErrorBody), (status = 429, body = ErrorBody)))]
 async fn totp_setup(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Json(req): Json<PasswordConfirm>,
 ) -> ApiResult<Json<TotpEnrollment>> {
     session_only(&auth)?;
-    verify_password(&state, &auth.user_id, req.password).await?;
+    verify_password(&state, &auth, req.password).await?;
     let enabled: Option<String> =
         sqlx::query_scalar("SELECT totp_enabled_at FROM users WHERE id = ?")
             .bind(&auth.user_id)
@@ -307,8 +418,10 @@ async fn totp_setup(
         ));
     }
     let secret = totp::new_secret();
-    sqlx::query("UPDATE users SET totp_pending = ? WHERE id = ?")
+    let expires = ts(chrono::Utc::now() + chrono::Duration::minutes(TOTP_PENDING_TTL_MINS));
+    sqlx::query("UPDATE users SET totp_pending = ?, totp_pending_expires_at = ? WHERE id = ?")
         .bind(state.vault.encrypt(&secret)?)
+        .bind(&expires)
         .bind(&auth.user_id)
         .execute(&state.db)
         .await?;
@@ -322,7 +435,7 @@ async fn totp_setup(
 }
 
 /// Confirm the new authenticator with a code. Turns two-factor sign-in on,
-/// signs out your other sessions and returns ten recovery codes, once.
+/// rotates the current session, signs out other sessions and returns ten recovery codes, once.
 #[utoipa::path(post, path = "/api/v1/account/totp/enable", tag = "account",
     request_body = TotpCode,
     responses((status = 200, body = RecoveryCodes), (status = 422, body = ErrorBody),
@@ -330,16 +443,34 @@ async fn totp_setup(
 async fn totp_enable(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
     Json(req): Json<TotpCode>,
-) -> ApiResult<Json<RecoveryCodes>> {
+) -> ApiResult<(CookieJar, HeaderMap, Json<RecoveryCodes>)> {
     session_only(&auth)?;
     let key = format!("totp:user:{}", auth.user_id);
     auth::check_rate(&state, &key, MAX_CODE_FAILURES).await?;
-    let pending: Option<String> = sqlx::query_scalar("SELECT totp_pending FROM users WHERE id = ?")
-        .bind(&auth.user_id)
-        .fetch_one(&state.db)
-        .await?;
+    let row = sqlx::query(
+        "SELECT totp_pending, totp_pending_expires_at FROM users WHERE id = ?",
+    )
+    .bind(&auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+    let pending: Option<String> = row.get("totp_pending");
+    let expires: Option<String> = row.get("totp_pending_expires_at");
     let pending = pending.ok_or_else(|| ApiError::validation("start the setup first"))?;
+    if expires.as_deref().is_some_and(|exp| exp <= now().as_str()) {
+        let _ = sqlx::query(
+            "UPDATE users SET totp_pending = NULL, totp_pending_expires_at = NULL WHERE id = ?",
+        )
+        .bind(&auth.user_id)
+        .execute(&state.db)
+        .await;
+        return Err(ApiError::validation(
+            "the setup expired; start two-factor setup again",
+        ));
+    }
     let secret = state.vault.decrypt(&pending)?;
     let Some(step) = totp::verify(&secret, &req.code, chrono::Utc::now().timestamp(), None) else {
         auth::record_failure(&state, &key).await?;
@@ -350,6 +481,7 @@ async fn totp_enable(
     auth::clear_failures(&state, &key).await?;
     let done = sqlx::query(
         "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL,
+                          totp_pending_expires_at = NULL,
                           totp_enabled_at = ?, totp_last_step = ?
          WHERE id = ? AND totp_pending = ? AND totp_enabled_at IS NULL",
     )
@@ -364,23 +496,34 @@ async fn totp_enable(
         return Err(ApiError::Conflict("the setup changed; start again".into()));
     }
     let codes = store_recovery_codes(&state, &auth.user_id).await?;
-    revoke_other_sessions(&state, &auth).await?;
+    let (cookie, csrf) = auth::rotate_sessions(
+        &state,
+        &auth.user_id,
+        &auth.org_id,
+        user_agent(&headers),
+        auth.ip.as_deref(),
+        auth::is_https(&state, &headers, Some(addr.ip())),
+    )
+    .await?;
     auth.audit(&state, "auth.totp_enabled", None, None).await?;
-    Ok(Json(RecoveryCodes { codes }))
+    Ok((jar.add(cookie), csrf_headers(&csrf), Json(RecoveryCodes { codes })))
 }
 
 /// Turn two-factor sign-in off. Needs your password and a current code
-/// (or a recovery code), and signs out your other sessions.
+/// (or a recovery code), rotates the current session and signs out other sessions.
 #[utoipa::path(post, path = "/api/v1/account/totp/disable", tag = "account",
     request_body = TotpDisable,
     responses((status = 204), (status = 422, body = ErrorBody), (status = 429, body = ErrorBody)))]
 async fn totp_disable(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
     Json(req): Json<TotpDisable>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(CookieJar, HeaderMap, StatusCode)> {
     session_only(&auth)?;
-    verify_password(&state, &auth.user_id, req.password).await?;
+    verify_password(&state, &auth, req.password).await?;
     let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
         .bind(&auth.user_id)
         .fetch_one(&state.db)
@@ -390,22 +533,30 @@ async fn totp_disable(
         return Err(ApiError::validation("that code did not match"));
     }
     disable_for_user(&state, &auth.user_id).await?;
-    revoke_other_sessions(&state, &auth).await?;
+    let (cookie, csrf) = auth::rotate_sessions(
+        &state,
+        &auth.user_id,
+        &auth.org_id,
+        user_agent(&headers),
+        auth.ip.as_deref(),
+        auth::is_https(&state, &headers, Some(addr.ip())),
+    )
+    .await?;
     auth.audit(&state, "auth.totp_disabled", None, None).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok((jar.add(cookie), csrf_headers(&csrf), StatusCode::NO_CONTENT))
 }
 
 /// Replace your recovery codes. The old ones stop working.
 #[utoipa::path(post, path = "/api/v1/account/totp/recovery-codes", tag = "account",
     request_body = TotpDisable,
-    responses((status = 200, body = RecoveryCodes), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = RecoveryCodes), (status = 422, body = ErrorBody), (status = 429, body = ErrorBody)))]
 async fn totp_regenerate(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Json(req): Json<TotpDisable>,
 ) -> ApiResult<Json<RecoveryCodes>> {
     session_only(&auth)?;
-    verify_password(&state, &auth.user_id, req.password).await?;
+    verify_password(&state, &auth, req.password).await?;
     let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
         .bind(&auth.user_id)
         .fetch_one(&state.db)
@@ -424,6 +575,7 @@ pub(crate) async fn disable_for_user(state: &AppState, user_id: &str) -> ApiResu
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE users SET totp_secret = NULL, totp_pending = NULL,
+                          totp_pending_expires_at = NULL,
                           totp_enabled_at = NULL, totp_last_step = NULL WHERE id = ?",
     )
     .bind(user_id)

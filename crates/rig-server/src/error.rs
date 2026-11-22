@@ -16,7 +16,7 @@ pub enum ApiError {
     #[error("not signed in")]
     Unauthorized,
     #[error("enter the code from your authenticator app")]
-    SecondFactorRequired,
+    SecondFactorRequired(Option<String>),
     #[error("{0}")]
     Forbidden(&'static str),
     #[error("{0} not found")]
@@ -42,7 +42,7 @@ impl ApiError {
         match self {
             Self::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::SecondFactorRequired => (StatusCode::UNAUTHORIZED, "second_factor_required"),
+            Self::SecondFactorRequired(_) => (StatusCode::UNAUTHORIZED, "second_factor_required"),
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
@@ -74,10 +74,15 @@ impl IntoResponse for ApiError {
             }
             other => other.to_string(),
         };
+        let challenge_token = match &self {
+            Self::SecondFactorRequired(tok) => tok.clone(),
+            _ => None,
+        };
         let body = ErrorBody {
             error: ErrorDetail {
                 code: code.into(),
                 message,
+                challenge_token,
             },
         };
         (status, Json(body)).into_response()

@@ -75,7 +75,7 @@ function SetupPage() {
       eyebrow="Initial setup"
       title="Create owner account"
       description="Enter the one-time setup token from your server console and name your organization."
-      version={status?.version}
+      version={status?.version ?? undefined}
     >
       <form onSubmit={submit}>
         <FieldGroup>

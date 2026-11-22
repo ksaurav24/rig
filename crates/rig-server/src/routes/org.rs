@@ -49,10 +49,21 @@ pub(crate) fn validate_external_image_url(raw: &str) -> ApiResult<String> {
         ));
     }
     let parsed = url::Url::parse(trimmed)
-        .map_err(|_| ApiError::validation("enter a valid http:// or https:// image URL"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        .map_err(|_| ApiError::validation("enter a valid https:// image URL"))?;
+    if parsed.scheme() != "https" {
+        return Err(ApiError::validation("image URL must start with https://"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(ApiError::validation(
-            "image URL must start with http:// or https://",
+            "image URL cannot include embedded credentials",
+        ));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(ApiError::validation("image URL must include a host"));
+    };
+    if crate::access::is_blocked_hostname(host) {
+        return Err(ApiError::validation(
+            "image URL cannot point to a local or private host",
         ));
     }
     Ok(trimmed.to_string())
@@ -74,60 +85,18 @@ pub(crate) fn validate_avatar_preset(raw: &str) -> ApiResult<String> {
     Ok(trimmed.to_string())
 }
 
-fn is_safe_svg(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return false;
-    };
-    let lower = text.to_ascii_lowercase();
-    if !lower.contains("<svg") {
-        return false;
-    }
-    for banned in [
-        "<script",
-        "javascript:",
-        "<foreignobject",
-        "<iframe",
-        "<object",
-        "<embed",
-        "data:text/html",
-    ] {
-        if lower.contains(banned) {
-            return false;
-        }
-    }
-    // Reject inline event handlers like onload=, onerror=, onclick=, etc.
-    for (idx, _) in lower.match_indices("on") {
-        let prev = idx
-            .checked_sub(1)
-            .and_then(|i| lower.as_bytes().get(i).copied());
-        if prev.is_some_and(|b| b.is_ascii_whitespace() || b == b'/' || b == b'"' || b == b'\'') {
-            let rest = &lower[idx + 2..];
-            let name_len = rest
-                .bytes()
-                .take_while(|b| b.is_ascii_alphabetic())
-                .count();
-            if name_len >= 3 {
-                let after = rest[name_len..].trim_start();
-                if after.starts_with('=') {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
 pub(crate) fn validate_and_decode_image(req: &UploadImageRequest) -> ApiResult<(String, Vec<u8>)> {
     let ct = req.content_type.trim().to_ascii_lowercase();
+    // Only raster formats are accepted on upload (SVG markup is refused to avoid
+    // active content / XML sanitizer bypasses).
     let canonical = match ct.as_str() {
         "image/png" => "image/png",
         "image/jpeg" | "image/jpg" => "image/jpeg",
         "image/webp" => "image/webp",
         "image/gif" => "image/gif",
-        "image/svg+xml" => "image/svg+xml",
         _ => {
             return Err(ApiError::validation(
-                "unsupported image type; use PNG, JPEG, WebP, GIF, or SVG",
+                "unsupported image type; use PNG, JPEG, WebP, or GIF",
             ));
         }
     };
@@ -152,12 +121,11 @@ pub(crate) fn validate_and_decode_image(req: &UploadImageRequest) -> ApiResult<(
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
         "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/svg+xml" => is_safe_svg(&bytes),
         _ => false,
     };
     if !valid_magic {
         return Err(ApiError::validation(
-            "image file does not match its content type or contains disallowed markup",
+            "image file does not match its content type",
         ));
     }
 
@@ -361,7 +329,10 @@ async fn get_media(
 
     let is_public: i64 = row.get("is_public");
     if is_public == 0 {
-        let auth = auth?;
+        // Uniform 404 whether unauthenticated or cross-org to avoid an existence oracle.
+        let Ok(auth) = auth else {
+            return Err(ApiError::NotFound("media"));
+        };
         let org_id: String = row.get("org_id");
         if org_id != auth.org_id {
             return Err(ApiError::NotFound("media"));
@@ -370,10 +341,15 @@ async fn get_media(
 
     let content_type: String = row.get("content_type");
     let data: Vec<u8> = row.get("data");
+    let cache_control = if is_public != 0 {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=31536000, immutable"
+    };
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, &content_type)
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CACHE_CONTROL, cache_control)
         .header(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -396,18 +372,21 @@ mod tests {
     #[test]
     fn validates_external_urls() {
         assert!(validate_external_image_url("https://example.com/logo.png").is_ok());
-        assert!(validate_external_image_url("http://cdn.local/avatar.webp").is_ok());
+        assert!(validate_external_image_url("http://cdn.local/avatar.webp").is_err());
+        assert!(validate_external_image_url("https://127.0.0.1/avatar.png").is_err());
+        assert!(validate_external_image_url("https://localhost/avatar.png").is_err());
         assert!(validate_external_image_url("javascript:alert(1)").is_err());
         assert!(validate_external_image_url("data:image/png;base64,abc").is_err());
         assert!(validate_external_image_url("not a url").is_err());
     }
 
     #[test]
-    fn rejects_unsafe_svgs() {
-        assert!(is_safe_svg(b"<svg viewBox='0 0 10 10'><circle r='4'/></svg>"));
-        assert!(!is_safe_svg(b"<svg><script>alert(1)</script></svg>"));
-        assert!(!is_safe_svg(b"<svg onload=\"alert(1)\"></svg>"));
-        assert!(!is_safe_svg(b"<svg><a href=\"javascript:alert(1)\"/></svg>"));
+    fn rejects_svg_uploads() {
+        let req = UploadImageRequest {
+            content_type: "image/svg+xml".into(),
+            data_base64: BASE64.encode(b"<svg viewBox='0 0 10 10'><circle r='4'/></svg>"),
+        };
+        assert!(validate_and_decode_image(&req).is_err());
     }
 
     #[test]

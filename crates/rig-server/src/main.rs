@@ -19,7 +19,13 @@ mod totp;
 mod watch;
 mod wizard;
 
-use std::{net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{
+    io::IsTerminal,
+    net::SocketAddr,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -105,6 +111,18 @@ struct Cli {
     /// The address people open Rig on, used in the setup message.
     #[arg(long, env = "RIG_PUBLIC_URL", global = true)]
     public_url: Option<String>,
+
+    /// Allow alert webhooks to connect to loopback, private, or local addresses.
+    #[arg(long, env = "RIG_ALLOW_PRIVATE_ALERTS", global = true)]
+    allow_private_alerts: bool,
+
+    /// Allow Git clones and branch polling to connect to loopback, private, or local addresses.
+    #[arg(long, env = "RIG_ALLOW_PRIVATE_GIT", global = true)]
+    allow_private_git: bool,
+
+    /// Serve interactive Scalar API docs at `/api/docs` (authenticated).
+    #[arg(long, env = "RIG_ENABLE_API_DOCS", global = true)]
+    enable_api_docs: bool,
 }
 
 #[derive(Subcommand)]
@@ -188,7 +206,8 @@ async fn main() -> Result<()> {
         let password = reset_password(&db, email).await?;
         let normalized = email.trim().to_lowercase();
         println!(
-            "\n  Password reset for {normalized}.\n  All active sessions have been signed out.\n\n  New password:\n\n      {password}\n\n  Sign in with this password and change it in Account settings.\n"
+            "\n  Password reset for {normalized}.\n  All active sessions and API tokens have been revoked.\n\n  New temporary password (valid {} days):\n\n      {password}\n\n  Sign in with this password; you will be asked to choose a new password.\n",
+            routes::members::TEMP_PASSWORD_TTL_DAYS
         );
         return Ok(());
     }
@@ -222,8 +241,16 @@ async fn main() -> Result<()> {
         println!("Dashboard access is now {mode}. Restart Rig for it to take effect.");
         return Ok(());
     }
+    crypto::migrate_plaintext_secrets(&db, &vault).await?;
+    auth::prune_expired(&db).await;
+
     let dashboard_access = access::DashboardAccess::default();
     dashboard_access.set(access::load(&db).await?);
+    dashboard_access.set_blocked_bridges(
+        tokio::task::spawn_blocking(access::container_bridge_cidrs)
+            .await
+            .unwrap_or_default(),
+    );
     let state = AppState {
         db,
         vault,
@@ -244,6 +271,9 @@ async fn main() -> Result<()> {
             github_api: trim_slash(&cli.github_api),
             github_web: trim_slash(&cli.github_web),
             poll_interval: cli.poll_interval,
+            allow_private_alerts: cli.allow_private_alerts,
+            allow_private_git: cli.allow_private_git,
+            enable_api_docs: cli.enable_api_docs,
         }),
     };
 
@@ -252,11 +282,19 @@ async fn main() -> Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| format!("http://{}", cli.listen));
-        // Printed to the console only, never to structured logs.
-        eprintln!(
-            "\n  Rig is not set up yet.\n  Open {url} and enter this one-time setup token \
-             (valid 30 minutes; `rig-server setup-token` prints a new one):\n\n      {token}\n",
-        );
+        // Only print the secret setup token to an interactive terminal so
+        // systemd never captures it into journald.
+        if std::io::stderr().is_terminal() {
+            eprintln!(
+                "\n  Rig is not set up yet.\n  Open {url} and enter this one-time setup token \
+                 (valid 30 minutes; `rig-server setup-token` prints a new one):\n\n      {token}\n",
+            );
+        } else {
+            tracing::info!(
+                %url,
+                "Rig is not set up yet; run `rig-server setup-token` on the server to print a one-time setup token"
+            );
+        }
     }
     let _ = setup::dummy_hash();
     databases::recover(&state).await?;
@@ -304,12 +342,21 @@ async fn reset_2fa(db: &sqlx::SqlitePool, email: &str) -> Result<()> {
     };
     sqlx::query(
         "UPDATE users SET totp_secret = NULL, totp_pending = NULL,
+                          totp_pending_expires_at = NULL,
                           totp_enabled_at = NULL, totp_last_step = NULL WHERE id = ?",
     )
     .bind(&id)
     .execute(&mut *tx)
     .await?;
     sqlx::query("DELETE FROM recovery_codes WHERE user_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_2fa WHERE user_id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -325,7 +372,7 @@ async fn reset_2fa(db: &sqlx::SqlitePool, email: &str) -> Result<()> {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    println!("Two-factor sign-in is off for {email}. They can sign in with their password.");
+    println!("Two-factor sign-in is off for {email} and active sessions were signed out. They can sign in with their password.");
     Ok(())
 }
 
@@ -336,6 +383,9 @@ async fn reset_password(db: &sqlx::SqlitePool, email: &str) -> Result<String> {
     let hash = tokio::task::spawn_blocking(move || crypto::hash_password(&pw_for_hash))
         .await
         .context("hashing password")??;
+    let temp_expires = state::ts(
+        chrono::Utc::now() + chrono::Duration::days(routes::members::TEMP_PASSWORD_TTL_DAYS),
+    );
 
     let mut tx = db.begin().await?;
     let id: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = ?")
@@ -345,17 +395,30 @@ async fn reset_password(db: &sqlx::SqlitePool, email: &str) -> Result<String> {
     let Some(id) = id else {
         anyhow::bail!("no user with the email {email}");
     };
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(&hash)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, must_change_password = 1, temp_password_expires_at = ?
+         WHERE id = ?",
+    )
+    .bind(&hash)
+    .bind(&temp_expires)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM sessions WHERE user_id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM login_attempts WHERE key = ?")
+    sqlx::query("DELETE FROM api_tokens WHERE user_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_2fa WHERE user_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM login_attempts WHERE key = ? OR key LIKE ?")
         .bind(format!("login:email:{email}"))
+        .bind(format!("login:pair:{email}:%"))
         .execute(&mut *tx)
         .await?;
     sqlx::query(
@@ -411,6 +474,13 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO api_tokens (id, org_id, user_id, name, token_hash, prefix, role, created_at)
+             VALUES ('at1', 'org1', 'u1', 'ci', 'athash1', 'rig_xx', 'owner', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO login_attempts (key, ts) VALUES ('login:email:owner@example.com', 9999999999)")
             .execute(&db)
             .await
@@ -419,19 +489,44 @@ mod tests {
         let new_pw = reset_password(&db, " Owner@Example.com ").await.unwrap();
         assert!(new_pw.len() >= 10);
 
-        let stored: String =
-            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'u1'")
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let (stored, must_change, temp_exp): (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT password_hash, must_change_password, temp_password_expires_at FROM users WHERE id = 'u1'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert!(crypto::verify_password(&new_pw, &stored));
         assert!(!crypto::verify_password("original-password-123", &stored));
+        assert_eq!(must_change, 1);
+        assert!(temp_exp.is_some());
 
         let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'u1'")
             .fetch_one(&db)
             .await
             .unwrap();
         assert_eq!(sessions, 0);
+
+        let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens WHERE user_id = 'u1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 0);
+
+        // Verify reset_2fa also clears active sessions.
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, org_id, csrf_token, expires_at)
+             VALUES ('tok2', 'u1', 'org1', 'csrf2', '2099-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        reset_2fa(&db, "owner@example.com").await.unwrap();
+        let sessions_after_2fa: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'u1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sessions_after_2fa, 0);
 
         let attempts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM login_attempts WHERE key = 'login:email:owner@example.com'",

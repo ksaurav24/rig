@@ -4,11 +4,16 @@
 //! JSON control messages from the client: `{"type":"resize","cols":N,"rows":N}`.
 //! Being a shell, this is gated at developer and every session is audited.
 
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{LazyLock, Mutex},
+    time::Duration,
+};
 
 use axum::{
     extract::{
-        Path, Query, State,
+        ConnectInfo, Path, Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, header},
@@ -16,12 +21,13 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
+use rig_api::Role;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::{
-    auth::{Auth, Developer, Via, check_origin},
+    auth::{self, Auth, AuthSnapshot, Developer, Via, check_origin},
     error::{ApiError, ApiResult},
     runtime::Shell,
     state::AppState,
@@ -30,9 +36,68 @@ use crate::{
 /// A terminal left alone this long is closed, so forgotten tabs do not keep
 /// root shells open.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const AUTH_RECHECK_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_COLS: u16 = 500;
 const MAX_ROWS: u16 = 200;
+const MAX_CONCURRENT_PER_APP: usize = 5;
+const MAX_CONCURRENT_PER_USER: usize = 5;
+
+struct ActiveTerminals {
+    by_app: HashMap<String, usize>,
+    by_user: HashMap<String, usize>,
+}
+
+static ACTIVE: LazyLock<Mutex<ActiveTerminals>> = LazyLock::new(|| {
+    Mutex::new(ActiveTerminals {
+        by_app: HashMap::new(),
+        by_user: HashMap::new(),
+    })
+});
+
+struct TerminalLease {
+    app_id: String,
+    user_id: String,
+}
+
+impl TerminalLease {
+    fn acquire(app_id: String, user_id: String) -> ApiResult<Self> {
+        let mut active = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
+        let app_count = active.by_app.get(&app_id).copied().unwrap_or(0);
+        if app_count >= MAX_CONCURRENT_PER_APP {
+            return Err(ApiError::Conflict(
+                "too many terminal sessions are already open for this app".into(),
+            ));
+        }
+        let user_count = active.by_user.get(&user_id).copied().unwrap_or(0);
+        if user_count >= MAX_CONCURRENT_PER_USER {
+            return Err(ApiError::Conflict(
+                "you have too many terminal sessions open; close one first".into(),
+            ));
+        }
+        *active.by_app.entry(app_id.clone()).or_insert(0) += 1;
+        *active.by_user.entry(user_id.clone()).or_insert(0) += 1;
+        Ok(Self { app_id, user_id })
+    }
+}
+
+impl Drop for TerminalLease {
+    fn drop(&mut self) {
+        let mut active = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(n) = active.by_app.get_mut(&self.app_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                active.by_app.remove(&self.app_id);
+            }
+        }
+        if let Some(n) = active.by_user.get_mut(&self.user_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                active.by_user.remove(&self.user_id);
+            }
+        }
+    }
+}
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().route("/api/v1/apps/{id}/terminal", get(open))
@@ -57,6 +122,7 @@ fn clamp(cols: u16, rows: u16) -> (u16, u16) {
 async fn open(
     State(state): State<AppState>,
     auth: Auth<Developer>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(id): Path<String>,
     Query(size): Query<Size>,
     headers: HeaderMap,
@@ -64,12 +130,12 @@ async fn open(
 ) -> ApiResult<Response> {
     // A WebSocket upgrade is a GET, so the CSRF header check does not apply
     // and the cookie alone would authenticate it. Browsers always send
-    // `Origin` on upgrades: require it and require it to be ours.
+    // `Origin` on upgrades: require it and require scheme + host to match.
     if auth.via == Via::Session {
         if !headers.contains_key(header::ORIGIN) {
             return Err(ApiError::Forbidden("cross-origin request blocked"));
         }
-        check_origin(&headers)?;
+        check_origin(&state, &headers, Some(addr.ip()))?;
     }
 
     let row: Option<(String, Option<String>)> = sqlx::query_as(
@@ -88,30 +154,45 @@ async fn open(
         ));
     };
 
+    let lease = TerminalLease::acquire(id.clone(), auth.user_id.clone())?;
     let (cols, rows) = clamp(size.cols.unwrap_or(80), size.rows.unwrap_or(24));
     let shell = state
         .runtime
         .shell(&container, cols, rows)
         .await
         .map_err(ApiError::Internal)?;
+    let snap = auth.snapshot();
     auth.audit(&state, "app.terminal", Some(&name), None)
         .await?;
 
     Ok(upgrade
         .max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| session(state, socket, shell)))
+        .on_upgrade(move |socket| session(state, socket, shell, snap, lease)))
 }
 
-async fn session(state: AppState, socket: WebSocket, shell: Shell) {
+async fn session(
+    state: AppState,
+    socket: WebSocket,
+    shell: Shell,
+    snap: AuthSnapshot,
+    _lease: TerminalLease,
+) {
     let Shell {
         id,
         mut output,
         mut input,
     } = shell;
     let (mut tx, mut rx) = socket.split();
+    let mut auth_tick = tokio::time::interval(AUTH_RECHECK_INTERVAL);
+    auth_tick.tick().await;
     let reason = loop {
         tokio::select! {
+            _ = auth_tick.tick() => {
+                if !auth::verify_still_valid(&state, &snap, Role::Developer).await {
+                    break "Session revoked or permissions changed";
+                }
+            }
             chunk = output.next() => match chunk {
                 Some(Ok(bytes)) => {
                     if tx.send(Message::Binary(bytes)).await.is_err() {

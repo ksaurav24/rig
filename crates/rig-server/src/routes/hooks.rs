@@ -28,22 +28,32 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new().routes(routes!(app_hook))
 }
 
-/// Whether the request carries proof of `secret`.
+/// Whether the request carries a valid HMAC-SHA256 signature over `body`.
+/// Used by GitHub App webhooks (which must never accept plain `X-Gitlab-Token`).
+pub fn verify_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let Some(sig) = header("x-hub-signature-256").or_else(|| header("x-rig-signature")) else {
+        return false;
+    };
+    let Some(hex_sig) = sig.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(expected) = hex::decode(hex_sig) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    // `verify_slice` compares in constant time.
+    mac.verify_slice(&expected).is_ok()
+}
+
+/// Whether the request carries proof of `secret` (HMAC signature or GitLab token).
 pub fn verify(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    if let Some(sig) = header("x-hub-signature-256").or_else(|| header("x-rig-signature")) {
-        let Some(hex_sig) = sig.strip_prefix("sha256=") else {
-            return false;
-        };
-        let Ok(expected) = hex::decode(hex_sig) else {
-            return false;
-        };
-        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
-            return false;
-        };
-        mac.update(body);
-        // `verify_slice` compares in constant time.
-        return mac.verify_slice(&expected).is_ok();
+    if header("x-hub-signature-256").is_some() || header("x-rig-signature").is_some() {
+        return verify_hmac(secret, headers, body);
     }
     header("x-gitlab-token").is_some_and(|t| constant_time_eq(t, secret))
 }
@@ -86,7 +96,8 @@ async fn app_hook(
     let Some(row) = row else {
         return Err(ApiError::Unauthorized);
     };
-    let secret: String = row.get("webhook_secret");
+    let secret_enc: String = row.get("webhook_secret");
+    let secret = state.vault.decrypt(&secret_enc)?;
     if !verify(&secret, &headers, &body) {
         return Err(ApiError::Unauthorized);
     }
@@ -139,7 +150,14 @@ async fn app_hook(
             image_id: None,
         },
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        if deploy::is_active_deploy_conflict(&e) {
+            ApiError::Conflict("a deployment is already in progress for this app".into())
+        } else {
+            e.into()
+        }
+    })?;
     sqlx::query("UPDATE apps SET status = 'deploying', updated_at = ? WHERE id = ?")
         .bind(now())
         .bind(&id)
@@ -230,6 +248,12 @@ mod tests {
     fn gitlab_token_verifies() {
         assert!(verify("tok", &headers(&[("x-gitlab-token", "tok")]), b""));
         assert!(!verify("tok", &headers(&[("x-gitlab-token", "nope")]), b""));
+        // Strict HMAC verifier used by GitHub App hooks must reject X-Gitlab-Token.
+        assert!(!verify_hmac(
+            "tok",
+            &headers(&[("x-gitlab-token", "tok")]),
+            b""
+        ));
     }
 
     #[test]

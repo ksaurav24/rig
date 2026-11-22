@@ -154,6 +154,7 @@ pub async fn sampler(state: AppState) {
             if let Err(e) = prune.execute(&state.db).await {
                 tracing::warn!("pruning metrics: {e}");
             }
+            crate::auth::prune_expired(&state.db).await;
         }
     }
 }

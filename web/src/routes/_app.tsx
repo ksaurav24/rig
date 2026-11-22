@@ -1,9 +1,10 @@
-import { useSuspenseQuery } from '@tanstack/react-query'
+import { useMutation, useQueryClient, useSuspenseQuery } from '@tanstack/react-query'
 import { Link, Outlet, createFileRoute, redirect, useLocation, useMatches, useNavigate } from '@tanstack/react-router'
-import { Fragment, useEffect, useState } from 'react'
-import { ApiError } from '@/api/client'
+import { Fragment, useEffect, useState, type FormEvent } from 'react'
+import { api, ApiError, unwrap, type Schemas } from '@/api/client'
 import { meQuery, setupStatusQuery } from '@/api/queries'
 import { AppSidebar } from '@/components/app/app-sidebar'
+import { AuthLayout } from '@/components/app/auth-layout'
 import { CommandMenu } from '@/components/app/command-menu'
 import { DiskBanner } from '@/components/app/disk-banner'
 import { ThemeToggle } from '@/components/app/theme-toggle'
@@ -14,12 +15,16 @@ import {
   BreadcrumbList,
   BreadcrumbPage,
 } from '@/components/fluid/breadcrumb'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/fluid/field'
+import { Input } from '@/components/fluid/input'
 import {
   SIDEBAR_COOKIE_NAME,
   SidebarInset,
   SidebarProvider,
   SidebarTrigger,
 } from '@/components/fluid/sidebar'
+import { Button } from '@/components/ui/button'
+import { Spinner } from '@/components/ui/spinner'
 import { useSyncBranding } from '@/lib/branding'
 import { usePreferences } from '@/lib/preferences'
 
@@ -82,6 +87,10 @@ function AppLayout() {
     }
   }, [pathname, prefs.defaultHome, navigate])
 
+  if (me.must_change_password) {
+    return <ForcePasswordChange me={me} />
+  }
+
   return (
     <SidebarProvider defaultOpen={initialSidebarOpen} persist peek={prefs.sidebarPeek}>
       <a
@@ -106,6 +115,120 @@ function AppLayout() {
         </main>
       </SidebarInset>
     </SidebarProvider>
+  )
+}
+
+function ForcePasswordChange({ me }: { me: Schemas['Me'] }) {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [error, setError] = useState('')
+  const [mismatch, setMismatch] = useState(false)
+
+  const change = useMutation({
+    mutationFn: (body: Schemas['ChangePasswordRequest']) =>
+      unwrap(api.POST('/api/v1/auth/password', { body })),
+    meta: { quietError: true, success: 'Password updated' },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: meQuery.queryKey })
+    },
+    onError: (e) => setError(e.message),
+  })
+
+  const signOut = useMutation({
+    mutationFn: () => unwrap(api.POST('/api/v1/auth/logout')),
+    onSettled: async () => {
+      queryClient.clear()
+      await navigate({ to: '/login' })
+    },
+  })
+
+  function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setError('')
+    const form = new FormData(e.currentTarget)
+    const next = String(form.get('new') ?? '')
+    if (next !== String(form.get('confirm') ?? '')) {
+      setMismatch(true)
+      return
+    }
+    setMismatch(false)
+    change.mutate({ current_password: String(form.get('current') ?? ''), new_password: next })
+  }
+
+  return (
+    <AuthLayout
+      mode="login"
+      eyebrow="Action required"
+      title="Set a permanent password"
+      description={`Signed in as ${me.user.email} with a temporary password. Choose a new password to continue.`}
+      branding={{
+        org_name: me.org.name,
+        logo_url: me.org.logo_url ?? null,
+        accent_color: me.org.accent_color ?? 'emerald',
+        env_label: me.org.env_label ?? null,
+        env_color: me.org.env_color ?? null,
+      }}
+    >
+      <form onSubmit={submit} className="space-y-4">
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="fpw-current">Temporary password</FieldLabel>
+            <Input
+              id="fpw-current"
+              name="current"
+              type="password"
+              required
+              autoFocus
+              autoComplete="current-password"
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="fpw-new">New password</FieldLabel>
+            <Input
+              id="fpw-new"
+              name="new"
+              type="password"
+              required
+              minLength={10}
+              autoComplete="new-password"
+            />
+            <FieldDescription>At least 10 characters.</FieldDescription>
+          </Field>
+          <Field data-invalid={mismatch || undefined}>
+            <FieldLabel htmlFor="fpw-confirm">Repeat new password</FieldLabel>
+            <Input
+              id="fpw-confirm"
+              name="confirm"
+              type="password"
+              required
+              autoComplete="new-password"
+              aria-invalid={mismatch || undefined}
+              onChange={() => mismatch && setMismatch(false)}
+            />
+            {mismatch ? <FieldError>The two new passwords do not match.</FieldError> : null}
+          </Field>
+          {error ? (
+            <div role="alert" className="rounded-lg border border-fail/30 bg-destructive-light px-3 py-2 text-[13px] text-fail">
+              {error}
+            </div>
+          ) : null}
+          <Button type="submit" size="lg" className="w-full" disabled={change.isPending}>
+            {change.isPending ? <Spinner data-icon="inline-start" /> : null}
+            Update password and continue
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-full"
+            disabled={signOut.isPending}
+            onClick={() => signOut.mutate()}
+          >
+            Sign out
+          </Button>
+        </FieldGroup>
+      </form>
+    </AuthLayout>
   )
 }
 

@@ -9,27 +9,74 @@
 
 use std::{
     collections::HashMap,
-    sync::{LazyLock, Mutex},
+    net::SocketAddr,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, KeyInit, Mac};
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use rig_api::AlertEvent;
 use serde::Serialize;
 use sha2::Sha256;
 use sqlx::Row;
 
-use crate::state::{AppState, now};
+use crate::{
+    access,
+    state::{AppState, now},
+};
 
 /// The same alert about the same thing is sent at most once in this window,
 /// so a crash loop does not become a message every 15 seconds.
 const COOLDOWN: Duration = Duration::from_secs(10 * 60);
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+/// Custom DNS resolver that refuses any hostname resolving to a loopback,
+/// private, link-local, CGNAT, or otherwise non-global IP address. Running
+/// this at connect time prevents DNS rebinding attacks against loopback
+/// services (Caddy admin, Rig API) and cloud metadata endpoints.
+struct SafeDnsResolver;
+
+impl Resolve for SafeDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                .collect();
+            if addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "host resolved to no addresses",
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            if addrs.iter().any(|a| !access::is_global_ip(a.ip())) {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "target address is not allowed",
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            let iter: Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
+static SAFE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         // A redirect could send the signed body somewhere the admin did not choose.
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(SafeDnsResolver))
+        .user_agent(concat!("rig/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .expect("building the alert HTTP client")
+});
+
+static PRIVATE_ALLOWED_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("rig/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -52,8 +99,9 @@ pub fn parse_event(s: &str) -> Option<AlertEvent> {
     AlertEvent::ALL.into_iter().find(|e| event_key(*e) == s)
 }
 
-/// Only plain http(s) URLs with a host; anything else is refused up front.
-pub fn validate_url(raw: &str) -> Result<reqwest::Url> {
+/// Only plain http(s) URLs with a public host (unless `allow_private` is enabled);
+/// anything else is refused up front.
+pub fn validate_url(raw: &str, allow_private: bool) -> Result<reqwest::Url> {
     if raw.len() > 2048 {
         bail!("the URL is too long");
     }
@@ -61,11 +109,14 @@ pub fn validate_url(raw: &str) -> Result<reqwest::Url> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("use an http:// or https:// URL");
     }
-    if url.host_str().is_none_or(str::is_empty) {
+    let Some(host) = url.host_str().filter(|h| !h.is_empty()) else {
         bail!("the URL needs a host");
-    }
+    };
     if !url.username().is_empty() || url.password().is_some() {
         bail!("put credentials in the URL path or query, not before the host");
+    }
+    if !allow_private && access::is_blocked_hostname(host) {
+        bail!("alert webhooks cannot target loopback, private, or local addresses");
     }
     Ok(url)
 }
@@ -185,8 +236,15 @@ async fn fan_out(state: &AppState, org_id: &str, alert: &Alert) -> Result<()> {
 }
 
 /// POST one alert to one channel. Used directly by the "send test" button.
-pub async fn deliver(state: &AppState, url_enc: &str, secret: &str, alert: &Alert) -> Result<()> {
-    let url = state.vault.decrypt(url_enc)?;
+pub async fn deliver(
+    state: &AppState,
+    url_enc: &str,
+    secret_enc: &str,
+    alert: &Alert,
+) -> Result<()> {
+    let url_str = state.vault.decrypt(url_enc)?;
+    let url = validate_url(&url_str, state.config.allow_private_alerts)?;
+    let secret = state.vault.decrypt(secret_enc)?;
     let at = now();
     let text = format!("{}: {}", alert.title, alert.detail);
     let body = serde_json::to_vec(&Payload {
@@ -198,19 +256,34 @@ pub async fn deliver(state: &AppState, url_enc: &str, secret: &str, alert: &Aler
         text: &text,
         content: &text,
     })?;
-    let res = CLIENT
-        .post(&url)
+    let client = if state.config.allow_private_alerts {
+        &*PRIVATE_ALLOWED_CLIENT
+    } else {
+        &*SAFE_CLIENT
+    };
+    let res = client
+        .post(url)
         .header("content-type", "application/json")
         .header("x-rig-event", event_key(alert.event))
-        .header("x-rig-signature", sign(secret, &body))
+        .header("x-rig-signature", sign(&secret, &body))
         .body(body)
         .send()
         .await
-        // The URL may hold a token; keep it out of the message.
-        .map_err(|e| anyhow::anyhow!("{}", e.without_url()))?;
+        // Keep internal transport/URL details out of user-facing errors.
+        .map_err(|e| {
+            let is_timeout = e.is_timeout();
+            let msg = format!("{}", e.without_url());
+            if msg.contains("target address is not allowed") {
+                anyhow::anyhow!("target address is not allowed")
+            } else if is_timeout {
+                anyhow::anyhow!("connection timed out")
+            } else {
+                anyhow::anyhow!("connection failed")
+            }
+        })?;
     let status = res.status();
     if !status.is_success() {
-        bail!("the endpoint answered {status}");
+        bail!("endpoint returned HTTP {}", status.as_u16());
     }
     Ok(())
 }
@@ -234,13 +307,21 @@ mod tests {
 
     #[test]
     fn urls_are_checked() {
-        assert!(validate_url("https://hooks.slack.com/services/T/B/x").is_ok());
-        assert!(validate_url("http://127.0.0.1:9000/hook").is_ok());
-        assert!(validate_url("file:///etc/passwd").is_err());
-        assert!(validate_url("ftp://example.com").is_err());
-        assert!(validate_url("not a url").is_err());
-        assert!(validate_url("https://user:pass@example.com").is_err());
-        assert!(validate_url(&format!("https://e.com/{}", "a".repeat(3000))).is_err());
+        assert!(validate_url("https://hooks.slack.com/services/T/B/x", false).is_ok());
+        // Loopback, private, link-local, and CGNAT targets are blocked by default.
+        assert!(validate_url("http://127.0.0.1:2019/stop", false).is_err());
+        assert!(validate_url("http://[::1]:2019/stop", false).is_err());
+        assert!(validate_url("http://169.254.169.254/latest/meta-data/", false).is_err());
+        assert!(validate_url("http://10.0.0.1/hook", false).is_err());
+        assert!(validate_url("http://192.168.1.5/hook", false).is_err());
+        assert!(validate_url("http://localhost:9000/hook", false).is_err());
+        // Allowed only when explicitly opted in by the server operator.
+        assert!(validate_url("http://127.0.0.1:9000/hook", true).is_ok());
+        assert!(validate_url("file:///etc/passwd", false).is_err());
+        assert!(validate_url("ftp://example.com", false).is_err());
+        assert!(validate_url("not a url", false).is_err());
+        assert!(validate_url("https://user:pass@example.com", false).is_err());
+        assert!(validate_url(&format!("https://e.com/{}", "a".repeat(3000)), false).is_err());
     }
 
     #[test]

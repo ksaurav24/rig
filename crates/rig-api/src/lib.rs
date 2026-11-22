@@ -49,6 +49,9 @@ pub struct ErrorDetail {
     pub code: String,
     /// Human-readable message, safe to show in the UI.
     pub message: String,
+    /// Short-lived single-use challenge token returned when `code == "second_factor_required"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_token: Option<String>,
 }
 
 // ---------------------------------------------------------------- setup/auth
@@ -68,7 +71,8 @@ pub struct PublicBranding {
 pub struct SetupStatus {
     /// False until the first owner account has been created.
     pub setup_complete: bool,
-    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// Public branding of the primary organization once setup is complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branding: Option<PublicBranding>,
@@ -88,12 +92,31 @@ pub struct SetupRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct LoginRequest {
+    #[serde(default)]
     pub email: String,
+    #[serde(default)]
     pub password: String,
     /// The authenticator code or a recovery code, when the account has a
     /// second factor. A login without one answers 401 `second_factor_required`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// Single-use challenge token from step 1 of two-factor sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_token: Option<String>,
+}
+
+/// An active browser session for the signed-in user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SessionInfo {
+    /// Short identifier (prefix of the hashed session token) for revoking a specific session.
+    pub id: String,
+    pub user_agent: Option<String>,
+    pub ip: Option<String>,
+    pub created_at: String,
+    pub last_active_at: Option<String>,
+    pub expires_at: String,
+    pub current: bool,
 }
 
 /// Whether the signed-in user has a second factor.
@@ -217,6 +240,9 @@ pub struct Me {
     pub org: Organization,
     pub role: Role,
     pub csrf_token: String,
+    /// True when the account has a temporary password that must be changed before continuing.
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 // ------------------------------------------------------------------ tokens

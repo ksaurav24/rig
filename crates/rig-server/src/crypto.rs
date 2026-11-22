@@ -18,18 +18,30 @@ use base64::{
 };
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
+use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
+pub const BACKUP_MAGIC: &[u8; 8] = b"RIGBK1\0\0";
+const STREAM_BASE_LEN: usize = 16;
+pub const BACKUP_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Encrypts values with XChaCha20-Poly1305 under the instance master key.
 #[derive(Clone)]
 pub struct Vault {
     cipher: XChaCha20Poly1305,
+    hmac_key: [u8; KEY_LEN],
+}
+
+fn derive_hmac_key(master: &[u8]) -> [u8; KEY_LEN] {
+    let mut h = Sha256::new();
+    h.update(b"rig-hmac-subkey-v1:");
+    h.update(master);
+    h.finalize().into()
 }
 
 impl Vault {
@@ -66,7 +78,8 @@ impl Vault {
         };
         let cipher =
             XChaCha20Poly1305::new_from_slice(&key).map_err(|_| anyhow!("bad key length"))?;
-        Ok(Self { cipher })
+        let hmac_key = derive_hmac_key(&key);
+        Ok(Self { cipher, hmac_key })
     }
 
     #[cfg(test)]
@@ -75,7 +88,19 @@ impl Vault {
         rand::fill(&mut key[..]);
         Self {
             cipher: XChaCha20Poly1305::new_from_slice(&key).unwrap(),
+            hmac_key: derive_hmac_key(&key),
         }
+    }
+
+    /// Keyed HMAC-SHA256 hex digest using a subkey derived from `master.key`.
+    /// Prevents offline brute-force of lower-entropy secrets if only `rig.db` leaks.
+    pub fn hmac_sha256(&self, domain: &str, data: &[u8]) -> String {
+        let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(&self.hmac_key)
+            .expect("HMAC accepts 32-byte keys");
+        mac.update(domain.as_bytes());
+        mac.update(&[0]);
+        mac.update(data);
+        hex::encode(mac.finalize().into_bytes())
     }
 
     /// Returns base64(nonce || ciphertext) with a fresh random nonce.
@@ -107,6 +132,91 @@ impl Vault {
             .map_err(|_| anyhow!("secret could not be decrypted (wrong master key?)"))?;
         String::from_utf8(pt).context("secret is not UTF-8")
     }
+
+    /// Encrypt one chunk of a streaming backup file. `chunk_index` and `is_final`
+    /// are bound into the nonce and AAD so chunks cannot be reordered or truncated.
+    pub fn encrypt_chunk(
+        &self,
+        base: &[u8; STREAM_BASE_LEN],
+        chunk_index: u64,
+        is_final: bool,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce[..STREAM_BASE_LEN].copy_from_slice(base);
+        nonce[STREAM_BASE_LEN..].copy_from_slice(&chunk_index.to_le_bytes());
+        let mut aad = [0u8; 9];
+        aad[..8].copy_from_slice(&chunk_index.to_le_bytes());
+        aad[8] = u8::from(is_final);
+        self.cipher
+            .encrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow!("backup chunk encryption failed"))
+    }
+
+    /// Decrypt one chunk of a streaming backup file.
+    pub fn decrypt_chunk(
+        &self,
+        base: &[u8; STREAM_BASE_LEN],
+        chunk_index: u64,
+        is_final: bool,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>> {
+        let mut nonce = [0u8; NONCE_LEN];
+        nonce[..STREAM_BASE_LEN].copy_from_slice(base);
+        nonce[STREAM_BASE_LEN..].copy_from_slice(&chunk_index.to_le_bytes());
+        let mut aad = [0u8; 9];
+        aad[..8].copy_from_slice(&chunk_index.to_le_bytes());
+        aad[8] = u8::from(is_final);
+        self.cipher
+            .decrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| anyhow!("backup file could not be decrypted (corrupt or wrong master key?)"))
+    }
+}
+
+/// Encrypt any legacy plaintext `apps.webhook_secret` and `alert_channels.signing_secret`
+/// rows at startup so secrets are never stored in plaintext in SQLite.
+pub async fn migrate_plaintext_secrets(db: &sqlx::SqlitePool, vault: &Vault) -> Result<()> {
+    let apps: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, webhook_secret FROM apps")
+            .fetch_all(db)
+            .await?;
+    for (id, secret) in apps {
+        if vault.decrypt(&secret).is_err() {
+            let enc = vault.encrypt(&secret)?;
+            sqlx::query("UPDATE apps SET webhook_secret = ? WHERE id = ?")
+                .bind(enc)
+                .bind(id)
+                .execute(db)
+                .await?;
+        }
+    }
+    let channels: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, signing_secret FROM alert_channels")
+            .fetch_all(db)
+            .await?;
+    for (id, secret) in channels {
+        if vault.decrypt(&secret).is_err() {
+            let enc = vault.encrypt(&secret)?;
+            sqlx::query("UPDATE alert_channels SET signing_secret = ? WHERE id = ?")
+                .bind(enc)
+                .bind(id)
+                .execute(db)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// A random URL-safe token carrying `bytes` bytes of entropy.

@@ -35,8 +35,11 @@ pub fn router() -> OpenApiRouter<AppState> {
 }
 
 const MAX_LOGIN_FAILURES_PER_IP: i64 = 20;
-const MAX_LOGIN_FAILURES_PER_EMAIL: i64 = 8;
+const MAX_LOGIN_FAILURES_PER_PAIR: i64 = 8;
+const MAX_LOGIN_FAILURES_PER_EMAIL_GLOBAL: i64 = 40;
 const MAX_SETUP_FAILURES_PER_IP: i64 = 10;
+const MAX_TOKENS_PER_USER: i64 = 25;
+const CHALLENGE_TTL_MINS: i64 = 5;
 
 fn peer_ip(headers: &HeaderMap, addr: SocketAddr) -> String {
     auth::real_ip(headers, addr.ip()).to_string()
@@ -130,7 +133,7 @@ async fn setup_status(State(state): State<AppState>) -> ApiResult<Json<SetupStat
     };
     Ok(Json(SetupStatus {
         setup_complete,
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: None,
         branding,
     }))
 }
@@ -146,7 +149,7 @@ async fn complete_setup(
     jar: CookieJar,
     Json(req): Json<SetupRequest>,
 ) -> ApiResult<(CookieJar, Json<Me>)> {
-    auth::check_origin(&headers)?;
+    auth::check_origin(&state, &headers, Some(addr.ip()))?;
     let ip = peer_ip(&headers, addr);
     let rate_key = format!("setup:{ip}");
     auth::check_rate(&state, &rate_key, MAX_SETUP_FAILURES_PER_IP).await?;
@@ -231,8 +234,15 @@ async fn complete_setup(
     .await?;
     tracing::info!(%email, "setup complete");
 
-    let (cookie, csrf_token) =
-        auth::create_session(&state, &user_id, &org_id, user_agent(&headers), Some(&ip), auth::is_https(&state, &headers)).await?;
+    let (cookie, csrf_token) = auth::create_session(
+        &state,
+        &user_id,
+        &org_id,
+        user_agent(&headers),
+        Some(&ip),
+        auth::is_https(&state, &headers, Some(addr.ip())),
+    )
+    .await?;
     Ok((
         jar.add(cookie),
         Json(Me {
@@ -253,6 +263,7 @@ async fn complete_setup(
             },
             role: Role::Owner,
             csrf_token,
+            must_change_password: false,
         }),
     ))
 }
@@ -268,81 +279,227 @@ async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<(CookieJar, Json<Me>)> {
-    auth::check_origin(&headers)?;
+    auth::check_origin(&state, &headers, Some(addr.ip()))?;
     let ip = peer_ip(&headers, addr);
-    let email = req.email.trim().to_lowercase();
-    let (ip_key, email_key) = (format!("login:ip:{ip}"), format!("login:email:{email}"));
+    let ua = user_agent(&headers).map(|s| s.chars().take(256).collect::<String>());
+    let ip_key = format!("login:ip:{ip}");
     auth::check_rate(&state, &ip_key, MAX_LOGIN_FAILURES_PER_IP).await?;
-    auth::check_rate(&state, &email_key, MAX_LOGIN_FAILURES_PER_EMAIL).await?;
 
-    let row = sqlx::query(
-        "SELECT u.id, u.name, u.avatar_url, u.password_hash, u.disabled, u.totp_secret
-         FROM users u WHERE u.email = ?",
-    )
-    .bind(&email)
-    .fetch_optional(&state.db)
-    .await?;
-
-    // Always run one Argon2 verification, so response time does not reveal
-    // whether the account exists.
-    let (stored, found) = match &row {
-        Some(r) if r.get::<i64, _>("disabled") == 0 => (r.get::<String, _>("password_hash"), true),
-        _ => (setup::dummy_hash().to_string(), false),
-    };
-    let password = req.password;
-    let ok = tokio::task::spawn_blocking(move || crypto::verify_password(&password, &stored))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let Some(row) = row.filter(|_| ok && found) else {
-        auth::record_failure(&state, &ip_key).await?;
-        auth::record_failure(&state, &email_key).await?;
-        auth::audit(
-            &state,
-            AuditEvent {
-                org_id: None,
-                user_id: None,
-                actor: &email,
-                action: "auth.login_failed",
-                target: None,
-                detail: None,
-                ip: Some(&ip),
-            },
-        )
-        .await?;
-        return Err(ApiError::Unauthorized);
-    };
-    let user_id: String = row.get("id");
-
-    // The password was right. With a second factor on, a code is needed too;
-    // a missing one is not a failure, a wrong one is.
-    if let Some(secret) = row.get::<Option<String>, _>("totp_secret") {
-        let Some(code) = req.code.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
-            return Err(ApiError::SecondFactorRequired);
-        };
-        let totp_key = format!("totp:user:{user_id}");
-        auth::check_rate(&state, &totp_key, MAX_LOGIN_FAILURES_PER_EMAIL).await?;
-        if !super::account::check_code(&state, &user_id, &secret, code).await? {
-            auth::record_failure(&state, &ip_key).await?;
-            auth::record_failure(&state, &totp_key).await?;
-            auth::audit(
-                &state,
-                AuditEvent {
-                    org_id: None,
-                    user_id: Some(&user_id),
-                    actor: &email,
-                    action: "auth.login_failed",
-                    target: None,
-                    detail: Some("wrong second-factor code"),
-                    ip: Some(&ip),
-                },
+    // Step 2 using a server-side 2FA challenge token (no password re-transmission).
+    let (user_id, email, name, avatar_url, must_change_password) =
+        if let Some(challenge) = req
+            .challenge_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            let Some(code) = req.code.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
+                return Err(ApiError::Unauthorized);
+            };
+            let challenge_hash = crypto::hash_token(challenge);
+            let prow = sqlx::query(
+                "SELECT p.user_id, p.ip, p.user_agent, u.email, u.name, u.avatar_url,
+                        u.disabled, u.totp_secret, u.must_change_password, u.temp_password_expires_at
+                 FROM pending_2fa p
+                 JOIN users u ON u.id = p.user_id
+                 WHERE p.token_hash = ? AND p.expires_at > ?",
             )
+            .bind(&challenge_hash)
+            .bind(now())
+            .fetch_optional(&state.db)
             .await?;
-            return Err(ApiError::Unauthorized);
-        }
-        auth::clear_failures(&state, &totp_key).await?;
-    }
-    auth::clear_failures(&state, &email_key).await?;
+            let Some(prow) = prow else {
+                auth::record_failure(&state, &ip_key).await?;
+                return Err(ApiError::Unauthorized);
+            };
+            let bound_ip: Option<String> = prow.get("ip");
+            let bound_ua: Option<String> = prow.get("user_agent");
+            if bound_ip.as_deref() != Some(ip.as_str())
+                || bound_ua.as_deref() != ua.as_deref()
+                || prow.get::<i64, _>("disabled") != 0
+            {
+                auth::record_failure(&state, &ip_key).await?;
+                return Err(ApiError::Unauthorized);
+            }
+            let user_id: String = prow.get("user_id");
+            let email: String = prow.get("email");
+            let Some(secret) = prow.get::<Option<String>, _>("totp_secret") else {
+                return Err(ApiError::Unauthorized);
+            };
+            let totp_key = format!("totp:user:{user_id}");
+            auth::check_rate(&state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+            if !super::account::check_code(&state, &user_id, &secret, code).await? {
+                auth::record_failure(&state, &ip_key).await?;
+                auth::record_failure(&state, &totp_key).await?;
+                auth::audit(
+                    &state,
+                    AuditEvent {
+                        org_id: None,
+                        user_id: Some(&user_id),
+                        actor: &email,
+                        action: "auth.login_failed",
+                        target: None,
+                        detail: Some("wrong second-factor code"),
+                        ip: Some(&ip),
+                    },
+                )
+                .await?;
+                return Err(ApiError::Unauthorized);
+            }
+            // Single-use: consume the challenge atomically so two concurrent
+            // requests cannot both redeem it.
+            let consumed = sqlx::query("DELETE FROM pending_2fa WHERE token_hash = ?")
+                .bind(&challenge_hash)
+                .execute(&state.db)
+                .await?
+                .rows_affected();
+            if consumed != 1 {
+                return Err(ApiError::Unauthorized);
+            }
+            auth::clear_failures(&state, &totp_key).await?;
+            let must_change = prow.get::<i64, _>("must_change_password") != 0;
+            if must_change
+                && let Some(exp) = prow.get::<Option<String>, _>("temp_password_expires_at")
+                && exp <= now()
+            {
+                return Err(ApiError::Forbidden(
+                    "your temporary password has expired; ask an admin to reset it",
+                ));
+            }
+            (
+                user_id,
+                email,
+                prow.get::<String, _>("name"),
+                prow.get::<Option<String>, _>("avatar_url"),
+                must_change,
+            )
+        } else {
+            let email = req.email.trim().to_lowercase();
+            let pair_key = format!("login:pair:{email}:{ip}");
+            let global_email_key = format!("login:email:{email}");
+            auth::check_rate(&state, &pair_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+            auth::check_rate(&state, &global_email_key, MAX_LOGIN_FAILURES_PER_EMAIL_GLOBAL)
+                .await?;
+
+            let row = sqlx::query(
+                "SELECT u.id, u.name, u.avatar_url, u.password_hash, u.disabled, u.totp_secret,
+                        u.must_change_password, u.temp_password_expires_at
+                 FROM users u WHERE u.email = ?",
+            )
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await?;
+
+            // Always run one Argon2 verification, so response time does not reveal
+            // whether the account exists.
+            let (stored, found) = match &row {
+                Some(r) if r.get::<i64, _>("disabled") == 0 => {
+                    (r.get::<String, _>("password_hash"), true)
+                }
+                _ => (setup::dummy_hash().to_string(), false),
+            };
+            let password = req.password;
+            let ok =
+                tokio::task::spawn_blocking(move || crypto::verify_password(&password, &stored))
+                    .await
+                    .map_err(|e| ApiError::Internal(e.into()))?;
+
+            let Some(row) = row.filter(|_| ok && found) else {
+                auth::record_failure(&state, &ip_key).await?;
+                auth::record_failure(&state, &pair_key).await?;
+                auth::record_failure(&state, &global_email_key).await?;
+                auth::audit(
+                    &state,
+                    AuditEvent {
+                        org_id: None,
+                        user_id: None,
+                        actor: &email,
+                        action: "auth.login_failed",
+                        target: None,
+                        detail: None,
+                        ip: Some(&ip),
+                    },
+                )
+                .await?;
+                return Err(ApiError::Unauthorized);
+            };
+            let user_id: String = row.get("id");
+            let must_change = row.get::<i64, _>("must_change_password") != 0;
+            if must_change
+                && let Some(exp) = row.get::<Option<String>, _>("temp_password_expires_at")
+                && exp <= now()
+            {
+                return Err(ApiError::Forbidden(
+                    "your temporary password has expired; ask an admin to reset it",
+                ));
+            }
+
+            // The password was right. With a second factor on, issue a short-lived
+            // server-side challenge token (or verify an inline code if provided).
+            if let Some(secret) = row.get::<Option<String>, _>("totp_secret") {
+                let Some(code) = req.code.as_deref().map(str::trim).filter(|c| !c.is_empty())
+                else {
+                    let challenge_token = crypto::random_token(32);
+                    let expires =
+                        ts(chrono::Utc::now() + chrono::Duration::minutes(CHALLENGE_TTL_MINS));
+                    sqlx::query(
+                        "INSERT INTO pending_2fa (token_hash, user_id, ip, user_agent, expires_at)
+                         VALUES (?, ?, ?, ?, ?)",
+                    )
+                    .bind(crypto::hash_token(&challenge_token))
+                    .bind(&user_id)
+                    .bind(&ip)
+                    .bind(&ua)
+                    .bind(&expires)
+                    .execute(&state.db)
+                    .await?;
+                    auth::audit(
+                        &state,
+                        AuditEvent {
+                            org_id: None,
+                            user_id: Some(&user_id),
+                            actor: &email,
+                            action: "auth.login_challenge",
+                            target: None,
+                            detail: Some("password verified, awaiting second factor"),
+                            ip: Some(&ip),
+                        },
+                    )
+                    .await?;
+                    return Err(ApiError::SecondFactorRequired(Some(challenge_token)));
+                };
+                let totp_key = format!("totp:user:{user_id}");
+                auth::check_rate(&state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+                if !super::account::check_code(&state, &user_id, &secret, code).await? {
+                    auth::record_failure(&state, &ip_key).await?;
+                    auth::record_failure(&state, &totp_key).await?;
+                    auth::audit(
+                        &state,
+                        AuditEvent {
+                            org_id: None,
+                            user_id: Some(&user_id),
+                            actor: &email,
+                            action: "auth.login_failed",
+                            target: None,
+                            detail: Some("wrong second-factor code"),
+                            ip: Some(&ip),
+                        },
+                    )
+                    .await?;
+                    return Err(ApiError::Unauthorized);
+                }
+                auth::clear_failures(&state, &totp_key).await?;
+            }
+            auth::clear_failures(&state, &pair_key).await?;
+            (
+                user_id,
+                email,
+                row.get::<String, _>("name"),
+                row.get::<Option<String>, _>("avatar_url"),
+                must_change,
+            )
+        };
+
     let m = sqlx::query(
         "SELECT o.id, o.name, o.slug, o.logo_url, o.accent_color, o.env_label, o.env_color, m.role FROM memberships m
          JOIN organizations o ON o.id = m.org_id
@@ -385,20 +542,28 @@ async fn login(
     )
     .await?;
 
-    let (cookie, csrf_token) =
-        auth::create_session(&state, &user_id, &org.id, user_agent(&headers), Some(&ip), auth::is_https(&state, &headers)).await?;
+    let (cookie, csrf_token) = auth::create_session(
+        &state,
+        &user_id,
+        &org.id,
+        user_agent(&headers),
+        Some(&ip),
+        auth::is_https(&state, &headers, Some(addr.ip())),
+    )
+    .await?;
     Ok((
         jar.add(cookie),
         Json(Me {
             user: User {
                 id: user_id,
                 email,
-                name: row.get("name"),
-                avatar_url: row.get("avatar_url"),
+                name,
+                avatar_url,
             },
             org,
             role,
             csrf_token,
+            must_change_password,
         }),
     ))
 }
@@ -409,6 +574,7 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> ApiResult<(CookieJar, StatusCode)> {
@@ -417,7 +583,11 @@ async fn logout(
     }
     auth.audit(&state, "auth.logout", None, None).await?;
     Ok((
-        jar.add(auth::clear_session_cookie(auth::is_https(&state, &headers))),
+        jar.add(auth::clear_session_cookie(auth::is_https(
+            &state,
+            &headers,
+            Some(addr.ip()),
+        ))),
         StatusCode::NO_CONTENT,
     ))
 }
@@ -453,6 +623,7 @@ async fn me(State(state): State<AppState>, auth: Auth<Viewer>) -> ApiResult<Json
         },
         role: auth.role,
         csrf_token: auth.csrf_token.unwrap_or_default(),
+        must_change_password: auth.must_change_password,
     }))
 }
 
@@ -487,18 +658,35 @@ async fn list_tokens(
 }
 
 /// Create an API token for the CLI or MCP. The secret is returned once.
+/// Requires an interactive browser session so a leaked API token cannot
+/// self-mint persistent backdoor tokens.
 #[utoipa::path(post, path = "/api/v1/tokens", tag = "tokens", request_body = CreateApiTokenRequest,
-    responses((status = 200, body = CreatedApiToken), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = CreatedApiToken), (status = 403, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn create_token(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Json(req): Json<CreateApiTokenRequest>,
 ) -> ApiResult<Json<CreatedApiToken>> {
+    auth.require_session("sign in to the dashboard to create API tokens")?;
     let name = validate_name("token name", &req.name, 60)?;
     if req.role > auth.role {
         return Err(ApiError::Forbidden(
             "a token cannot have a higher role than your own",
         ));
+    }
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_tokens
+          WHERE org_id = ? AND user_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(&auth.org_id)
+    .bind(&auth.user_id)
+    .bind(now())
+    .fetch_one(&state.db)
+    .await?;
+    if active_count >= MAX_TOKENS_PER_USER {
+        return Err(ApiError::Validation(format!(
+            "you can have at most {MAX_TOKENS_PER_USER} active API tokens; revoke an unused one first"
+        )));
     }
     let expires_at = match req.expires_in_days {
         Some(d) if !(1..=3650).contains(&d) => {
@@ -537,15 +725,21 @@ async fn create_token(
     }))
 }
 
-/// Revoke one of your API tokens.
+/// Revoke one of your API tokens. An API token may only revoke itself
+/// (`rig logout --revoke`); revoking other tokens requires a browser session.
 #[utoipa::path(delete, path = "/api/v1/tokens/{id}", tag = "tokens",
     params(("id" = String, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody)))]
+    responses((status = 204), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
 async fn delete_token(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    if auth.via == auth::Via::ApiToken && auth.token_id.as_deref() != Some(id.as_str()) {
+        return Err(ApiError::Forbidden(
+            "sign in to the dashboard to revoke other API tokens",
+        ));
+    }
     let n = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND org_id = ? AND user_id = ?")
         .bind(&id)
         .bind(&auth.org_id)

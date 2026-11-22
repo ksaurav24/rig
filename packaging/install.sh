@@ -652,7 +652,9 @@ if [ "$(engine inspect -f '{{.Config.Image}}' "$CADDY_NAME" 2>/dev/null)" != "$C
   say "starting the proxy ($CADDY_IMAGE)"
   engine rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
   ts_mount=()
-  [ -d /run/tailscale ] && ts_mount=(-v /run/tailscale:/run/tailscale)
+  if [ -d /run/tailscale ] && { [ "$PLAN_TLS" = tailscale ] || [ "$PLAN_ACCESS" = tailscale ]; }; then
+    ts_mount=(-v /run/tailscale:/run/tailscale)
+  fi
   # Host networking so Caddy sees each visitor's real address. Its config is
   # pushed by Rig; --resume restores the last one across restarts.
   engine run -d --name "$CADDY_NAME" --restart "$restart" --network host \

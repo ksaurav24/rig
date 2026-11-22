@@ -19,7 +19,7 @@ use crate::{
     crypto::random_token,
     error::{ApiError, ApiResult},
     github,
-    routes::hooks::verify,
+    routes::hooks::verify_hmac,
     state::{AppState, now},
 };
 
@@ -76,6 +76,7 @@ async fn load_status(state: &AppState, org_id: &str) -> ApiResult<GithubStatus> 
 #[utoipa::path(delete, path = "/api/v1/github", tag = "github",
     responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn disconnect(State(state): State<AppState>, auth: Auth<Admin>) -> ApiResult<StatusCode> {
+    auth.require_session("sign in to the dashboard to disconnect the GitHub App")?;
     let done = sqlx::query("DELETE FROM github_apps WHERE org_id = ?")
         .bind(&auth.org_id)
         .execute(&state.db)
@@ -107,6 +108,7 @@ async fn manifest(
     headers: HeaderMap,
     Json(req): Json<GithubManifestRequest>,
 ) -> ApiResult<Json<GithubManifest>> {
+    auth.require_session("sign in to the dashboard to connect a GitHub App")?;
     let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM github_apps WHERE org_id = ?")
         .bind(&auth.org_id)
         .fetch_optional(&state.db)
@@ -167,6 +169,7 @@ async fn complete(
     auth: Auth<Admin>,
     Json(req): Json<GithubManifestComplete>,
 ) -> ApiResult<Json<GithubStatus>> {
+    auth.require_session("sign in to the dashboard to connect a GitHub App")?;
     if !github::take_state(&req.state, &auth.org_id, &auth.user_id) {
         return Err(ApiError::Validation(
             "this GitHub link expired or was not started by you; start again".into(),
@@ -261,7 +264,8 @@ async fn push_hook(
 ) -> ApiResult<(StatusCode, Json<GithubPushResult>)> {
     let creds = github::creds(&state, &org_id).await?;
     // Same answer for an unknown organization and a bad signature.
-    if !creds.is_some_and(|c| verify(&c.webhook_secret, &headers, &body)) {
+    // GitHub App webhooks always use HMAC-SHA256; never accept plain X-Gitlab-Token.
+    if !creds.is_some_and(|c| verify_hmac(&c.webhook_secret, &headers, &body)) {
         return Err(ApiError::Unauthorized);
     };
     let skip = |why: &str| {

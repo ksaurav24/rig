@@ -160,6 +160,7 @@ async fn set_dashboard_access(
     headers: HeaderMap,
     Json(req): Json<DashboardAccessRequest>,
 ) -> ApiResult<Json<NetworkInfo>> {
+    auth.require_session("sign in to the dashboard to change network access settings")?;
     let you = real_ip(&headers, addr.ip());
     if !access::allows(req.access, you) {
         return Err(ApiError::validation(match req.access {
@@ -196,6 +197,7 @@ async fn set_dashboard_domain(
     headers: HeaderMap,
     Json(req): Json<DashboardDomainRequest>,
 ) -> ApiResult<Json<NetworkInfo>> {
+    auth.require_session("sign in to the dashboard to change the dashboard domain")?;
     let tls = req.tls_mode.unwrap_or(TlsMode::Auto);
     let host = match req.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
         Some(h) => {

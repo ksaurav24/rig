@@ -381,12 +381,21 @@ struct Pending {
 }
 
 static STATES: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
+const MAX_PENDING_STATES: usize = 64;
 
 /// Remember a manifest flow started by this user, for one use within 10 minutes.
 pub fn issue_state(org_id: &str, user_id: &str) -> String {
     let state = crate::crypto::random_token(24);
     let mut states = STATES.lock().expect("state map");
     states.retain(|_, p| p.at.elapsed() < STATE_TTL);
+    if states.len() >= MAX_PENDING_STATES
+        && let Some(oldest) = states
+            .iter()
+            .min_by_key(|(_, p)| p.at)
+            .map(|(k, _)| k.clone())
+    {
+        states.remove(&oldest);
+    }
     states.insert(
         state.clone(),
         Pending {
@@ -470,7 +479,7 @@ pub async fn deploy_commit(
             )));
         }
     }
-    let id = deploy::enqueue(
+    let id = match deploy::enqueue(
         state,
         NewDeployment {
             org_id,
@@ -481,7 +490,14 @@ pub async fn deploy_commit(
             image_id: None,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(id) => id,
+        Err(e) if deploy::is_active_deploy_conflict(&e) => {
+            return Ok(Err("a deployment is already in progress".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
     sqlx::query("UPDATE apps SET status = 'deploying', updated_at = ? WHERE id = ?")
         .bind(now())
         .bind(app_id)
@@ -617,26 +633,19 @@ async fn remote_head(
     url: &str,
     branch: Option<&str>,
 ) -> Result<Option<String>> {
-    deploy::validate_git_url(url).map_err(|m| anyhow!(m))?;
+    deploy::validate_git_url_with(url, state.config.allow_private_git).map_err(|m| anyhow!(m))?;
+    deploy::validate_git_remote_ip(url, state.config.allow_private_git).await?;
     let reference = match branch.filter(|b| !b.is_empty()) {
         Some(b) => format!("refs/heads/{b}"),
         None => "HEAD".into(),
     };
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args([
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "protocol.ext.allow=never",
-        "ls-remote",
-        "--",
-        url,
-        &reference,
-    ])
-    .stdin(std::process::Stdio::null())
-    .env("GIT_TERMINAL_PROMPT", "0")
-    .env("GIT_ASKPASS", "true")
-    .kill_on_drop(true);
+    cmd.args(deploy::GIT_SAFE_CONFIG)
+        .args(["ls-remote", "--", url, &reference])
+        .stdin(std::process::Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .kill_on_drop(true);
     if let Some(env) = clone_auth(state, org_id, url).await.unwrap_or(None) {
         cmd.envs(env);
     }
@@ -725,5 +734,13 @@ mod tests {
         let s = issue_state("org1", "user1");
         assert!(take_state(&s, "org1", "user1"));
         assert!(!take_state(&s, "org1", "user1"));
+    }
+
+    #[test]
+    fn states_map_is_bounded() {
+        for _ in 0..80 {
+            let _ = issue_state("org-cap", "user-cap");
+        }
+        assert!(STATES.lock().unwrap().len() <= MAX_PENDING_STATES);
     }
 }

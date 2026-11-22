@@ -243,10 +243,11 @@ async fn start_database(
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<Database>)> {
     let db = load(&state, &auth.org_id, &id).await?;
-    // The status flip is the lock: only one caller moves it to `creating`.
+    // The status flip is the lock: only one caller moves it to `creating`,
+    // and never while a delete or restore holds `busy_op`.
     let claimed = sqlx::query(
         "UPDATE databases SET status = 'creating', error = NULL
-          WHERE id = ? AND status IN ('stopped', 'failed')",
+          WHERE id = ? AND status IN ('stopped', 'failed') AND busy_op IS NULL",
     )
     .bind(&id)
     .execute(&state.db)
@@ -254,7 +255,7 @@ async fn start_database(
     .rows_affected();
     if claimed == 0 {
         return Err(ApiError::Conflict(format!(
-            "{} is already running or starting",
+            "{} is already running, starting, or busy",
             db.name
         )));
     }
@@ -278,7 +279,7 @@ async fn stop_database(
     let db = load(&state, &auth.org_id, &id).await?;
     let claimed = sqlx::query(
         "UPDATE databases SET status = 'stopped', error = NULL, container_id = NULL, host_port = NULL
-          WHERE id = ? AND status IN ('running', 'failed')",
+          WHERE id = ? AND status IN ('running', 'failed') AND busy_op IS NULL",
     )
     .bind(&id)
     .execute(&state.db)
@@ -286,7 +287,7 @@ async fn stop_database(
     .rows_affected();
     if claimed == 0 {
         return Err(ApiError::Conflict(format!(
-            "{} is not running. If it is still starting, wait for it to finish",
+            "{} is not running or is busy. Wait for the current operation to finish",
             db.name
         )));
     }
@@ -313,9 +314,22 @@ async fn delete_database(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let db = load(&state, &auth.org_id, &id).await?;
-    if db.status == rig_api::DatabaseStatus::Creating {
+    // Atomically claim the row for deletion so concurrent start/stop/restore/backup
+    // calls cannot race and leave orphaned containers.
+    let claimed = sqlx::query(
+        "UPDATE databases SET busy_op = 'deleting'
+          WHERE id = ? AND org_id = ? AND status != 'creating' AND busy_op IS NULL
+            AND NOT EXISTS (SELECT 1 FROM backups WHERE database_id = ? AND status = 'running')",
+    )
+    .bind(&id)
+    .bind(&auth.org_id)
+    .bind(&id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    if claimed == 0 {
         return Err(ApiError::Conflict(format!(
-            "{} is still starting. Wait for it to finish, then delete",
+            "{} is still starting, backing up, or busy. Wait for it to finish, then delete",
             db.name
         )));
     }
@@ -324,13 +338,15 @@ async fn delete_database(
         .fetch_one(&state.db)
         .await?;
     // The engine goes first: once the row is gone nothing remembers the volume.
-    databases::destroy(&state, &id, &volume)
-        .await
-        .map_err(|e| {
-            ApiError::Unavailable(format!(
-                "could not remove the database ({e:#}). Nothing was deleted"
-            ))
-        })?;
+    if let Err(e) = databases::destroy(&state, &id, &volume).await {
+        let _ = sqlx::query("UPDATE databases SET busy_op = NULL WHERE id = ?")
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+        return Err(ApiError::Unavailable(format!(
+            "could not remove the database ({e:#}). Nothing was deleted"
+        )));
+    }
     backups::remove_all(&state, &id).await;
     sqlx::query("DELETE FROM databases WHERE id = ? AND org_id = ?")
         .bind(&id)
@@ -459,23 +475,25 @@ async fn create_backup(
         .map_err(|e| ApiError::Unavailable(e.to_string()))?;
     let backup_id = new_id();
     // The partial check and insert run as one statement, so two clicks
-    // cannot start two dumps.
+    // cannot start two dumps or race with a restore/delete.
     let inserted = sqlx::query(
         "INSERT INTO backups (id, org_id, database_id, created_at)
          SELECT ?, ?, ?, ?
-          WHERE NOT EXISTS (SELECT 1 FROM backups WHERE database_id = ? AND status = 'running')",
+          WHERE NOT EXISTS (SELECT 1 FROM backups WHERE database_id = ? AND status = 'running')
+            AND EXISTS (SELECT 1 FROM databases WHERE id = ? AND status = 'running' AND busy_op IS NULL)",
     )
     .bind(&backup_id)
     .bind(&auth.org_id)
     .bind(&id)
     .bind(now())
     .bind(&id)
+    .bind(&id)
     .execute(&state.db)
     .await?
     .rows_affected();
     if inserted == 0 {
         return Err(ApiError::Conflict(format!(
-            "a backup of {} is already running",
+            "a backup or restore of {} is already running",
             db.name
         )));
     }
@@ -532,10 +550,10 @@ async fn download_backup(
     let Some(path) = file.path.filter(|_| file.backup.status == BackupStatus::Ok) else {
         return Err(ApiError::NotFound("backup file"));
     };
-    let handle = tokio::fs::File::open(&path)
+    let reader = backups::open_decrypted(state.vault.clone(), std::path::Path::new(&path))
         .await
         .map_err(|_| ApiError::NotFound("backup file"))?;
-    let len = handle.metadata().await.map(|m| m.len()).ok();
+    let len = file.backup.size_bytes.and_then(|s| u64::try_from(s).ok());
     auth.audit(
         &state,
         "backup.download",
@@ -557,7 +575,7 @@ async fn download_backup(
         .filter(char::is_ascii_digit)
         .collect();
     let filename = format!("{}-{stamp}.{extension}", slugify(&file.database_name));
-    let mut response = Body::from_stream(ReaderStream::new(handle)).into_response();
+    let mut response = Body::from_stream(ReaderStream::new(reader)).into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -590,20 +608,46 @@ async fn restore_backup(
     let Some(path) = file.path else {
         return Err(ApiError::NotFound("backup file"));
     };
+    let claimed = sqlx::query(
+        "UPDATE databases SET busy_op = 'restoring'
+          WHERE id = ? AND status = 'running' AND busy_op IS NULL
+            AND NOT EXISTS (SELECT 1 FROM backups WHERE database_id = ? AND status = 'running')",
+    )
+    .bind(&file.backup.database_id)
+    .bind(&file.backup.database_id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    if claimed == 0 {
+        return Err(ApiError::Conflict(format!(
+            "{} is not running or another backup/restore is already in progress",
+            file.database_name
+        )));
+    }
     // Recorded before the data changes, so a failed restore is still on file.
-    auth.audit(
-        &state,
-        "backup.restore",
-        Some(&id),
-        Some(&file.database_name),
-    )
-    .await?;
-    backups::restore(
-        &state,
-        &file.backup.database_id,
-        std::path::Path::new(&path),
-    )
-    .await
-    .map_err(|e| ApiError::Conflict(format!("{e:#}")))?;
+    let audit_res = auth
+        .audit(
+            &state,
+            "backup.restore",
+            Some(&id),
+            Some(&file.database_name),
+        )
+        .await;
+    let restore_res = if let Err(e) = audit_res {
+        Err(e)
+    } else {
+        backups::restore(
+            &state,
+            &file.backup.database_id,
+            std::path::Path::new(&path),
+        )
+        .await
+        .map_err(|e| ApiError::Conflict(format!("{e:#}")))
+    };
+    let _ = sqlx::query("UPDATE databases SET busy_op = NULL WHERE id = ?")
+        .bind(&file.backup.database_id)
+        .execute(&state.db)
+        .await;
+    restore_res?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
 
 const MAX_RAW_UPLOAD_BYTES = 5 * 1024 * 1024 // 5 MB raw before client resize
 const MAX_SERVER_BYTES = 750 * 1024
-const ACCEPTED_TYPES = 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml'
+const ACCEPTED_TYPES = 'image/png,image/jpeg,image/webp,image/gif'
 
 /** Resizes large raster images client-side to a crisp square/bounded PNG/WebP. */
 async function prepareImageUpload(
@@ -21,16 +21,16 @@ async function prepareImageUpload(
     throw new Error('Choose an image smaller than 5 MB.')
   }
   const type = file.type.toLowerCase()
-  const allowed = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'])
+  const allowed = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
   if (!allowed.has(type)) {
-    throw new Error('Use a PNG, JPEG, WebP, GIF, or SVG file.')
+    throw new Error('Use a PNG, JPEG, WebP, or GIF file.')
   }
 
-  // Keep SVG and small GIFs intact (preserves vector sharpness / animation).
-  if (type === 'image/svg+xml' || (type === 'image/gif' && file.size <= MAX_SERVER_BYTES)) {
+  // Keep small GIFs intact (preserves animation).
+  if (type === 'image/gif' && file.size <= MAX_SERVER_BYTES) {
     const buf = await file.arrayBuffer()
     if (buf.byteLength > MAX_SERVER_BYTES) {
-      throw new Error('SVG and GIF uploads must be 750 KB or smaller.')
+      throw new Error('GIF uploads must be 750 KB or smaller.')
     }
     return { content_type: type, data_base64: bufferToBase64(buf) }
   }
@@ -194,8 +194,8 @@ export function ImagePicker({
   function applyLink() {
     const trimmed = urlValue.trim()
     setLocalError('')
-    if (!/^https?:\/\/.+/i.test(trimmed)) {
-      setLocalError('Enter a full http:// or https:// image URL.')
+    if (!/^https:\/\/.+/i.test(trimmed)) {
+      setLocalError('Enter a full https:// image URL.')
       return
     }
     onSetUrl(trimmed)
@@ -292,7 +292,7 @@ export function ImagePicker({
               </button>
             </p>
             <p className="text-[12px] text-muted-foreground">
-              PNG, JPEG, WebP, GIF, or SVG. Large images are automatically resized.
+              PNG, JPEG, WebP, or GIF. Large images are automatically resized.
             </p>
           </div>
         </div>
@@ -327,10 +327,10 @@ export function ImagePicker({
                 Use link
               </Button>
             </div>
-            <FieldDescription>Direct link to a publicly reachable PNG, SVG, WebP, or JPEG.</FieldDescription>
+            <FieldDescription>Direct HTTPS link to a publicly reachable PNG, WebP, JPEG, or GIF.</FieldDescription>
           </Field>
 
-          {/^https?:\/\/.+/i.test(urlValue.trim()) ? (
+          {/^https:\/\/.+/i.test(urlValue.trim()) ? (
             <div className="flex items-center gap-3 rounded-lg border border-border/80 bg-surface/50 px-3 py-2">
               <div className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-lg border border-border/70 bg-card">
                 {urlBroken ? (

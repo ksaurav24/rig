@@ -7,11 +7,14 @@
 //! - you cannot change or remove yourself, so an organization always keeps
 //!   at least one owner.
 
+use std::net::SocketAddr;
+
 use axum::{
     Json,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{ConnectInfo, Path, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
 };
+use axum_extra::extract::CookieJar;
 use rig_api::{
     AddMemberRequest, ChangePasswordRequest, ErrorBody, Member, MemberWithPassword, Role,
     UpdateMemberRequest,
@@ -21,10 +24,10 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::auth::{validate_email, validate_name, validate_password};
 use crate::{
-    auth::{self, Admin, Auth, Via, Viewer},
+    auth::{self, Admin, Auth, CSRF_HEADER, Viewer},
     crypto,
     error::{ApiError, ApiResult},
-    state::{AppState, new_id, now},
+    state::{AppState, new_id, now, ts},
 };
 
 pub fn router() -> OpenApiRouter<AppState> {
@@ -36,6 +39,7 @@ pub fn router() -> OpenApiRouter<AppState> {
 }
 
 const MAX_PASSWORD_FAILURES: i64 = 8;
+pub const TEMP_PASSWORD_TTL_DAYS: i64 = 7;
 
 fn member_from_row(r: &sqlx::sqlite::SqliteRow) -> Member {
     Member {
@@ -113,14 +117,49 @@ async fn list_members(
     Ok(Json(members(&state, &auth.org_id, None).await?))
 }
 
-/// Add a person. Returns a temporary password to hand to them, once.
+async fn load_member_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    org_id: &str,
+    user_id: &str,
+) -> ApiResult<Member> {
+    let row = sqlx::query(
+        "SELECT u.id AS user_id, u.name, u.email, u.avatar_url, m.role, m.created_at AS joined_at, u.last_login_at
+           FROM memberships m JOIN users u ON u.id = m.user_id
+          WHERE m.org_id = ? AND m.user_id = ?",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(ApiError::NotFound("member"))?;
+    Ok(member_from_row(&row))
+}
+
+async fn actor_role_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    org_id: &str,
+    user_id: &str,
+) -> ApiResult<Role> {
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM memberships WHERE org_id = ? AND user_id = ?")
+            .bind(org_id)
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    role.and_then(|r| Role::parse(&r))
+        .ok_or(ApiError::Forbidden("your role does not allow this action"))
+}
+
+/// Add a person. Returns a temporary password (valid 7 days, must be changed on first sign-in) once.
 #[utoipa::path(post, path = "/api/v1/members", tag = "members", request_body = AddMemberRequest,
-    responses((status = 200, body = MemberWithPassword), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = MemberWithPassword), (status = 403, body = ErrorBody),
+              (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn add_member(
     State(state): State<AppState>,
     auth: Auth<Admin>,
     Json(req): Json<AddMemberRequest>,
 ) -> ApiResult<Json<MemberWithPassword>> {
+    auth.require_session("sign in to the dashboard to manage team members")?;
     let name = validate_name("name", &req.name, 80)?;
     let email = validate_email(&req.email)?;
     check_can_grant(auth.role, req.role)?;
@@ -128,16 +167,21 @@ async fn add_member(
     let temporary_password = crypto::random_token(15);
     let password_hash = hash(temporary_password.clone()).await?;
     let (user_id, created_at) = (new_id(), now());
+    let temp_expires = ts(chrono::Utc::now() + chrono::Duration::days(TEMP_PASSWORD_TTL_DAYS));
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
+    check_can_grant(actor_role, req.role)?;
     let inserted = sqlx::query(
-        "INSERT INTO users (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO users (id, email, name, password_hash, must_change_password, temp_password_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?)
          ON CONFLICT (email) DO NOTHING",
     )
     .bind(&user_id)
     .bind(&email)
     .bind(&name)
     .bind(&password_hash)
+    .bind(&temp_expires)
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
@@ -178,11 +222,17 @@ async fn update_member(
     Path(user_id): Path<String>,
     Json(req): Json<UpdateMemberRequest>,
 ) -> ApiResult<Json<Member>> {
-    let target = load_member(&state, &auth.org_id, &user_id).await?;
-    check_can_manage(auth.role, &auth.user_id, &target)?;
-    check_can_grant(auth.role, req.role)?;
+    auth.require_session("sign in to the dashboard to manage team members")?;
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
+    if actor_role < Role::Admin {
+        return Err(ApiError::Forbidden("your role does not allow this action"));
+    }
+    let target = load_member_tx(&mut tx, &auth.org_id, &user_id).await?;
+    check_can_manage(actor_role, &auth.user_id, &target)?;
+    check_can_grant(actor_role, req.role)?;
+
     sqlx::query("UPDATE memberships SET role = ? WHERE org_id = ? AND user_id = ?")
         .bind(req.role.as_str())
         .bind(&auth.org_id)
@@ -248,10 +298,16 @@ async fn remove_member(
     auth: Auth<Admin>,
     Path(user_id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    let target = load_member(&state, &auth.org_id, &user_id).await?;
-    check_can_manage(auth.role, &auth.user_id, &target)?;
+    auth.require_session("sign in to the dashboard to manage team members")?;
 
-    let mut tx = state.db.begin().await?;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
+    if actor_role < Role::Admin {
+        return Err(ApiError::Forbidden("your role does not allow this action"));
+    }
+    let target = load_member_tx(&mut tx, &auth.org_id, &user_id).await?;
+    check_can_manage(actor_role, &auth.user_id, &target)?;
+
     sqlx::query("DELETE FROM memberships WHERE org_id = ? AND user_id = ?")
         .bind(&auth.org_id)
         .bind(&user_id)
@@ -284,7 +340,7 @@ async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Give a member a new temporary password and sign them out everywhere.
+/// Give a member a new temporary password, sign them out everywhere, and revoke their API tokens.
 #[utoipa::path(post, path = "/api/v1/members/{user_id}/reset-password", tag = "members", params(("user_id" = String, Path)),
     responses((status = 200, body = MemberWithPassword), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)))]
 async fn reset_password(
@@ -292,18 +348,38 @@ async fn reset_password(
     auth: Auth<Admin>,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<MemberWithPassword>> {
-    let member = load_member(&state, &auth.org_id, &user_id).await?;
-    check_can_manage(auth.role, &auth.user_id, &member)?;
+    auth.require_session("sign in to the dashboard to reset member passwords")?;
 
     let temporary_password = crypto::random_token(15);
     let password_hash = hash(temporary_password.clone()).await?;
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(&password_hash)
+    let temp_expires = ts(chrono::Utc::now() + chrono::Duration::days(TEMP_PASSWORD_TTL_DAYS));
+
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
+    if actor_role < Role::Admin {
+        return Err(ApiError::Forbidden("your role does not allow this action"));
+    }
+    let member = load_member_tx(&mut tx, &auth.org_id, &user_id).await?;
+    check_can_manage(actor_role, &auth.user_id, &member)?;
+
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, must_change_password = 1, temp_password_expires_at = ?
+         WHERE id = ?",
+    )
+    .bind(&password_hash)
+    .bind(&temp_expires)
+    .bind(&user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
         .bind(&user_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+    sqlx::query("DELETE FROM api_tokens WHERE user_id = ?")
+        .bind(&user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM pending_2fa WHERE user_id = ?")
         .bind(&user_id)
         .execute(&mut *tx)
         .await?;
@@ -322,20 +398,19 @@ async fn reset_password(
     }))
 }
 
-/// Change your own password. Signs out your other sessions.
+/// Change your own password. Rotates your current session and signs out your other sessions.
 #[utoipa::path(post, path = "/api/v1/auth/password", tag = "auth", request_body = ChangePasswordRequest,
     responses((status = 204), (status = 403, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn change_password(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
     Json(req): Json<ChangePasswordRequest>,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(CookieJar, HeaderMap, StatusCode)> {
     // A leaked API token must not be able to take over the account.
-    let (Via::Session, Some(csrf)) = (&auth.via, auth.csrf_token.as_deref()) else {
-        return Err(ApiError::Forbidden(
-            "sign in to the dashboard to change your password",
-        ));
-    };
+    auth.require_session("sign in to the dashboard to change your password")?;
     validate_password(&req.new_password)?;
     if req.new_password == req.current_password {
         return Err(ApiError::validation(
@@ -355,27 +430,42 @@ async fn change_password(
         .map_err(|e| ApiError::Internal(e.into()))?;
     if !ok {
         auth::record_failure(&state, &rate_key).await?;
+        auth.audit(&state, "auth.password_change_failed", Some(&auth.user_id), None)
+            .await?;
         return Err(ApiError::validation("the current password is not right"));
     }
     auth::clear_failures(&state, &rate_key).await?;
 
     let password_hash = hash(req.new_password).await?;
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(&password_hash)
-        .bind(&auth.user_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM sessions WHERE user_id = ? AND csrf_token != ?")
-        .bind(&auth.user_id)
-        .bind(csrf)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    sqlx::query(
+        "UPDATE users SET password_hash = ?, must_change_password = 0, temp_password_expires_at = NULL
+         WHERE id = ?",
+    )
+    .bind(&password_hash)
+    .bind(&auth.user_id)
+    .execute(&state.db)
+    .await?;
+
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    let (cookie, csrf) = auth::rotate_sessions(
+        &state,
+        &auth.user_id,
+        &auth.org_id,
+        ua,
+        auth.ip.as_deref(),
+        auth::is_https(&state, &headers, Some(addr.ip())),
+    )
+    .await?;
 
     auth.audit(&state, "auth.password_change", Some(&auth.user_id), None)
         .await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut out_headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&csrf) {
+        out_headers.insert(CSRF_HEADER, v);
+    }
+    Ok((jar.add(cookie), out_headers, StatusCode::NO_CONTENT))
 }
 
 #[cfg(test)]
