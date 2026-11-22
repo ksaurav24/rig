@@ -1,0 +1,229 @@
+---
+title: Install on a Server
+description: Install Rig on Debian, Ubuntu, Fedora, or RHEL using the interactive installer wizard, unattended CLI flags, or a source release bundle.
+---
+
+You can install Rig on any fresh 64-bit Linux server with a single command. The installer verifies host requirements, installs rootless Podman or Docker if needed, configures HTTPS before your first browser sign-in, starts `rig-caddy` and `rig.service`, and prints a one-time setup token.
+
+## Prerequisites
+
+Before running the installer, verify that your server meets these requirements:
+
+- **Operating system:** 64-bit `x86_64` Linux running **Debian 12+**, **Ubuntu 24.04+**, or **Fedora 40+ / RHEL 9+** with `systemd`.
+- **Hardware:** At least **1 GB RAM** (900 MB minimum before the installer warns) and **10 GB free disk space** (5 GB minimum before the installer warns).
+- **Privileges:** Root access via `sudo`.
+- **Network ports:** TCP ports **80** and **443** open in your cloud provider or host firewall. Rig itself binds only to `127.0.0.1:7460` and is reached exclusively through Caddy.
+- **Optional:** A DNS **A** or **AAAA** record pointing to the server's public IP address if you want automatic Let's Encrypt HTTPS, or an active [Tailscale](https://tailscale.com) connection if you want `*.ts.net` HTTPS.
+
+<Callout type="info" title="Podman 4.9+ requirement">
+  Rootless Podman support requires **Podman 4.9 or newer**. Ubuntu 24.04 and Fedora 40+ / RHEL 9+ include Podman 4.9+ in their default repositories. Standard Debian 12 repositories ship Podman 4.3, so the wizard marks Podman as `[upgrade needed]` on Debian 12 unless a 4.9+ binary is already installed, and defaults to Docker there.
+</Callout>
+
+## Interactive installation
+
+<Steps>
+  <Step>
+    ### Run the installer script
+
+    Execute the release installer over SSH:
+
+    ```sh
+    curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
+    ```
+
+    The script downloads the latest `rig-<version>-x86_64-linux.tar.gz` bundle and its `.sha256` file into a temporary directory, verifies the SHA-256 checksum with `sha256sum -c`, and launches `rig-server install-wizard` attached to `/dev/tty`.
+  </Step>
+
+  <Step>
+    ### Choose a container engine
+
+    Use the arrow keys to select **Podman (rootless)** or **Docker**:
+
+    - If one engine is already installed, the wizard pre-selects it.
+    - If neither is installed, the wizard defaults to rootless Podman when `4.9+` is available from your distribution repository, or Docker otherwise.
+    - If an older Podman (`< 4.9`) is installed and your distribution repository offers `4.9+`, selecting Podman upgrades it automatically.
+  </Step>
+
+  <Step>
+    ### Select the dashboard address and HTTPS mode
+
+    Configure encryption before your initial password ever crosses the network:
+
+    1. **Custom domain with automatic HTTPS (Let's Encrypt):** Enter a hostname such as `rig.example.com`. The wizard runs a live DNS lookup and verifies that the resolved IP matches your server's detected public or LAN IP. If DNS has not propagated yet, you can retry in place, continue anyway, or pick another mode.
+    2. **Tailscale HTTPS:** Available when `tailscale status` reports `Running` with a MagicDNS name (`<machine>.<tailnet>.ts.net`). Caddy obtains TLS certificates directly from the local `tailscaled` daemon.
+    3. **Self-signed HTTPS (Private CA):** Pre-fills your server's detected IP address or LAN hostname and configures Caddy's internal certificate authority (`tls_mode: internal`). Your browser shows a one-time certificate prompt, while your setup token and password remain encrypted in transit.
+    4. **Plain HTTP:** Serves the dashboard on `http://<server-ip>`. The wizard prints an SSH port-forwarding command (`ssh -L 7460:127.0.0.1:7460 user@server`) so you can still complete initial setup over an encrypted SSH tunnel.
+  </Step>
+
+  <Step>
+    ### Choose the dashboard access scope
+
+    Select who is allowed to reach the Rig dashboard and HTTP API:
+
+    - **Public:** Any IP address that can reach the server.
+    - **LAN only:** Private network ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `fc00::/7`, `fe80::/10`, and loopback), automatically excluding local container bridge subnets (`docker*`, `br-*`, `podman*`, `cni*`) so workload containers on the host cannot bypass LAN restrictions.
+    - **Tailscale only:** Your tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, and loopback). Enabled only when Tailscale is connected so you cannot lock yourself out on first boot.
+  </Step>
+
+  <Step>
+    ### Confirm and copy the one-time setup token
+
+    Review the boxed installation summary and confirm. When installation finishes, the terminal prints your dashboard URL and a **30-minute one-time setup token**:
+
+    ```text
+    Rig is running.
+
+      Open:   https://rig.example.com
+      Token:  7fK9mP2xQ4vL8nR1wY5zT3bC (valid 30 minutes)
+    ```
+  </Step>
+</Steps>
+
+## Unattended and scripted installation
+
+Pass CLI flags via `bash -s --` or set `RIG_*` environment variables to pre-fill choices. Pass `--yes` (`-y` or `--non-interactive`) to skip all interactive prompts in cloud-init, Ansible, or CI scripts.
+
+<Tabs items={['Let\'s Encrypt Domain', 'Tailscale Tailnet', 'Self-Signed IP', 'Docker + Plain HTTP']}>
+  <Tab value="Let's Encrypt Domain">
+    ```sh
+    curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh \
+      | sudo bash -s -- --podman --domain rig.example.com --tls auto --access public --yes
+    ```
+  </Tab>
+  <Tab value="Tailscale Tailnet">
+    ```sh
+    curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh \
+      | sudo bash -s -- --podman --tls tailscale --access tailscale --yes
+    ```
+  </Tab>
+  <Tab value="Self-Signed IP">
+    ```sh
+    curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh \
+      | sudo bash -s -- --podman --tls internal --access lan --yes
+    ```
+  </Tab>
+  <Tab value="Docker + Plain HTTP">
+    ```sh
+    curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh \
+      | sudo bash -s -- --docker --tls off --yes
+    ```
+  </Tab>
+</Tabs>
+
+### Installer flags and environment variables
+
+| CLI flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--podman` | `RIG_ENGINE=podman` | Auto-detected | Use rootless Podman (`4.9+`). |
+| `--docker` | `RIG_ENGINE=docker` | Auto-detected | Use Docker Engine. |
+| `--engine <podman\|docker>` | `RIG_ENGINE` | Auto-detected | Explicit container engine selection. |
+| `--domain <host>` | `RIG_DOMAIN` | Unset | Dashboard hostname or IP address for Caddy. |
+| `--tls <auto\|internal\|tailscale\|off>` | `RIG_TLS` | `auto` if `--domain` set, else `off` | Dashboard HTTPS certificate mode. |
+| `--access <public\|lan\|tailscale>` | `RIG_ACCESS` | `tailscale` if `--tls tailscale`, else `public` | Network access scope for the dashboard and API. |
+| `--mode <full\|headless>` | `RIG_MODE` | `full` | Install mode (`full` includes API + embedded dashboard). |
+| `-y`, `--yes`, `--non-interactive` | `RIG_YES=1` | `false` | Skip interactive prompts and apply flags/defaults. |
+| `--version <ver>` | `RIG_VERSION` | `latest` | Pin a specific GitHub Release tag (for example `0.1.0` or `v0.1.0`). |
+| `--repo <owner/repo>` | `RIG_REPO` | `ksaurav24/rig` | Override the GitHub Releases repository. |
+| — | `RIG_PUBLIC_ADDRESS` | Detected IP | Override the detected IP/hostname used in setup messages. |
+| — | `RIG_CADDY_IMAGE` | `docker.io/library/caddy:2-alpine` | Override the container image used for `rig-caddy`. |
+| `--uninstall` | — | — | Stop and remove Rig services and binaries while preserving `/var/lib/rig` and `/etc/rig`. |
+| `-h`, `--help` | — | — | Print installer usage and exit. |
+
+## Build and install from source
+
+If you want to compile a release tarball from a local checkout instead of downloading a GitHub Release:
+
+<Steps>
+  <Step>
+    ### Package the release bundle
+
+    Run `scripts/package.sh` on a development machine with Rust, Node.js, `pnpm`, and Docker (or Podman with `ENGINE=podman`):
+
+    ```sh
+    scripts/package.sh
+    ```
+
+    This builds the React dashboard (`web/dist`), compiles `rig-server` and `rig` inside a Debian 12 (`rust:1-bookworm`) container for broad `glibc` compatibility, and writes `dist/rig-0.1.0-x86_64-linux.tar.gz` plus `dist/rig-0.1.0-x86_64-linux.tar.gz.sha256`.
+  </Step>
+
+  <Step>
+    ### Copy the bundle to your server and run `install.sh`
+
+    ```sh
+    scp dist/rig-0.1.0-x86_64-linux.tar.gz you@your-vm:
+    ssh you@your-vm
+    tar xzf rig-0.1.0-x86_64-linux.tar.gz && cd rig-0.1.0-x86_64-linux
+    sudo ./install.sh
+    ```
+
+    When `install.sh` detects `rig-server`, `rig`, and `rig.service` in the same directory, it installs directly from the unpacked directory without downloading from GitHub.
+  </Step>
+</Steps>
+
+## What the installer configures on the host
+
+The installer keeps all host changes transparent in `packaging/install.sh`:
+
+<Files>
+  <Folder name="/usr/local/bin" defaultOpen>
+    <File name="rig-server" />
+    <File name="rig" />
+  </Folder>
+  <Folder name="/etc/rig" defaultOpen>
+    <File name="rig.env" />
+  </Folder>
+  <Folder name="/etc/systemd/system" defaultOpen>
+    <File name="rig.service" />
+    <Folder name="rig.service.d" defaultOpen>
+      <File name="engine.conf" />
+    </Folder>
+  </Folder>
+  <Folder name="/var/lib/rig (0700, owned by rig:rig)" defaultOpen>
+    <File name="rig.db" />
+    <File name="master.key (0600)" />
+    <Folder name="backups" />
+    <Folder name="bin" />
+  </Folder>
+</Files>
+
+- **System user:** Creates a dedicated `rig` system user (`/var/lib/rig` home, `nologin` shell). On Podman, allocates a `65536`-ID subordinate UID/GID range in `/etc/subuid` and `/etc/subgid`, enables `loginctl enable-linger rig`, and starts `podman.socket` under the `rig` user's systemd instance. On Docker, adds `rig` to the `docker` group.
+- **Reverse proxy (`rig-caddy`):** Runs `caddy:2-alpine` with `--network host`, `--restart unless-stopped`, and persistent volumes `rig-caddy-data` and `rig-caddy-config`, listening on ports `80` and `443` with its admin API bound to `127.0.0.1:2019`. `/run/tailscale` is mounted into `rig-caddy` only when `--tls tailscale` or `--access tailscale` is selected.
+
+## Upgrading and uninstalling
+
+### Upgrade in place
+
+Re-run the installer on an existing server to upgrade `rig-server` and `rig`:
+
+```sh
+curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
+```
+
+When `/etc/rig/rig.env` already exists, the installer skips the interactive wizard, preserves your configured container engine and environment file, copies `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<timestamp>`, swaps the binaries atomically, and restarts `rig.service`. Schema migrations run automatically on startup.
+
+<Callout type="warn" title="Changing domain or access mode on an existing server">
+  Do not pass `--domain`, `--tls`, or `--access` when running `install.sh` to upgrade an existing server. Use `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain` or `dashboard-access` instead (or update them in **Settings → Network** in the dashboard).
+</Callout>
+
+### Uninstall
+
+To stop Rig, remove the `rig-caddy` container, and delete `/usr/local/bin/rig-server`, `/usr/local/bin/rig`, and the systemd unit while keeping your data and secrets in `/var/lib/rig` and `/etc/rig`:
+
+```sh
+sudo ./install.sh --uninstall
+```
+
+## Next steps
+
+<Cards>
+  <Card
+    href="/docs/quickstart/"
+    title="Quickstart"
+    description="Create your owner account with the setup token and deploy your first application."
+  />
+  <Card
+    href="/docs/operations/podman-and-docker/"
+    title="Podman & Docker runtimes"
+    description="Compare rootless Podman and Docker execution, sockets, and security boundaries."
+  />
+</Cards>

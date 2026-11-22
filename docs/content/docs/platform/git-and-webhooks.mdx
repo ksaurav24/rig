@@ -1,0 +1,94 @@
+---
+title: GitHub Integration & Webhooks
+description: Trigger automatic deployments from private or public Git repositories using a GitHub App, HMAC push webhooks, or branch polling.
+---
+
+Rig supports three complementary ways to deploy Git applications automatically whenever you push commits:
+
+1. **Organization GitHub App:** One-click creation via GitHub's App manifest flow; provides private repository cloning and organization-wide push webhooks.
+2. **Per-app push-to-deploy webhooks:** Works with any Git host (GitHub, GitLab, Gitea, Forgejo, Bitbucket) or CI pipeline using HMAC-SHA256 or `X-Gitlab-Token`.
+3. **Automatic branch polling:** Built-in background poller (`git ls-remote`) for private homelab, LAN, or Tailscale servers that external webhooks cannot reach.
+
+## Connecting a GitHub App
+
+An <RoleBadge role="Admin" /> or <RoleBadge role="Owner" /> using an interactive browser session (<RoleBadge role="Session Only" />) can connect or disconnect a GitHub App under **Settings → GitHub**:
+
+<Steps>
+  <Step>
+    ### Start the GitHub App manifest flow
+
+    In **Settings → GitHub**, optionally enter a GitHub organization handle (or leave blank for your personal GitHub account) and click **Connect GitHub**.
+
+    Rig generates a signed App manifest (`POST /api/v1/github/manifest`, capped at 64 concurrent pending OAuth states) requesting read-only `contents: read` and `metadata: read` permissions plus `push` webhook events, and redirects your browser to GitHub.
+  </Step>
+
+  <Step>
+    ### Approve creation and return to Rig
+
+    Confirm the App name on GitHub. GitHub redirects back to Rig with a temporary `code` and `state` (`POST /api/v1/github/manifest/complete`). Rig exchanges the code for the App's RSA private key and webhook secret, encrypts both with `Vault`, and stores them in `github_apps`.
+  </Step>
+
+  <Step>
+    ### Install the App on your repositories
+
+    Click **Install on repositories** (the App's `install_url` on GitHub) and grant access to all repositories or selected repositories.
+
+    Once installed, the **New app** dialog in Rig lists your private and public repositories (`GET /api/v1/github/repos`) and their branches (`GET /api/v1/github/repos/{owner}/{repo}/branches`).
+  </Step>
+</Steps>
+
+### How private repository tokens work
+
+Rig never writes GitHub credentials into `.git/config`, repository URLs, or build logs (`crates/rig-server/src/github.rs`):
+
+- When cloning or polling a repository matching `RIG_GITHUB_WEB`, Rig signs a 9-minute RS256 JWT as the GitHub App and requests a read-only installation token scoped to that single repository (`permissions: { contents: "read" }`).
+- The installation token is cached in memory only (for up to 50 minutes) and injected into `git` via temporary `GIT_CONFIG_COUNT` / `http.<url>.extraheader` environment variables during `git clone` or `git ls-remote`.
+- Disconnecting the GitHub App (`DELETE /api/v1/github`) immediately wipes the encrypted keys from SQLite and purges all cached installation tokens from memory.
+
+## Per-app push-to-deploy webhooks
+
+Every app in Rig has its own unique webhook endpoint and 192-bit signing secret (`apps.webhook_secret`, encrypted at rest with `Vault`), regardless of whether a GitHub App is connected:
+
+- **Endpoint:** `POST <server-url>/api/v1/hooks/apps/{app_id}`
+- **Inspect or rotate via CLI:**
+  ```sh
+  rig webhook show production/web
+  rig webhook rotate production/web
+  ```
+
+### Supported signature headers
+
+The per-app webhook endpoint (`crates/rig-server/src/routes/hooks.rs`) accepts requests without a browser session or API token when signed with the app's webhook secret (while the GitHub App endpoint `POST /api/v1/hooks/github/{org_id}` strictly requires HMAC-SHA256 via `X-Hub-Signature-256` or `X-Rig-Signature` and rejects `X-Gitlab-Token`):
+
+| Header | Format | Used by |
+| --- | --- | --- |
+| `X-Hub-Signature-256` | `sha256=<hex(HMAC-SHA256(secret, raw_body))>` | GitHub, Gitea, Forgejo |
+| `X-Rig-Signature` | `sha256=<hex(HMAC-SHA256(secret, raw_body))>` | Custom CI/CD scripts |
+| `X-Gitlab-Token` | `<secret>` (verified in constant time) | GitLab push hooks |
+
+### Branch filtering and idempotency
+
+- **GitHub `ping` events:** Return `200 OK` with `{ "deployment_id": null, "skipped": "ping received. The webhook is set up correctly" }`.
+- **Branch matching:** If the payload is a GitHub `push` or GitLab `Push Hook` event for `refs/heads/<branch>` and `<branch>` does not match the app's configured `git_branch`, Rig returns `200 OK` with `skipped` explaining the branch mismatch.
+- **In-progress guard:** If a deployment is already `queued`, `building`, or `deploying` for that app, the webhook returns `409 Conflict` rather than queueing duplicate builds.
+
+### Triggering a deploy from CI with `curl`
+
+```sh
+BODY='{"trigger":"ci"}'
+SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$RIG_WEBHOOK_SECRET" -r | awk '{print $1}')"
+
+curl -fsSL -X POST "https://rig.example.com/api/v1/hooks/apps/$APP_ID" \
+  -H "Content-Type: application/json" \
+  -H "X-Rig-Signature: $SIG" \
+  -d "$BODY"
+```
+
+## Automatic branch polling for private servers
+
+If your Rig server runs on a home network (`Access::Lan`) or Tailscale tailnet (`Access::Tailscale`) where GitHub cannot deliver inbound HTTP webhooks, Rig's background poller (`github::poller`) handles auto-deploy automatically:
+
+- Every **`RIG_POLL_INTERVAL` seconds** (default `120` seconds; set `0` in `/etc/rig/rig.env` to disable), Rig checks each `git` app that has `auto_deploy = true` and has already been deployed at least once.
+- Before cloning or polling, Rig resolves the remote host and blocks loopback or private/RFC1918 IP addresses by default (pass `--allow-private-git` / `RIG_ALLOW_PRIVATE_GIT=true` for self-hosted LAN Git servers), restricts Git transports to `https` and `ssh`, and disables HTTP redirects and symlinks.
+- Rig runs `git ls-remote <git_url> refs/heads/<branch>` (with a 30-second timeout and any applicable GitHub App installation token).
+- When the remote commit SHA differs from the app's latest deployment `commit_sha`, Rig queues a new deployment with `trigger = "webhook"` and logs `git.poll` in the audit log.

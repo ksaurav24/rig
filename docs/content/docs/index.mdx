@@ -1,0 +1,103 @@
+---
+title: Introduction
+description: Deploy applications and managed databases on your own Linux server with one Rust binary, an embedded dashboard, a CLI, and an MCP server.
+---
+
+Rig is a self-hosted deployment platform for running container applications, catalog templates, and managed databases on your own server. It ships as a single Rust binary (`rig-server`) with an embedded React dashboard, a companion terminal client (`rig`), and a built-in Model Context Protocol (MCP) server, paired with Caddy for automatic HTTPS and domain routing.
+
+You can run Rig on either **rootless Podman (4.9+)** or **Docker Engine** on any 64-bit Linux VPS, dedicated server, or homelab machine.
+
+<StatGrid
+  items={[
+    {
+      label: 'Platform RAM',
+      value: '~15–30 MB',
+      detail: 'rig-server + SQLite (WAL), plus ~25–40 MB for Caddy',
+    },
+    {
+      label: 'Container Engines',
+      value: 'Podman & Docker',
+      detail: 'Rootless Podman 4.9+ or Docker Engine via one Runtime trait',
+    },
+    {
+      label: 'Managed Databases',
+      value: '5 Engines',
+      detail: 'PostgreSQL, MySQL, MariaDB, Redis, and MongoDB with dumps',
+    },
+    {
+      label: 'Interfaces',
+      value: 'Web · CLI · MCP',
+      detail: 'Embedded React UI, rig CLI, and 28-tool stdio MCP server',
+    },
+  ]}
+/>
+
+```sh
+# Install Rig interactively on Debian 12+, Ubuntu 24.04+, or Fedora 40+ / RHEL 9+
+curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
+```
+
+## What Rig provides
+
+- **One-binary control plane:** `rig-server` embeds the web dashboard, an OpenAPI 3.1 HTTP API, a deployment queue, a 30-second resource metrics sampler, a 15-second crash and OOM watcher, a GitHub branch poller, and a Caddy configuration supervisor. State lives in SQLite (`WAL` mode) rather than separate PostgreSQL and Redis control-plane containers.
+- **Zero-downtime application deploys:** Deploy from prebuilt registry images, Git repositories with a `Dockerfile`, or repositories without a `Dockerfile` using pinned [Railpack](https://railpack.com) (`v0.43.0`) and BuildKit. Stateless apps start the new container alongside the live container, verify health checks, switch the proxy route atomically, and drain the old container.
+- **First-class rootless Podman and Docker:** Run apps under a dedicated `rig` OS user with rootless Podman in a private subordinate UID/GID namespace, or on an existing Docker Engine installation.
+- **Automatic HTTPS and network access scopes:** Route public domains with Let's Encrypt (`auto`), internal LAN domains or bare IPs with Rig's local certificate authority (`internal`), or tailnet hostnames (`*.ts.net`) with Tailscale certificates (`tailscale`). Restrict individual domains or the entire dashboard to `public`, `lan`, or `tailscale` IP ranges.
+- **Managed databases and backups:** Provision isolated PostgreSQL, MySQL, MariaDB, Redis, and MongoDB instances attached to per-project bridge networks. Stream native container backups (`pg_dump`, `mysqldump`, `mariadb-dump`, `mongodump`, `redis-cli --rdb`) encrypted at rest (`XChaCha20-Poly1305`) to disk, download decrypted dump files, or restore in place.
+- **Encrypted secrets and RBAC:** Encrypt environment variables, database passwords, GitHub App private keys, app webhook secrets, alert webhook URLs and signing secrets, and database backups at rest using XChaCha20-Poly1305 (`Vault`) keyed by a `0600` master key. Control team access with four ordered roles (`Viewer`, `Developer`, `Admin`, `Owner`), TOTP two-factor authentication, session-gated administrative actions, scoped API tokens, and an organization audit log.
+- **Terminal-first CLI and AI-native MCP server:** Operate one or many Rig servers from your laptop or CI pipeline with `rig`, link repositories via `rig.toml`, open raw-TTY container shells with `rig exec`, or expose 28 schema-validated tools to Claude Code, Cursor, and other AI coding agents via `rig mcp`.
+
+## When to use Rig
+
+| Scenario | How Rig fits |
+| --- | --- |
+| **Small VPS ($5–$20/mo) with 1–4 GB RAM** | Rig and Caddy leave almost all host memory available for your workloads instead of consuming 500–600 MB on control-plane services. |
+| **Rootless Podman servers** | The installer provisions a rootless `rig` user, enables systemd lingering, configures the user Podman socket, and runs BuildKit on demand. |
+| **Homelabs and private tailnets** | Serve apps and the dashboard exclusively over LAN RFC1918 subnets or Tailscale (`100.64.0.0/10`) with Tailscale TLS or internal CA certificates. |
+| **Agencies and small teams** | Group client workloads into isolated projects with separate container networks, role-based access control, custom workspace branding, and audit logs. |
+| **AI-assisted operations** | Connect `rig mcp` to an AI assistant with a scoped API token to inspect status, stream untrusted-framed logs, deploy, or roll back safely. |
+
+## Documentation map
+
+<Cards>
+  <Card
+    href="/docs/installation/"
+    title="Install on a server"
+    description="System requirements, interactive TUI installer wizard, unattended CLI flags, and upgrades."
+  />
+  <Card
+    href="/docs/quickstart/"
+    title="Quickstart"
+    description="Claim your server, deploy your first application with HTTPS, and connect the CLI in five minutes."
+  />
+  <Card
+    href="/docs/architecture/"
+    title="Architecture & concepts"
+    description="How rig-server, Caddy, SQLite, Vault encryption, and the container runtime work together."
+  />
+  <Card
+    href="/docs/platform/"
+    title="Platform guide"
+    description="Apps, zero-downtime deployments, managed databases, domains, TLS modes, secrets, and monitoring."
+  />
+  <Card
+    href="/docs/cli/"
+    title="CLI reference (rig)"
+    description="Every command, flag, exit code, output mode, and repo-local rig.toml workflow."
+  />
+  <Card
+    href="/docs/mcp/"
+    title="MCP server (rig mcp)"
+    description="Connect Claude Code, Cursor, or custom AI agents to all 28 Rig MCP tools with safety guardrails."
+  />
+  <Card
+    href="/docs/operations/server-cli-and-config/"
+    title="Server & operations"
+    description="rig-server flags, /etc/rig/rig.env settings, systemd hardening, and emergency recovery commands."
+  />
+  <Card
+    href="/docs/api/"
+    title="REST API reference"
+    description="OpenAPI 3.1 contract, session and Bearer token authentication, and all HTTP endpoints."
+  />
+</Cards>

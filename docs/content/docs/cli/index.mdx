@@ -1,0 +1,139 @@
+---
+title: CLI Overview & Global Flags
+description: Operate one or many Rig servers from your terminal or CI pipeline using the rig CLI.
+---
+
+The `rig` command-line client (`crates/rig-cli`) gives you full terminal control over one or many Rig servers. It shares the same Rust wire types (`rig-api`) as the server and the same operations layer (`rig_cli::ops`) as `rig mcp`.
+
+## Installing `rig`
+
+- **On a Rig server:** `install.sh` automatically installs `/usr/local/bin/rig` alongside `/usr/local/bin/rig-server`.
+- **From a release bundle:** Extract `rig-<version>-x86_64-linux.tar.gz` and copy the `rig` binary onto your `PATH` (for example `/usr/local/bin/rig` or `~/.local/bin/rig`).
+- **From source:**
+  ```sh
+  cargo install --path crates/rig-cli
+  ```
+
+## Command summary
+
+| Category | Commands | Description |
+| --- | --- | --- |
+| **Auth & Contexts** | [`rig login`](/docs/cli/auth-and-contexts/#sign-in-rig-login), [`rig logout`](/docs/cli/auth-and-contexts/#sign-out-rig-logout), [`rig context`](/docs/cli/auth-and-contexts/#manage-server-contexts-rig-context) | Save server URLs and API tokens, switch between servers, or revoke tokens on sign-out. |
+| **Repo Linking** | [`rig link`](/docs/cli/auth-and-contexts/#link-a-project-directory-rig-link-and-rigtoml), [`rig open`](/docs/cli/auth-and-contexts/#open-in-browser-rig-open) | Bind a local Git working directory to an app via `rig.toml` and open its live URL. |
+| **Projects & Apps** | [`rig status`](/docs/cli/projects-and-apps/#server-status-rig-status), [`rig projects`](/docs/cli/projects-and-apps/#manage-projects-rig-projects), [`rig apps`](/docs/cli/projects-and-apps/#manage-applications-rig-apps), [`rig domains`](/docs/cli/projects-and-apps/#manage-custom-domains-rig-domains) | Inspect server health, manage projects, create/update/remove apps, and configure domains. |
+| **Deploys & Logs** | [`rig deploy`](/docs/cli/deployments-and-logs/#deploy-an-application-rig-deploy), [`rig start`](/docs/cli/deployments-and-logs/#start-restart-and-stop), [`rig restart`](/docs/cli/deployments-and-logs/#start-restart-and-stop), [`rig rollback`](/docs/cli/deployments-and-logs/#roll-back-a-deployment-rig-rollback), [`rig stop`](/docs/cli/deployments-and-logs/#start-restart-and-stop), [`rig deployments`](/docs/cli/deployments-and-logs/#inspect-and-cancel-deployments-rig-deployments), [`rig logs`](/docs/cli/deployments-and-logs/#stream-runtime-container-logs-rig-logs), [`rig exec`](/docs/cli/deployments-and-logs/#interactive-container-shell-rig-exec) | Trigger builds, stream resumable SSE logs, roll back images, or open a raw-TTY container shell. |
+| **Env & Databases** | [`rig env`](/docs/cli/env-and-databases/#manage-environment-variables-rig-env), [`rig db`](/docs/cli/env-and-databases/#manage-databases-rig-db), [`rig backup`](/docs/cli/env-and-databases/#manage-database-backups-rig-backup) | Manage encrypted secrets, sync `.env` files, provision databases, launch `psql`/`redis-cli`/`mongosh`, and restore dumps. |
+| **Admin & Ops** | [`rig metrics`](/docs/cli/admin-and-monitoring/#resource-metrics-rig-metrics), [`rig top`](/docs/cli/admin-and-monitoring/#live-server-monitor-rig-top), [`rig tokens`](/docs/cli/admin-and-monitoring/#api-tokens-rig-tokens), [`rig members`](/docs/cli/admin-and-monitoring/#organization-members-rig-members), [`rig audit`](/docs/cli/admin-and-monitoring/#audit-log-rig-audit), [`rig alerts`](/docs/cli/admin-and-monitoring/#alert-channels-rig-alerts), [`rig webhook`](/docs/cli/admin-and-monitoring/#app-deploy-webhooks-rig-webhook), [`rig github`](/docs/cli/admin-and-monitoring/#github-app-inspection-rig-github) | View sparkline metrics, live `top`, manage team members, tokens, alerts, webhooks, and GitHub repos. |
+| **AI & Shell** | [`rig mcp`](/docs/mcp/), [`rig completions`](#shell-completions) | Run the stdio Model Context Protocol server or generate shell completion scripts. |
+
+## Global flags
+
+Every `rig` subcommand accepts these global flags (`crates/rig-cli/src/lib.rs`):
+
+| Flag | Short | Environment variable | Default | Description |
+| --- | --- | --- | --- | --- |
+| `--context <NAME>` | — | `RIG_CONTEXT` | Current context in `config.toml` | Use a specific named context for this command. |
+| `--server <URL>` | — | `RIG_URL` | Unset | Target a server URL directly. Pair with `RIG_TOKEN` for stateless CI/CD runs without a config file. |
+| `--insecure` | — | `RIG_INSECURE` | `false` | Allow plain `http://` connections to non-loopback hosts. (`http://127.0.0.1`, `http://localhost`, and `http://[::1]` are always allowed.) |
+| `--json` | — | — | `false` | Print structured JSON output (or NDJSON for streaming `rig logs` and `rig deployments logs`). Shorthand for `-o json`. |
+| `--output <FMT>` | `-o` | — | `table` | Output format: `table`, `json`, `yaml`, or `name` (prints only resource names or IDs, one per line, for shell scripting). |
+| `--wide` | — | — | `false` | Disable table column truncation to terminal width. |
+| `--yes` | `-y` | — | `false` | Skip interactive confirmation prompts on destructive commands (`rm`, `stop`, `restore`, `revoke`, `rotate`). |
+| `--verbose` (`--debug`) | `-v` | — | `false` | Log each HTTP request method, path, status code, and latency in milliseconds to `stderr`. |
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `RIG_URL` | Target server base URL (same as `--server`). |
+| `RIG_TOKEN` | Bearer API token (`rig_...`). Used by `rig login` and by stateless `--server` / `RIG_URL` calls. |
+| `RIG_CONTEXT` | Named context to use from `config.toml` (same as `--context`). |
+| `RIG_CONFIG` | Custom path to the CLI configuration file (defaults to `~/.config/rig/config.toml` on Linux, `~/Library/Application Support/rig/config.toml` on macOS). |
+| `RIG_INSECURE` | Set to `1` or `true` to permit plain `http://` to remote hosts. |
+| `NO_COLOR` | When set, disables ANSI status colors in table and status output. |
+
+## Output formats (`-o table|json|yaml|name`)
+
+`rig` is designed for both interactive terminal sessions and automated shell pipelines:
+
+<Tabs items={['Table (default)', 'JSON (--json / -o json)', 'YAML (-o yaml)', 'Name (-o name)']}>
+  <Tab value="Table (default)">
+    ```sh
+    rig apps --project production
+    ```
+    ```text
+    APP              STATUS    SOURCE                      URL
+    production/web   running   nginx:alpine                https://app.example.com
+    production/api   running   https://github.com/org/api  https://api.example.com
+    ```
+  </Tab>
+  <Tab value="JSON (--json / -o json)">
+    ```sh
+    rig apps --project production --json
+    ```
+    Emits valid JSON on `stdout` with zero prose or spinners. For streaming commands (`rig logs --json` and `rig deployments logs --json`), emits one JSON `LogLine` object per line (**NDJSON**).
+  </Tab>
+  <Tab value="YAML (-o yaml)">
+    ```sh
+    rig apps show production/web -o yaml
+    ```
+    Emits structured YAML representation of the resource.
+  </Tab>
+  <Tab value="Name (-o name)">
+    ```sh
+    # Print one identifier per line for xargs / shell loops
+    rig apps -o name
+    ```
+    ```text
+    production/web
+    production/api
+    ```
+  </Tab>
+</Tabs>
+
+## Process exit codes
+
+`rig` maps errors to distinct, stable exit codes (`crates/rig-cli/src/error.rs`) so CI pipelines and scripts can branch on failure cause:
+
+| Exit code | Error variant | Meaning |
+| --- | --- | --- |
+| **`0`** | Success | Command completed and any followed deployment reached `running`. |
+| **`1`** | `Other` / `Conflict` | Generic server error, validation error (`422`), conflict (`409`), or declined confirmation prompt. |
+| **`2`** | Usage error | Invalid command-line arguments or missing required flags (emitted by `clap`). |
+| **`3`** | `CliError::Auth` | Not signed in, missing context, expired token (`401 Unauthorized`), or insufficient role permissions (`403 Forbidden`). |
+| **`4`** | `CliError::NotFound` | Resource not found (`404`), unknown app/project/database/deployment, or unlinked directory. |
+| **`5`** | `CliError::Network` | Server unreachable, connection timeout, or SSE log stream interrupted after 5 automatic reconnect retries. |
+| **`10`** | `CliError::DeployFailed` | Followed deployment finished with status `failed` or `cancelled`, or app entered `failed` state during `--wait-healthy`. |
+| **`130`** | `CliError::Detached` | User pressed `Ctrl-C` while following a deployment. The deployment continues running on the server. |
+
+## Shell completions
+
+Generate tab-completion scripts for `bash`, `zsh`, `fish`, `powershell`, or `elvish` using `rig completions`:
+
+<Tabs items={['Bash', 'Zsh', 'Fish', 'PowerShell']}>
+  <Tab value="Bash">
+    ```sh
+    rig completions bash > ~/.local/share/bash-completion/completions/rig
+    ```
+  </Tab>
+  <Tab value="Zsh">
+    ```sh
+    mkdir -p ~/.zsh/completions
+    rig completions zsh > ~/.zsh/completions/_rig
+    ```
+  </Tab>
+  <Tab value="Fish">
+    ```sh
+    rig completions fish > ~/.config/fish/completions/rig.fish
+    ```
+  </Tab>
+  <Tab value="PowerShell">
+    ```powershell
+    rig completions powershell >> $PROFILE
+    ```
+  </Tab>
+</Tabs>
+
+## Version-skew warning
+
+Every response from `rig-server` includes the `x-rig-version` HTTP header. When running interactively (non-JSON output), `rig` compares its own compiled version against `x-rig-version` and prints a one-time notice to `stderr` if the CLI and server versions differ.

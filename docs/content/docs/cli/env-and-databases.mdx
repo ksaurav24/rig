@@ -1,0 +1,181 @@
+---
+title: Environment, Databases & Backups
+description: Reference for rig env, rig db (rig databases), and rig backup (rig backups) commands.
+---
+
+Use these commands to manage encrypted application secrets, synchronize `.env` files, provision and connect to managed databases, and create or restore database backups.
+
+## Manage environment variables (`rig env`)
+
+### List variables (`rig env ls`)
+
+Lists variable keys for an app. Plain variables show their value; secrets show `(secret)`:
+
+```sh
+rig env ls [app]
+```
+
+### Set variables (`rig env set`)
+
+Atomically create or update one or more variables. Stored encrypted and masked (`is_secret: true`) by default unless `--plain` is passed:
+
+```sh
+rig env set <app> <KEY=VALUE>... [--plain]
+```
+
+- **Read from stdin (`KEY=-`):** Pass `-` as the value for at most one key to read the secret directly from standard input (trailing newline trimmed) so sensitive multi-line keys or tokens never appear in your shell history:
+  ```sh
+  openssl rand -hex 32 | rig env set production/web SESSION_SECRET=-
+  ```
+
+### Reveal one variable (`rig env get`)
+
+Decrypts and prints a single variable's value (<RoleBadge role="Developer" /> required; records `env.reveal` in the audit log):
+
+```sh
+rig env get <app> <KEY>
+```
+
+### Delete a variable (`rig env rm`)
+
+```sh
+rig env rm <app> <KEY>
+```
+
+### Import a `.env` file (`rig env import`)
+
+Atomically import all `KEY=VALUE` pairs from a `.env` file (or `-` for `stdin`) in a single server transaction:
+
+```sh
+rig env import <app> <file-or-dash> [--plain] [--replace]
+```
+
+- Pass `--replace` to delete any existing server variables on `<app>` that are not present in the imported file.
+- Pass `--plain` to store imported variables as readable plain text instead of secrets.
+
+### Export variables to `.env` format (`rig env pull`)
+
+Export an app's environment variables in standard `.env` format to `stdout` or a file:
+
+```sh
+rig env pull [app] [-f / --file <path>] [--reveal]
+```
+
+- Without `--reveal`, secret values are written as `# SECRET_KEY=(secret; pass --reveal to export)`.
+- With `--reveal`, Rig calls the audited reveal endpoint for each secret and writes the decrypted values formatted for `.env`.
+
+### Compare local `.env` against server (`rig env diff`)
+
+Compare a local `.env` file with an app's configured variables on the server:
+
+```sh
+rig env diff <app> <path-to-dotenv> [--reveal]
+```
+
+```text
+CHANGE                     KEY             LOCAL           SERVER
++ local only               FEATURE_X       true
+- server only              LEGACY_FLAG                     1
+~ changed                  LOG_LEVEL       debug           info
+? secret (pass --reveal)   DATABASE_URL    postgres://...  (secret)
+```
+
+## Manage databases (`rig db`)
+
+`rig db` (aliased as `rig databases`) manages isolated PostgreSQL, MySQL, MariaDB, Redis, and MongoDB instances.
+
+### List databases and supported engines
+
+```sh
+# List managed databases (optionally filtered by project)
+rig db [--project <project>]
+rig db ls [--project <project>]
+
+# List supported database engines, versions, and internal ports
+rig db engines
+```
+
+```text
+ENGINE     LABEL        VERSIONS         PORT
+postgres   PostgreSQL   17, 16, 15       5432
+mysql      MySQL        8.4, 8.0         3306
+mariadb    MariaDB      11.4, 10.11      3306
+redis      Redis        7.4, 7.2         6379
+mongodb    MongoDB      8.0, 7.0         27017
+```
+
+### Create a database (`rig db create`)
+
+Requires <RoleBadge role="Developer" /> or higher:
+
+```sh
+rig db create <name> \
+  --project <project> \
+  --engine <postgres|mysql|mariadb|redis|mongodb> \
+  [--version <ver>] \
+  [--wait]
+```
+
+- `--version <ver>`: Defaults to the newest supported version for the chosen engine (for example `17` for `postgres`, `8.4` for `mysql`, `7.4` for `redis`).
+- `--wait`: Polls the database until image pull and initial data directory setup complete (`status == running`, up to 180 seconds).
+
+### Inspect, start, stop, and delete databases
+
+```sh
+# Show engine, version, status, in-project address, loopback port, db name, and username
+rig db show <database>
+
+# Start a stopped or failed database
+rig db start <database> [--wait]
+
+# Stop a running database (removes container, keeps data volume)
+rig db stop <database>
+
+# Permanently delete a database, its data volume, and all backups (Admin+ required)
+rig db rm <database> [--yes]
+```
+
+### Reveal credentials and connect (`rig db url` and `rig db connect`)
+
+```sh
+# Print the in-project connection URL (audited; Developer+ required)
+rig db url <database>
+
+# Print only the raw database password
+rig db url <database> --password
+
+# Launch an interactive local client (psql, mysql, mariadb, redis-cli, or mongosh)
+# against the database's 127.0.0.1:<host_port> loopback port
+rig db connect <database> [--print]
+```
+
+Pass `--print` to `rig db connect` to print the client invocation command without executing it.
+
+## Manage database backups (`rig backup`)
+
+`rig backup` (aliased as `rig backups`) creates, downloads, restores, and deletes native database dumps. Creating, downloading, restoring, and deleting backups require <RoleBadge role="Admin" /> or higher (`rig backup ls` is available to <RoleBadge role="Viewer" /> and higher).
+
+```sh
+# List backups for a database
+rig backup ls <database>
+
+# Start a new backup dump on a running database (add --wait to wait up to 5 minutes for completion)
+rig backup create <database> [--wait]
+
+# Download a backup dump file to disk (defaults to server-suggested filename in current dir)
+rig backup download <backup-id> [-f / --out-file <path>]
+
+# Restore a backup in place, replacing current database data
+rig backup restore <backup-id> [--yes]
+
+# Delete a backup and its dump file from the server
+rig backup rm <backup-id> [--yes]
+```
+
+Example `rig backup ls production/main-db` output:
+
+```text
+SHORT      STATUS   SIZE      RESTORABLE   CREATED   ID
+81b4c920   ok       14.2 MB   yes          12m ago   019a1e30-...
+3f09a114   ok       14.1 MB   yes          1d ago    019a1d10-...
+```

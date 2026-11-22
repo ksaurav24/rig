@@ -1,0 +1,19 @@
+{
+  "pages": [
+    "---Get started---",
+    "index",
+    "installation",
+    "quickstart",
+    "architecture",
+    "---Platform---",
+    "...platform",
+    "---CLI---",
+    "...cli",
+    "---MCP Server---",
+    "...mcp",
+    "---Server & Operations---",
+    "...operations",
+    "---REST API---",
+    "...api"
+  ]
+}

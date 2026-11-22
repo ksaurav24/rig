@@ -1,0 +1,151 @@
+---
+title: Authentication, Contexts & Linking
+description: Authenticate with Rig servers, manage multiple server contexts, use stateless CI variables, and link local repositories with rig.toml.
+---
+
+`rig` stores saved server connections as named **contexts** in `~/.config/rig/config.toml` (written atomically with mode `0600`), similar to `kubectl` contexts. You can also run any command statelessly in CI/CD using `--server` (`RIG_URL`) and `RIG_TOKEN`, or link a repository directory with `rig.toml`.
+
+## Sign in (`rig login`)
+
+Save a server URL and API token as a named context and make it the active context:
+
+```sh
+rig login <url> [--name <context-name>] [--token <token>]
+```
+
+| Argument / Flag | Environment | Description |
+| --- | --- | --- |
+| `<url>` | — | Server address, such as `https://rig.example.com` or `rig.example.com` (`https://` is added automatically when omitted). |
+| `--name <name>` | — | Custom name for the saved context. Defaults to the server's hostname (for example `rig.example.com`). |
+| `--token <token>` | `RIG_TOKEN` | API token (`rig_...`). Omit on the command line to enter it interactively at a hidden terminal prompt (`read_secure_line`) so it stays out of shell history. |
+
+When you run `rig login`, the CLI immediately calls `GET /api/v1/auth/me` to verify the token and records your email, organization name, and role alongside the context:
+
+```sh
+rig login https://rig.example.com --name prod
+# API token (create one in the dashboard under Settings → API tokens): ********
+# Signed in to Acme as ada@example.com (owner). Context: prod
+```
+
+<Callout type="warn" title="Transport security check">
+  `rig` refuses plain `http://` URLs for non-loopback hosts by default so your Bearer token is never transmitted in cleartext. Only `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are permitted without HTTPS unless you explicitly pass `--insecure` (`RIG_INSECURE=1`).
+</Callout>
+
+## Sign out (`rig logout`)
+
+Remove a saved context from your local `config.toml`, and optionally revoke the API token on the server at the same time:
+
+```sh
+# Remove the active context locally
+rig logout
+
+# Remove a specific context by name
+rig logout staging
+
+# Revoke the API token on the server first, then remove the local context
+rig logout prod --revoke
+```
+
+When `--revoke` is passed, `rig` queries `GET /api/v1/tokens`, matches the saved token's 8-character prefix, calls `DELETE /api/v1/tokens/{id}`, and then removes the context from `config.toml`.
+
+## Manage server contexts (`rig context`)
+
+Switch between multiple Rig servers (for example `prod`, `staging`, and `homelab`):
+
+```sh
+# List all saved contexts (* marks the active context)
+rig context
+rig context ls
+
+# Switch the active context
+rig context use homelab
+
+# Print the active context name (or JSON details with --json)
+rig context current
+
+# Rename a saved context
+rig context rename rig.example.com prod
+```
+
+Example `rig context` output:
+
+```text
+    NAME      SERVER                    USER              ORG
+*   prod      https://rig.example.com/  ada@example.com   Acme
+    homelab   https://box.tail1.ts.net/ ada@example.com   Homelab
+```
+
+### Configuration file format (`~/.config/rig/config.toml`)
+
+```toml
+current = "prod"
+
+[contexts.prod]
+url = "https://rig.example.com/"
+token = "rig_8fK9mP2xQ4vL8nR1wY5zT3bC7dE0aH6j"
+user = "ada@example.com"
+org = "Acme"
+role = "owner"
+```
+
+## Stateless CI/CD authentication (`RIG_URL` + `RIG_TOKEN`)
+
+In GitHub Actions, GitLab CI, or other automated runners, you do not need to run `rig login` or create a config file. Provide `--server` (or `RIG_URL`) together with `RIG_TOKEN`:
+
+```sh
+export RIG_URL="https://rig.example.com"
+export RIG_TOKEN="rig_..."
+
+rig deploy production/web --wait-healthy --timeout 10m
+```
+
+### Context resolution precedence
+
+For every server command, `rig` resolves the target server and token in this exact order (`Config::resolve_with`):
+
+1. **`--server <url>` / `RIG_URL`**: Uses `RIG_TOKEN` if set; otherwise looks for a saved context in `config.toml` whose URL matches `--server`.
+2. **`--context <name>` / `RIG_CONTEXT`**: Uses the named saved context.
+3. **Repo-local `rig.toml`**: If the current working directory (or an ancestor directory) contains a `rig.toml` with `context` or `server`, uses that context.
+4. **Current context**: Uses `current` from `config.toml`.
+
+## Link a project directory (`rig link` and `rig.toml`)
+
+Link a local Git repository or project directory to a Rig application so commands like `rig deploy`, `rig logs`, `rig exec`, `rig env ls`, `rig domains ls`, and `rig open` automatically target that app when `<app>` is omitted:
+
+```sh
+# Link the current directory to an app
+rig link production/web
+
+# Inspect the current directory's link
+rig link
+```
+
+### `rig.toml` format and discovery
+
+`rig link` writes a `rig.toml` file in the current directory:
+
+```toml
+app = "web"
+project = "production"
+context = "prod"
+server = "https://rig.example.com/"
+```
+
+- **Upward directory discovery:** Whenever you omit `<app>`, `rig` walks upward from your current working directory (`link::find_from`) until it finds `rig.toml`, so running `rig deploy` or `rig logs` from `packages/frontend/src/` inside a monorepo still resolves the linked app.
+- **Version control:** Because `rig.toml` contains no secrets (only the app slug, project name, and optional context/server URL), you can safely commit `rig.toml` to your Git repository.
+
+## Open in browser (`rig open`)
+
+Launch the live HTTPS/HTTP URL of an application — or the Rig server dashboard — in your default system browser (`xdg-open` on Linux, `open` on macOS, `start` on Windows):
+
+```sh
+# Open the first domain of a specific app (or the linked app in rig.toml)
+rig open production/web
+rig open
+
+# Open the Rig server dashboard
+rig open --dashboard
+
+# Print the resolved URL to stdout without opening a browser
+rig open production/web --print
+```

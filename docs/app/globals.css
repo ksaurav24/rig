@@ -1,0 +1,300 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: 'Schibsted Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-hover: var(--hover);
+}
+
+/* Rig "crisp warm graphite" palette with emerald accent */
+:root {
+  color-scheme: light;
+  --radius: 0.5rem;
+  --background: oklch(0.978 0.0025 75);
+  --foreground: oklch(0.19 0.008 70);
+  --card: oklch(0.996 0.0015 75);
+  --card-foreground: oklch(0.19 0.008 70);
+  --popover: oklch(0.999 0.001 75);
+  --popover-foreground: oklch(0.19 0.008 70);
+  --primary: oklch(0.5 0.115 158);
+  --primary-foreground: oklch(0.985 0.008 158);
+  --secondary: oklch(0.948 0.004 75);
+  --secondary-foreground: oklch(0.22 0.008 70);
+  --muted: oklch(0.948 0.004 75);
+  --muted-foreground: oklch(0.45 0.009 70);
+  --accent: oklch(0.935 0.005 75);
+  --accent-foreground: oklch(0.19 0.008 70);
+  --destructive: oklch(0.53 0.195 27);
+  --border: oklch(0.892 0.005 75);
+  --input: oklch(0.845 0.006 75);
+  --ring: oklch(0.5 0.115 158);
+  --hover: oklch(0.22 0.01 70 / 0.05);
+}
+
+:root.dark {
+  color-scheme: dark;
+  --background: oklch(0.148 0.004 70);
+  --foreground: oklch(0.945 0.004 75);
+  --card: oklch(0.182 0.0045 70);
+  --card-foreground: oklch(0.945 0.004 75);
+  --popover: oklch(0.21 0.005 70);
+  --popover-foreground: oklch(0.945 0.004 75);
+  --primary: oklch(0.74 0.135 158);
+  --primary-foreground: oklch(0.18 0.03 158);
+  --secondary: oklch(0.235 0.005 70);
+  --secondary-foreground: oklch(0.945 0.004 75);
+  --muted: oklch(0.215 0.005 70);
+  --muted-foreground: oklch(0.7 0.007 75);
+  --accent: oklch(0.245 0.005 70);
+  --accent-foreground: oklch(0.96 0.004 75);
+  --destructive: oklch(0.68 0.175 25);
+  --border: oklch(0.275 0.006 70);
+  --input: oklch(0.32 0.007 70);
+  --ring: oklch(0.74 0.135 158);
+  --hover: oklch(1 0 0 / 0.06);
+}
+
+/* Map Fumadocs CSS variables to Rig palette */
+:root,
+.dark {
+  --color-fd-background: var(--background);
+  --color-fd-foreground: var(--foreground);
+  --color-fd-primary: var(--primary);
+  --color-fd-primary-foreground: var(--primary-foreground);
+  --color-fd-muted: var(--muted);
+  --color-fd-muted-foreground: var(--muted-foreground);
+  --color-fd-secondary: var(--secondary);
+  --color-fd-secondary-foreground: var(--secondary-foreground);
+  --color-fd-border: var(--border);
+  --color-fd-card: var(--card);
+  --color-fd-card-foreground: var(--card-foreground);
+  --color-fd-popover: var(--popover);
+  --color-fd-popover-foreground: var(--popover-foreground);
+  --color-fd-accent: var(--accent);
+  --color-fd-accent-foreground: var(--accent-foreground);
+  --color-fd-ring: var(--ring);
+}
+
+html {
+  scroll-padding-top: 5rem;
+  font-optical-sizing: auto;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--primary) 28%, transparent);
+}
+
+#nd-docs-layout {
+  --fd-layout-width: 100%;
+}
+
+#nd-sidebar {
+  background: var(--background);
+}
+
+#nd-page {
+  padding-top: 3rem;
+}
+
+#nd-page h1 {
+  font-size: clamp(1.85rem, 2.8vw, 2.35rem);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+#nd-page h1 + p {
+  font-size: 1.04rem;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.prose {
+  --tw-prose-body: color-mix(
+    in oklab,
+    var(--foreground) 86%,
+    var(--background)
+  );
+  line-height: 1.72;
+}
+
+.prose :where(p, li) {
+  text-wrap: pretty;
+}
+
+.prose :where(h2) {
+  font-weight: 600;
+  letter-spacing: -0.022em;
+  margin-top: 2.5em;
+}
+
+.prose :where(h3) {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.prose :where(a):not(:where(.not-prose *, [data-card])) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--ring);
+}
+
+.prose :where(a):not(:where(.not-prose *, [data-card])):hover {
+  text-decoration-color: currentColor;
+}
+
+.prose :where(code):not(:where(pre *)) {
+  font-size: 0.85em;
+  padding: 0.14em 0.38em;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+  font-variant-ligatures: none;
+}
+
+.prose pre {
+  font-size: 0.82rem;
+  line-height: 1.72;
+  font-variant-ligatures: none;
+}
+
+.prose figure[dir] {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.prose :where(table) {
+  font-size: 0.875rem;
+}
+
+.prose :where(thead th) {
+  font-weight: 550;
+  color: var(--muted-foreground);
+}
+
+.prose .grid > [data-card] {
+  border-color: var(--border);
+  background: var(--card);
+  box-shadow: none;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+.prose .grid > [data-card]:hover {
+  border-color: var(--ring);
+}
+
+@media (max-width: 40rem) {
+  #nd-page {
+    padding-top: 1.75rem;
+  }
+}
+
+/* Animated theme toggle */
+.animated-theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--muted-foreground);
+}
+.animated-theme-toggle:hover {
+  color: var(--foreground);
+  background: var(--hover);
+}
+.animated-theme-toggle:disabled {
+  cursor: wait;
+}
+.theme-icons {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+}
+.theme-icons svg {
+  grid-area: 1 / 1;
+  transition:
+    transform 180ms ease-out,
+    opacity 140ms ease-out;
+}
+.theme-sun {
+  transform: rotate(-60deg) scale(0.5);
+  opacity: 0;
+}
+.theme-moon {
+  transform: rotate(0) scale(1);
+  opacity: 1;
+}
+.dark .theme-sun {
+  transform: rotate(0) scale(1);
+  opacity: 1;
+}
+.dark .theme-moon {
+  transform: rotate(60deg) scale(0.5);
+  opacity: 0;
+}
+html[data-theme-transition='active']::view-transition-group(root) {
+  animation-duration: 400ms;
+}
+html[data-theme-transition='active']::view-transition-old(root),
+html[data-theme-transition='active']::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+html[data-theme-transition='active']::view-transition-old(root) {
+  z-index: 1;
+}
+html[data-theme-transition='active']::view-transition-new(root) {
+  z-index: 2;
+  clip-path: var(--theme-reveal-start);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,86 @@
+---
+title: Monitoring, Metrics & Alerts
+description: Track CPU, memory, disk, and network usage across your server and containers, detect OOM kills and crashes, and send signed webhook alerts.
+---
+
+Rig monitors your host server, every running application container, and every running managed database in the background without requiring Prometheus, Grafana, or external agents.
+
+## Resource metrics sampling and storage
+
+The background sampler (`crates/rig-server/src/metrics.rs`) runs every **30 seconds** (`SAMPLE_EVERY = 30s`):
+
+- **Scopes:** Collects one sample for `host`, one for each running app (`app:<id>`), and one for each running database (`db:<id>`), with an 8-second per-container stats timeout (`USAGE_TIMEOUT`).
+- **Metrics collected:**
+  - `cpu_percent`: For `host`, percentage across all CPU cores (`0–100%`). For a container, percentage of a single core (so a 2-core container can report up to `200%`).
+  - `memory_bytes` and `memory_total`: Resident memory usage and either host total RAM or the container's configured cgroup memory limit (`0` when unlimited).
+  - `net_rx_bps` and `net_tx_bps`: Average receive and transmit throughput in bytes per second between consecutive samples. On the host, virtual and bridge interfaces (`lo`, `veth*`, `docker*`, `br-*`, `podman*`, `cni*`, `virbr*`, `vnet*`, `tap*`) are excluded so traffic is never double-counted.
+- **Retention and rollups:** Samples are retained in SQLite for **24 hours** (`RETENTION_SECS = 86400`, pruned automatically every 120 samples). Queries over any time window (`1h`, `6h`, or `24h`) group samples into **120 time buckets** (`step_seconds` of `30s`, `180s`, or `720s`).
+
+```sh
+# View host metrics with terminal sparklines
+rig metrics --range 6h
+
+# View metrics for an app or database
+rig metrics production/web --range 1h
+rig metrics production/main-db --db --range 24h
+
+# Live terminal top view refreshing every 2 seconds
+rig top
+```
+
+## Crash and OOM watcher
+
+Because container engines automatically restart crashed containers under their restart policy, an app in a crash loop can appear `"running"` if you only look at container status. Rig's crash watcher (`crates/rig-server/src/watch.rs`) inspects every running app container every **15 seconds** (`CHECK_EVERY = 15s`):
+
+1. **Crash detection (`Verdict::Crashed`):** If the container's `restart_count` increased since the last check, Rig records `last_crash_at`, `restart_count`, and a human-readable `last_crash_reason` on the app, and fires an `app.crashed` alert:
+   - If `oom_killed == true`, the reason reports: `"ran out of memory (limit <N> MB). Raise the memory limit in settings"`.
+   - If the container exited with a non-zero exit code `c`, it reports: `"exited with code <c>. Check the logs"`.
+2. **Down detection (`Verdict::Failed`):** If a container is in `Exited` state on two consecutive 15-second checks without restarting (or if the container disappeared), Rig marks the app `failed` and dispatches an `app.down` alert.
+
+## Low-disk safety thresholds
+
+Rig protects small servers against disk exhaustion at two thresholds on the filesystem containing `RIG_DATA_DIR`:
+
+| Free disk space | Action taken by Rig |
+| --- | --- |
+| **Under 5 GiB or under 10% of total disk** | Displays a persistent low-disk warning banner in the dashboard and sends a `disk.low` alert to all enabled alert channels. |
+| **Under 1024 MB (1 GiB)** | Pauses new application deployments and database backups so SQLite and running databases cannot be corrupted by `ENOSPC`. |
+
+## Outbound alert channels
+
+Admins and Owners (<RoleBadge role="Admin" />) can configure outbound webhook channels under **Settings → Alerts** or via [`rig alerts`](/docs/cli/admin-and-monitoring/#alert-channels-rig-alerts).
+
+### Alert events
+
+| CLI / API event name | Wire event key (`x-rig-event`) | Trigger condition |
+| --- | --- | --- |
+| `deploy_failed` | `deploy.failed` | A deployment fails during image pull, Git clone, Dockerfile/Railpack build, or container health check. |
+| `app_crashed` | `app.crashed` | A running app container crashes (OOM or non-zero exit) and is restarted by the container engine. |
+| `app_down` | `app.down` | A running app container stops and stays down across two consecutive watcher checks. |
+| `disk_low` | `disk.low` | Free space on the `RIG_DATA_DIR` disk drops below 5 GiB or 10% of total capacity. |
+| `backup_failed` | `backup.failed` | A managed database backup dump fails or returns an empty dump file. |
+
+### Payload format and Slack / Discord compatibility
+
+Every alert delivery sends an HTTP `POST` request (10-second timeout, HTTP redirects disabled) with a JSON payload that includes both `text` (for **Slack** incoming webhooks) and `content` (for **Discord** incoming webhooks), alongside structured fields for custom receivers:
+
+```json
+{
+  "event": "app.crashed",
+  "title": "web crashed and was restarted",
+  "detail": "It ran out of memory (limit 512 MB). Raise the memory limit in settings.",
+  "target": "019a1e2c-6049-70bb-85e7-91caec40688e",
+  "at": "2026-11-22T15:30:12.410Z",
+  "text": "web crashed and was restarted: It ran out of memory (limit 512 MB). Raise the memory limit in settings.",
+  "content": "web crashed and was restarted: It ran out of memory (limit 512 MB). Raise the memory limit in settings."
+}
+```
+
+### SSRF protection, HMAC signature verification, and cooldowns
+
+- **Connect-time SSRF protection:** Alert destinations are validated both up front and at DNS resolution time (`SafeDnsResolver`), blocking loopback, private/RFC1918, link-local, CGNAT, and cloud metadata (`169.254.169.254`) IP addresses (including against DNS rebinding). Delivery error messages are sanitized so internal network topology is not leaked. To send alerts to a self-hosted receiver on your local network, explicitly start `rig-server` with `--allow-private-alerts` (`RIG_ALLOW_PRIVATE_ALERTS=true`).
+- **Webhook URL and signing secret encryption:** Both channel destination URLs (`alert_channels.url_enc`) and HMAC signing secrets (`alert_channels.signing_secret`) are encrypted at rest with `Vault`. Only `url_host` is returned when listing channels so embedded webhook tokens stay hidden.
+- **HMAC-SHA256 signing:** Every channel is assigned a 192-bit signing secret (shown once on creation). Each outbound request includes:
+  - `X-Rig-Event: <event_key>`
+  - `X-Rig-Signature: sha256=<hex(HMAC-SHA256(signing_secret, raw_json_body))>`
+- **10-minute per-target cooldown:** To prevent alert storms during a crash loop, Rig sends at most one alert per `(org_id, event_key, target)` every **10 minutes** (`COOLDOWN = 600s`).

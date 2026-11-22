@@ -1,0 +1,48 @@
+---
+title: Podman & Docker Runtimes
+description: Compare rootless Podman and Docker execution models, socket wiring, on-demand BuildKit, and container security controls.
+---
+
+Rig treats **rootless Podman (`4.9+`)** and **Docker Engine** as equal first-class container runtimes. Both engines are driven through a single `Runtime` trait (`crates/rig-server/src/runtime/docker.rs`) talking over the engine's Unix domain socket.
+
+## Comparison: Rootless Podman vs. Docker
+
+| Aspect | Rootless Podman (`4.9+`) | Docker Engine |
+| --- | --- | --- |
+| **Daemon footprint** | Daemonless; `podman.socket` spawns an API service on demand under the `rig` user's systemd slice. | Persistent `dockerd` + `containerd` root daemon (~50–100 MB idle RAM). |
+| **Privilege boundary** | Runs entirely inside the `rig` user's subordinate UID/GID namespace (`/etc/subuid`, `/etc/subgid`). No root-equivalent group membership. | The `rig` user belongs to the `docker` group, which is root-equivalent on the host. |
+| **Socket path** | `/run/user/<rig_uid>/podman/podman.sock` | `/var/run/docker.sock` |
+| **Systemd unit dependency** | Wired via `/etc/systemd/system/rig.service.d/engine.conf` to start the `rig` user's rootless Podman socket. | `Requires=docker.service` and `After=docker.service`. |
+| **Dockerfile builds** | Built natively by Podman's Buildah engine via `/build`. | Built natively by Docker's image build API via `/build`. |
+| **Railpack (BuildKit) builds** | Starts a temporary `moby/buildkit` container for the build and removes it immediately afterward (0 MB idle RAM). | Uses Docker's built-in `/build` BuildKit session directly. |
+
+## Rootless Podman architecture
+
+When you choose **Podman** in `install.sh`:
+
+1. **System user and subuids:** The installer creates the `rig` system user (`--home-dir /var/lib/rig`) and allocates a 65,536-ID range in `/etc/subuid` and `/etc/subgid` (for example `rig:100000:65536`) so containers run mapped to unprivileged host UIDs.
+2. **User systemd lingering:** Enables `loginctl enable-linger rig` so the `rig` user's `systemd --user` instance and rootless containers stay running across boot and without an active SSH session.
+3. **User Podman socket:** Enables `podman.socket` under `XDG_RUNTIME_DIR=/run/user/$(id -u rig)` and sets `RIG_ENGINE_SOCKET=/run/user/<uid>/podman/podman.sock` in `/etc/rig/rig.env`.
+4. **Caddy on ports 80 and 443:** Runs `rig-caddy` with `--network host` and `CAP_NET_BIND_SERVICE` so Caddy can bind ports `80` and `443` and proxy to app containers listening on `127.0.0.1:<ephemeral_port>`.
+5. **Tailscale HTTPS certificate permissions:** When `--tls tailscale` is selected on rootless Podman, `install.sh` configures `tailscale set --operator=rig` so the rootless `rig-caddy` container can request `*.ts.net` TLS certificates from `/run/tailscale/tailscaled.sock`.
+
+### Inspecting Podman containers on the server
+
+Because rootless Podman containers belong to the `rig` user's namespace rather than `root`, run `podman` commands as `rig`:
+
+```sh
+sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman ps
+sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman logs rig-caddy
+```
+
+## Container security controls
+
+Regardless of whether you run Podman or Docker, Rig applies strict runtime hardening to every application and database container it starts:
+
+- **Loopback-only port bindings:** Every container port is bound exclusively to `127.0.0.1:0` (ephemeral loopback port). No app or database container ever binds `0.0.0.0` directly.
+- **`no-new-privileges`, `NET_RAW` dropped, and PID limit:** Every workload container runs with `SecurityOpt: ["no-new-privileges"]`, `CapDrop: ["NET_RAW"]`, and `PidsLimit: 512` to block setuid/setgid escalation, raw packet crafting, and fork bombs.
+- **Rootless-only BuildKit privilege check:** When running a temporary BuildKit container for Railpack builds, Rig checks the container engine's security options and refuses `privileged: true` unless the engine is running rootless.
+- **Container bridge exclusion from LAN access:** Rig inspects local container bridge subnets (`docker*`, `br-*`, `podman*`, `cni*`) and explicitly excludes them from `Access::Lan` and `Access::Tailscale` matchers in both Caddy and `rig-server`, preventing compromised containers from reaching LAN-restricted apps or the dashboard.
+- **No engine socket exposure:** Rig never mounts `/var/run/docker.sock` or `podman.sock` into application containers.
+- **Named volumes only (no arbitrary host bind mounts):** App `volumes` specify only the in-container mount destination (for example `/data`), which must be a clean absolute path with no `..` traversal components and cannot target `/`, `/proc`, `/sys`, `/dev`, or `/etc/hosts`. Rig maps each path to a managed named volume (`rig-vol-<app_short_id>-<sanitized_path>`), preventing users from bind-mounting sensitive host directories like `/etc` or `/var/lib/rig`.
+- **Hardened Git checkouts and symlink-confined build contexts:** Git clones and polls restrict transports to `https` and `ssh` (`protocol.allow=never`), disable HTTP redirects (`http.followRedirects=false`) and Git symlink creation (`core.symlinks=false`), block private/loopback remote IPs by default (override with `--allow-private-git`), walk the cloned repository to reject any symlinks before building, and disable symlink following (`follow_symlinks(false)`) when archiving `Dockerfile` build contexts.

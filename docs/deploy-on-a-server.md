@@ -128,8 +128,8 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 | Settings | `/etc/rig/rig.env`, then restart |
 | Back up | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
 | CLI | `rig login https://rig.example.com`, then paste a token from **Account → Access tokens** |
-| Password reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` (generates a random password, signs out all sessions, and clears login rate limits) |
-| Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` |
+| Password reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` (generates a 7-day temporary password requiring change on next sign-in, revokes all sessions and API tokens, and clears login rate limits) |
+| Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` (disables TOTP, removes recovery codes, and signs out all active sessions) |
 | Clear dashboard domain | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear` |
 | Reset dashboard access | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public` |
 | Uninstall | `sudo ./install.sh --uninstall` (keeps `/var/lib/rig`) |
@@ -143,5 +143,14 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 - On Docker, the `rig` user belongs to the `docker` group, which is equivalent
   to root on that machine. Treat dashboard owner and admin accounts
   accordingly. Apps never get the engine socket.
+- Managed app and database containers run with `no-new-privileges`, `NET_RAW`
+  dropped, and a default 512 PID ceiling (`pids_limit`). Local container bridge
+  subnets (`docker*`, `br-*`, `podman*`, `cni*`) are automatically excluded from
+  LAN and Tailscale access checks.
+- Database backups written to `/var/lib/rig/backups/` are encrypted at rest with
+  chunked XChaCha20-Poly1305 using `master.key` and decrypted on the fly during
+  download or restore.
+- The installer mounts `/run/tailscale` into `rig-caddy` only when Tailscale
+  TLS or Tailscale access mode is selected.
 - The systemd unit runs Rig without capabilities, with a read-only system
   and `/var/lib/rig` as the only writable path.

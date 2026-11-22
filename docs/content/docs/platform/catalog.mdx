@@ -1,0 +1,73 @@
+---
+title: App Catalog
+description: Deploy 17 self-hosted open-source applications in one click with preconfigured ports, health checks, persistent volumes, and generated secrets.
+---
+
+The **Catalog** page in the Rig dashboard provides 17 curated self-hosted applications (`web/src/lib/catalog.ts`). Each template preconfigures a pinned container image, internal port, HTTP health check path, default memory limit, persistent volume mounts, and auto-generated 32-character secrets.
+
+## How catalog deployments work
+
+When you pick a template from the Catalog:
+
+1. **Project and name:** You choose which project to deploy the app into and confirm or customize the app name (defaults to the template's `id`).
+2. **Auto-generated secrets:** Any variable marked with `generate: 'password'` is populated with a cryptographically random 32-character URL-safe secret, encrypted at rest with `Vault`, and masked by default (revealable anytime under the app's **Environment** tab).
+3. **Persistent storage:** Templates with stateful data automatically create and attach named container volumes for every path in `volumes`, and deploy using Rig's safe stop-then-start strategy.
+4. **Immediate deploy:** Rig creates the app via `POST /api/v1/apps` and immediately queues its first deployment via `POST /api/v1/apps/{id}/deploy`.
+
+## Built-in catalog templates
+
+### Monitoring
+
+| Template | Image | Port | Health path | Memory | Volumes | Generated / default variables |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Uptime Kuma** (`uptime-kuma`) | `louislam/uptime-kuma:2` | `3001` | `/` | `512 MB` | `/app/data` | — |
+| **Gotify** (`gotify`) | `gotify/server:3` | `80` | `/health` | `128 MB` | `/app/data` | `GOTIFY_DEFAULTUSER_PASS` (generated secret) |
+
+### Productivity
+
+| Template | Image | Port | Health path | Memory | Volumes | Generated / default variables |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Vaultwarden** (`vaultwarden`) | `vaultwarden/server:1.37.5` | `80` | `/alive` | `256 MB` | `/data` | `ADMIN_TOKEN` (generated secret for `/admin`) |
+| **Memos** (`memos`) | `neosmemo/memos:stable` | `5230` | `/healthz` | `256 MB` | `/var/opt/memos` | — |
+| **linkding** (`linkding`) | `sissbruecker/linkding:1.47.0` | `9090` | `/health` | `256 MB` | `/etc/linkding/data` | `LD_SUPERUSER_NAME=admin`, `LD_SUPERUSER_PASSWORD` (generated secret) |
+| **Actual Budget** (`actual-budget`) | `actualbudget/actual-server:26.11.0` | `5006` | `/health` | `512 MB` | `/data` | — |
+| **FreshRSS** (`freshrss`) | `freshrss/freshrss:1` | `80` | `/` | `256 MB` | `/var/www/FreshRSS/data`, `/var/www/FreshRSS/extensions` | — |
+| **Mealie** (`mealie`) | `ghcr.io/mealie-recipes/mealie:v3.31.0` | `9000` | `/api/app/about` | `1024 MB` | `/app/data` | — |
+| **File Browser** (`filebrowser`) | `filebrowser/filebrowser:v2` | `80` | `/health` | `128 MB` | `/srv`, `/database`, `/config` | — |
+| **Stirling-PDF** (`stirling-pdf`) | `stirlingtools/stirling-pdf:3.4.0` | `8080` | `/api/v1/info/status` | `1024 MB` | `/configs` | — |
+
+### Automation & Developer Tools
+
+| Template | Image | Port | Health path | Memory | Volumes | Generated / default variables |
+| --- | --- | --- | --- | --- | --- | --- |
+| **n8n** (`n8n`) | `n8nio/n8n:1` | `5678` | `/healthz` | `1024 MB` | `/home/node/.n8n` | `N8N_ENCRYPTION_KEY` (generated secret) |
+| **Gitea** (`gitea`) | `gitea/gitea:28` | `3000` | `/api/healthz` | `512 MB` | `/data` | `GITEA__database__DB_TYPE=sqlite3` |
+| **code-server** (`code-server`) | `codercom/code-server:4.145.2` | `8080` | `/healthz` | `1024 MB` | `/home/coder` | `PASSWORD` (generated secret) |
+| **IT-Tools** (`it-tools`) | `corentinth/it-tools:latest` | `80` | `/` | `128 MB` | Stateless | — |
+
+### Media & Web
+
+| Template | Image | Port | Health path | Memory | Volumes | Generated / default variables |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Jellyfin** (`jellyfin`) | `jellyfin/jellyfin:12` | `8096` | `/health` | `1024 MB` | `/config`, `/cache` | — |
+| **Navidrome** (`navidrome`) | `deluan/navidrome:0.64.2` | `4533` | `/ping` | `256 MB` | `/data`, `/music` | — |
+| **Excalidraw** (`excalidraw`) | `excalidraw/excalidraw:latest` | `80` | `/` | `128 MB` | Stateless | — |
+
+## Deploying a catalog template from the CLI
+
+Because catalog templates are standard `image` apps with preconfigured volumes and environment variables, you can also deploy any template directly with `rig apps create`:
+
+```sh
+# Example: deploy Vaultwarden from the CLI
+rig apps create vaultwarden \
+  --project production \
+  --image vaultwarden/server:1.37.5 \
+  --port 80 \
+  --memory 256 \
+  --health /alive \
+  --volume /data \
+  --env "ADMIN_TOKEN=$(openssl rand -base64 24)"
+
+rig deploy production/vaultwarden
+rig domains add production/vaultwarden vault.example.com --tls auto
+```

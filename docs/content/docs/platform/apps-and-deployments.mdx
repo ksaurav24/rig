@@ -1,0 +1,87 @@
+---
+title: Apps & Deployments
+description: Build and deploy applications from container images or Git repositories with zero-downtime swaps, persistent volumes, and one-click rollbacks.
+---
+
+An **App** in Rig represents a containerized service running inside a project. You can create and manage apps from the web dashboard, the [`rig apps`](/docs/cli/projects-and-apps/) CLI commands, or the [MCP server](/docs/mcp/tools-reference/).
+
+## Application sources
+
+Every application uses one of two `source_kind` values:
+
+| Source kind | Required field | How Rig builds and runs it |
+| --- | --- | --- |
+| **`image`** | `image` (for example `nginx:alpine` or `ghcr.io/org/app:v1.2.0`) | Rig pulls the image from the registry (`runtime.pull`), records the resolved image digest (`image_id`), and starts the container. |
+| **`git`** | `git_url` (`https://` or `ssh://` URL) | Rig validates the URL and resolved remote IP (blocking loopback/private hosts unless `--allow-private-git` is enabled), clones the target branch with redirects and symlinks disabled, rejects symlinks in the checkout, records the commit SHA and message, and builds an image tagged `rig-app-<slug>:<deployment_short_id>`. |
+
+### Dockerfile vs. Railpack builds
+
+For `git` apps, Rig checks whether `dockerfile_path` (default `Dockerfile`) exists inside the cloned repository (verifying via `symlink_metadata` that it is a regular file and not a symlink):
+
+1. **Dockerfile build:** When `Dockerfile` (or your custom `dockerfile_path`, such as `apps/api/Dockerfile`) exists in the checkout, Rig packages the build context (with symlink following disabled for host safety) and builds the image through the container engine's build API.
+2. **Zero-config Railpack build:** When no `Dockerfile` is present at `dockerfile_path`, Rig automatically uses **[Railpack](https://railpack.com) (`v0.43.0`)**:
+   - On first use, Rig downloads the official `railpack-v0.43.0` static binary (`x86_64` or `aarch64`) into `<data_dir>/bin/railpack` and verifies its compiled-in SHA-256 checksum (`248a8f60...` on `x86_64`) before executing it.
+   - Rig runs `railpack prepare` with a stripped environment (`PATH`, `HOME`, `NO_COLOR=1`) and a 120-second timeout to inspect the source code and emit `railpack-plan.json`.
+   - BuildKit executes the plan using the digest-pinned frontend image `ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc`.
+   - You can customize Railpack's auto-detection by placing a `railpack.json` file in your repository root.
+
+## Resource limits and runtime defaults
+
+Small servers can easily lock up if a single build or runaway process consumes all available RAM. Rig enforces safe defaults on every app container (alongside `no-new-privileges`, `NET_RAW` capability dropped, and a 512 PID ceiling):
+
+| Setting | API / CLI field | Default | Behavior |
+| --- | --- | --- | --- |
+| **Container port** | `port` / `--port` | `80` (CLI) | Internal TCP port the process listens on inside the container (`PORT=<port>` is also injected into the container environment if not explicitly set). |
+| **Memory limit** | `memory_mb` / `--memory` | `512` MB (`DEFAULT_APP_MEMORY_MB`) | Enforced via cgroup memory limit. Pass `0` in `rig apps set --memory 0` to remove the limit. |
+| **CPU limit** | `cpu_millis` / `--cpu` | Unlimited | Measured in millicores (`1000` = 1 CPU core, `500` = 0.5 core). Pass `0` to clear. |
+| **Health check path** | `health_path` / `--health` | `None` (TCP check) | When set (for example `/healthz`), Rig polls `http://127.0.0.1:<host_port><health_path>` expecting HTTP `200–399`. When unset, Rig verifies TCP connectivity to `<host_port>`. |
+| **Persistent volumes** | `volumes` / `--volume` | `[]` (stateless) | List of absolute mount paths inside the container (such as `/data` or `/app/storage`). Backed by named engine volumes. |
+| **Auto-deploy** | `auto_deploy` / `--auto-deploy` | `true` on Git apps | Automatically queue a deployment when a push webhook arrives or when the branch poller detects a new commit. |
+
+<Callout type="warn" title="Disk space safety threshold">
+  Before starting any deployment or build, Rig checks free space on the filesystem holding `RIG_DATA_DIR`. If free disk space is **below 1024 MB (1 GiB)**, Rig refuses to start the build so the server's SQLite database and running workloads cannot be corrupted by a full disk.
+</Callout>
+
+## Deployment lifecycle
+
+Every deployment moves through a deterministic state machine (`DeploymentStatus`):
+
+```text
+  queued ──► building (Git apps) ──► deploying ──► running
+    │                │                   │            │
+    ├─► cancelled ◄──┴───────────────────┤            ▼
+    └───────────────► failed ◄───────────┘       superseded (when replaced)
+```
+
+1. **Queued (`queued`):** Only one active deployment (`queued`, `building`, or `deploying`) is allowed per app at a time (enforced atomically by a partial unique index in SQLite, returning `409 Conflict` on concurrent requests). The background worker picks queued deployments FIFO and runs one build at a time so concurrent builds never exhaust server memory.
+2. **Building (`building`):** Clones the Git repository (10-minute timeout) or pulls the registry image, and builds the container image. Build output streams live over Server-Sent Events (SSE) and persists in `deployment_logs`.
+3. **Deploying (`deploying`):**
+   - **Stateless apps (`volumes` is empty):** Starts the new container alongside the running container, waits up to **90 seconds** (`HEALTH_TIMEOUT`) for two consecutive health checks to pass, updates Caddy's upstream port atomically, marks the previous deployment `superseded`, and stops the old container with a 10-second drain grace period.
+   - **Stateful apps (`volumes` is non-empty):** Stops the old container after the new image is built/pulled, mounts the named volumes onto the new container, verifies health checks, and updates Caddy.
+4. **Running (`running`):** The container is live and serving traffic. If the deployment fails at any step for a stateless app, the previous deployment remains `running` and continues serving traffic without interruption.
+
+## Rollbacks, restarts, and lifecycle actions
+
+- **Rollback (`POST /api/v1/deployments/{id}/rollback` or `rig rollback`):** Queues a deployment with `trigger = "rollback"` that reuses a prior `superseded` deployment's `image_ref` and `image_id` without rebuilding from Git. By default, `rig rollback <app>` selects the most recent `superseded` deployment that has an image.
+- **Start (`POST /api/v1/apps/{id}/start` or `rig start`):** Starts a `stopped` or `failed` app, reusing its most recent built image when available so it comes back up in seconds.
+- **Restart (`POST /api/v1/apps/{id}/restart` or `rig restart`):** Performs a zero-downtime container swap reusing the currently running image (and applying any newly updated environment variables or resource limits).
+- **Stop (`POST /api/v1/apps/{id}/stop` or `rig stop`):** Stops and removes the running container and removes its active route from Caddy. Persistent volumes, environment variables, and domains remain intact.
+- **Cancel (`POST /api/v1/deployments/{id}/cancel` or `rig deployments cancel <id>`):** Aborts a `queued`, `building`, or `deploying` deployment and restores the app's status (`running` if a previous deployment is still live, else `idle`).
+
+## Live logs and interactive container terminal
+
+### Build and runtime logs
+
+Rig separates **deployment logs** (captured during `building` and `deploying` and stored in SQLite) from **runtime container logs** (streamed directly from the running container):
+
+- **Deployment logs (`/api/v1/deployments/{id}/logs`):** Supports resumable SSE via `?after=<seq>` or the `Last-Event-ID` header. Emits `log` events containing `{ seq, ts, stream, line }` and a terminal `end` event containing `{ status, domains }`.
+- **Runtime logs (`/api/v1/apps/{id}/logs`):** Streams live container `stdout` and `stderr` over SSE with query parameters for `tail` (1–5000, default 200), `follow` (`true`/`false`), `since` (relative duration like `10m`, `2h`, or RFC 3339 timestamp), `timestamps` (`true`/`false`), and `grep` (case-insensitive substring filter).
+- **Live authorization re-check:** Long-lived SSE log streams re-verify the caller's session or API token and role every 30 seconds, automatically terminating the stream if the user is removed or their credentials are revoked.
+
+### Container terminal (`xterm.js` and `rig exec`)
+
+Users with the <RoleBadge role="Developer" /> role or higher can open an interactive shell inside any running app container:
+
+- **In the browser:** Open the app's **Terminal** tab. An `xterm.js` terminal connects over WebSocket to `GET /api/v1/apps/{id}/terminal?cols=<cols>&rows=<rows>`.
+- **From your laptop:** Run [`rig exec <app>`](/docs/cli/deployments-and-logs/#interactive-container-shell-rig-exec). The CLI places your local terminal into raw TTY mode, forwards keystrokes and binary output over the WebSocket, and automatically sends `{ "type": "resize", "cols": ..., "rows": ... }` control frames whenever your terminal window resizes (`SIGWINCH`).
+- Rig automatically selects `/bin/bash` if available inside the container, falling back to `/bin/sh`, enforces a 30-minute idle timeout (`IDLE_TIMEOUT`), caps concurrent sessions at **5 per app and 5 per user**, and re-verifies the caller's session/token and `Developer` role every 30 seconds. Every terminal session is recorded in the organization audit log (`app.terminal`).

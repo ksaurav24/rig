@@ -1,0 +1,84 @@
+---
+title: Managed Databases & Backups
+description: Provision isolated PostgreSQL, MySQL, MariaDB, Redis, and MongoDB databases with private project DNS, loopback tunneling, and native dumps.
+---
+
+Rig provisions and manages stateful database containers inside your projects. Each managed database runs in its own container with a dedicated persistent named volume (`rig-db-<short_id>`) and a default **1024 MB memory limit** (`DEFAULT_DATABASE_MEMORY_MB`) so a runaway query cannot exhaust host RAM.
+
+## Supported database engines
+
+Rig offers five database engines out of the box (`crates/rig-server/src/databases.rs`):
+
+| Engine | Enum value | Supported versions (newest default) | Container image | Internal port | Persistent data path |
+| --- | --- | --- | --- | --- | --- |
+| **PostgreSQL** | `postgres` | `17`, `16`, `15` | `postgres:<ver>-alpine` | `5432` | `/var/lib/postgresql/data` |
+| **MySQL** | `mysql` | `8.4`, `8.0` | `mysql:<ver>` | `3306` | `/var/lib/mysql` |
+| **MariaDB** | `mariadb` | `11.4`, `10.11` | `mariadb:<ver>` | `3306` | `/var/lib/mysql` |
+| **Redis** | `redis` | `7.4`, `7.2` | `redis:<ver>-alpine` (`--appendonly yes`) | `6379` | `/data` |
+| **MongoDB** | `mongodb` | `8.0`, `7.0` | `mongo:<ver>` | `27017` | `/data/db` |
+
+## Credentials and connection URLs
+
+When you create a database:
+
+1. **Identifier generation:** Rig derives a safe SQL/NoSQL username and database name from the database slug (lowercase letters, digits, and underscores, prefixed with `db_` if it begins with a digit, truncated to 32 characters). For Redis, the username is `default` and the database index is `0`.
+2. **Password generation:** Rig generates a 24-byte (192-bit) random hexadecimal password (48 hex characters, requiring no URL or shell escaping) and encrypts it at rest with `Vault` (`databases.password_enc`). Passwords are injected via environment variables or stdin (for Redis, `REDIS_PASSWORD` is piped into `redis-server -` rather than passed on `--requirepass` argv) so credentials never appear in container process arguments.
+3. **Audited credential reveal:** Database passwords are never returned by `GET /api/v1/databases`. Revealing the connection string (`POST /api/v1/databases/{id}/reveal` or `rig db url <db>`) requires the <RoleBadge role="Developer" /> role and writes a `database.reveal` entry to the audit log before decrypting.
+
+### Connecting from apps in the same project
+
+Every database attaches to its project's isolated bridge network (`rig-net-<project_id>`) with a network alias equal to its slug. Applications in the same project connect using the internal hostname `<slug>:<port>`:
+
+```text
+postgres://main_db:4f8a...c91e@main-db:5432/main_db
+mysql://users_db:9b2c...e10a@users-db:3306/users_db
+redis://default:7c1d...a04f@cache:6379/0
+mongodb://events_db:3e5f...b812@events-db:27017/events_db?authSource=admin
+```
+
+### Connecting from your laptop (`rig db connect` and SSH tunnels)
+
+Because Caddy is an HTTP/HTTPS proxy and does not expose raw database TCP ports to the public internet, running databases also bind an ephemeral port on the server's loopback interface (`127.0.0.1:<host_port>`).
+
+- **On the server or over an SSH local forward:** Forward the database's `host_port` (`ssh -L <host_port>:127.0.0.1:<host_port> user@server`) or run `rig db connect <db>` directly when connected to localhost.
+- **Interactive client launcher (`rig db connect <db>`):** Automatically reveals credentials, rewrites `@<slug>:<port>` to `@127.0.0.1:<host_port>`, and launches the appropriate local CLI client (`psql`, `mysql`, `mariadb`, `redis-cli`, or `mongosh`) with the password passed via environment variables (`MYSQL_PWD`, `REDISCLI_AUTH`) or connection URI.
+
+## Container lifecycle (`creating`, `running`, `stopped`, `failed`)
+
+- **Provisioning (`creating` → `running`):** Pulling the image and initializing the data directory on disk runs asynchronously with a 180-second readiness timeout (`READY_TIMEOUT`). Rig waits for two consecutive TCP readiness checks after the engine's temporary socket-only init phase completes.
+- **Stopping (`stopped`):** Stopping a database (`POST /api/v1/databases/{id}/stop` or `rig db stop <db>`) stops (`30s` grace period) and removes the container while **preserving the named data volume**.
+- **Starting (`running`):** Starting a stopped or failed database (`POST /api/v1/databases/{id}/start` or `rig db start <db> --wait`) provisions a fresh container attached to the existing named volume.
+- **Deleting:** Deleting a database (`DELETE /api/v1/databases/{id}` or `rig db rm <db>`) requires the <RoleBadge role="Admin" /> role and permanently destroys the container, the named data volume, and all backup dump files on disk.
+
+## Database backups and restores
+
+Rig runs each engine's native dump and restore tools directly inside the running database container via `runtime.exec` without shell interpolation (`crates/rig-server/src/backups.rs`):
+
+| Engine | Dump command | Restore command | File extension | In-place restore? |
+| --- | --- | --- | --- | --- |
+| **PostgreSQL** | `pg_dump --username <user> --dbname <db> --format=custom --no-owner` | `pg_restore --username <user> --dbname <db> --clean --if-exists --no-owner --single-transaction` | `.dump` | Yes |
+| **MySQL** | `mysqldump --user <user> --single-transaction --routines --triggers --no-tablespaces <db>` | `mysql --user <user> <db>` | `.sql` | Yes |
+| **MariaDB** | `mariadb-dump --user <user> --single-transaction --routines --triggers --no-tablespaces <db>` | `mariadb --user <user> <db>` | `.sql` | Yes |
+| **MongoDB** | `mongodump --uri "$RIG_MONGO_URI" --archive --quiet` | `mongorestore --uri "$RIG_MONGO_URI" --archive --drop --quiet` | `.archive` | Yes |
+| **Redis** | `redis-cli --rdb -` | — | `.rdb` | Download only (`restorable: false`) |
+
+### Backup storage and safety
+
+- **Encrypted storage at rest:** Dump files stream directly to `<data_dir>/backups/<database_id>/<backup_id>.<ext>` (directory mode `0700`, file mode `0600`) encrypted in 64 KiB **XChaCha20-Poly1305** chunks (`RIGBK1\0\0` header, binding each chunk's index and finality into its nonce and AAD). Downloads and in-place restores decrypt transparently on the fly, while remaining backwards-compatible with legacy plaintext dump files.
+- **Concurrency guards:** Only one backup can run per database at a time (enforced by a partial unique index in SQLite on `backups(database_id) WHERE status = 'running'`), and an atomic operation lock (`databases.busy_op`) prevents conflicting start, stop, delete, backup, or restore operations from racing on the same database. Deleting a project also verifies no managed databases are `creating` or busy before removing any application containers.
+- **Empty-dump protection:** If a dump process exits with code `0` but produces a `0`-byte file, Rig deletes the empty file and marks the backup `failed`.
+- **Failure alerts:** If a backup fails, Rig records the error message on the backup row and dispatches a `backup.failed` alert to all subscribed alert channels.
+
+```sh
+# Create a backup and wait for the dump to finish
+rig backup create production/main-db --wait
+
+# List backups for a database
+rig backup ls production/main-db
+
+# Download a backup file to your local machine
+rig backup download <backup-id> -f ./main-db-backup.dump
+
+# Restore a backup in place (requires Admin role)
+rig backup restore <backup-id>
+```

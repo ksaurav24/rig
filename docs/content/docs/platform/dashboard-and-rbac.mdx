@@ -1,0 +1,101 @@
+---
+title: Dashboard, Branding & RBAC
+description: Manage team roles, two-factor authentication, API tokens, audit logs, workspace branding, and personal operator preferences.
+---
+
+Rig's embedded React dashboard is built for fast, keyboard-driven operation (`Cmd+K` / `Ctrl+K` command menu) with role-based access control, two-factor authentication, white-label organization branding, and per-user interface preferences.
+
+## Role-based access control (RBAC)
+
+Every organization member and API token is assigned one of four ordered roles (`rig_api::Role`). Higher roles inherit all permissions of lower roles (`Viewer < Developer < Admin < Owner`).
+
+When a user authenticates with an API token, the effective role is capped at `min(token_role, member_role)` so a demoted member cannot retain elevated privileges through an old API token.
+
+| Capability | <RoleBadge role="Viewer" /> | <RoleBadge role="Developer" /> | <RoleBadge role="Admin" /> | <RoleBadge role="Owner" /> |
+| --- | :---: | :---: | :---: | :---: |
+| View system health, network info, projects, apps, deployments, domains, databases, and metrics | ✓ | ✓ | ✓ | ✓ |
+| Stream live build logs and container runtime logs | ✓ | ✓ | ✓ | ✓ |
+| View environment variable keys (secret values masked) | ✓ | ✓ | ✓ | ✓ |
+| Manage own profile, avatar, password, TOTP 2FA, and personal API tokens | ✓ | ✓ | ✓ | ✓ |
+| Create and rename projects | — | ✓ | ✓ | ✓ |
+| Create and configure apps, trigger deploys, start/stop/restart, and roll back | — | ✓ | ✓ | ✓ |
+| Set/delete environment variables and **reveal secret values** (audited) | — | ✓ | ✓ | ✓ |
+| Open interactive container shells (`xterm.js` / `rig exec`, audited) | — | ✓ | ✓ | ✓ |
+| Add and remove app domains | — | ✓ | ✓ | ✓ |
+| Create, start, and stop managed databases and **reveal database credentials** (audited) | — | ✓ | ✓ | ✓ |
+| View and rotate app push-to-deploy webhook secrets | — | ✓ | ✓ | ✓ |
+| Delete apps, projects, and managed databases | — | — | ✓ | ✓ |
+| Create, download, restore, and delete database backups | — | — | ✓ | ✓ |
+| Add, remove, change roles (`Viewer`/`Developer`), and reset passwords for members | — | — | ✓ | ✓ |
+| Connect or disconnect the organization GitHub App | — | — | ✓ | ✓ |
+| Manage outbound alert channels and view the organization audit log | — | — | ✓ | ✓ |
+| Update organization branding (name, logo, accent color, environment badge) | — | — | ✓ | ✓ |
+| Add/modify `Admin` or `Owner` members | — | — | — | ✓ |
+| Change dashboard domain/HTTPS (`dashboard-domain`) and access scope (`dashboard-access`) | — | — | — | ✓ |
+
+## Authentication, 2FA, and API tokens
+
+### Password and session security
+
+- **Argon2id hashing:** Passwords (10–256 characters) are hashed with Argon2id using a random salt. Login requests for non-existent users run a constant-time dummy Argon2id verification to prevent user-enumeration timing attacks.
+- **Browser sessions & rotation:** Stored in SQLite as SHA-256 token hashes (`sessions.token_hash`) with a 14-day maximum lifetime and a 7-day idle timeout (`last_active_at`). Session cookies are marked `HttpOnly`, `SameSite=Strict`, and (when HTTPS / `RIG_SECURE_COOKIES` is enabled) `Secure`. Every state-changing request authenticated via session cookie must echo the session's `csrf_token` in the `x-rig-csrf` header and pass an exact `Origin` scheme+host check (forwarded proxy headers are trusted only from loopback peers). Password and 2FA changes automatically rotate the active session and return a fresh `x-rig-csrf` response header; users can inspect and revoke individual browser sessions via `GET/DELETE /api/v1/account/sessions`.
+- **Mandatory password change on temporary passwords:** Newly added members and password resets issue a temporary password valid for 7 days (`must_change_password = true`). Until the user sets a permanent password, their session is restricted to `/api/v1/auth/me`, `/logout`, and `/password` (with a forced password-change gate in the dashboard), and API token authentication is blocked.
+- **Stepped 2FA challenge tokens:** When an account has TOTP enabled and signs in without a code, Rig returns `401` (`second_factor_required`) with a single-use, 5-minute, IP- and User-Agent-bound `challenge_token` (`pending_2fa`) and records `auth.login_challenge` in the audit log. Step 2 submits `{ challenge_token, code }` without keeping the plaintext password in browser state.
+- **Rate limiting:** Login attempts are rate-limited across three dimensions over a 15-minute sliding window — per `(email, ip)` (8 attempts), per IP (20 attempts), and a global per-email ceiling (40 attempts) — so a single source IP cannot lock out another user's email globally. Setup token submissions, password changes, account password confirmations (`verify_password`), and TOTP verifications are also rate-limited and audited. Expired `sessions`, `pending_2fa`, and `login_attempts` rows are pruned at startup and hourly.
+
+### Two-factor authentication (TOTP)
+
+Any user can enable RFC 6238 TOTP two-factor authentication under **Account → Two-factor authentication**:
+
+1. Enter your current password to generate a 160-bit Base32 TOTP secret and SVG QR code (`POST /api/v1/account/totp/setup`, pending enrollment expires after 15 minutes).
+2. Scan the QR code in any authenticator app and confirm with a 6-digit code (`POST /api/v1/account/totp/enable`). Rig verifies the code with a ±1 step (`30s`) drift tolerance, tracks `totp_last_step` to prevent replay of the same 6-digit code within its window, and rotates the active session.
+3. Save the **10 single-use 16-character recovery codes** (`xxxx-xxxx-xxxx-xxxx`, ~79 bits of entropy, stored as Vault-keyed HMAC-SHA256 digests) returned on activation. Each recovery code can be used once in place of a TOTP code and can be regenerated with your password.
+
+### Scoped API tokens and session-only actions
+
+Users can create up to **25 active API tokens** (`rig_` + 32 random base62 characters, stored as SHA-256 hashes with an 8-character prefix for identification) in the dashboard under **Settings → API tokens**:
+
+- Each token carries an explicit `role` (`viewer`, `developer`, `admin`, or `owner`) and an optional expiration (`expires_in_days`, 1–3650 days).
+- Pass tokens in the `Authorization: Bearer rig_<secret>` HTTP header (used automatically by `rig` and `rig mcp`).
+- **Session-only control-plane guardrails:** To prevent a leaked API token from minting persistent credentials or taking over organization administration, the following endpoints require an interactive browser session (`Via::Session`) and reject Bearer API tokens with `403 Forbidden`:
+  - Creating API tokens (`POST /api/v1/tokens`) and revoking *other* API tokens (an API token may only revoke **itself**, preserving `rig logout --revoke`).
+  - Changing passwords, managing TOTP 2FA, and managing active browser sessions (`/api/v1/auth/password`, `/api/v1/account/totp/*`, `/api/v1/account/sessions*`).
+  - Adding, modifying, removing, or resetting passwords for organization members (`/api/v1/members/*`).
+  - Connecting or disconnecting the organization GitHub App (`/api/v1/github/manifest*`, `DELETE /api/v1/github`).
+  - Changing dashboard network access or dashboard domain (`PUT /api/v1/system/dashboard-access`, `PUT /api/v1/system/dashboard-domain`).
+- Password resets (both in the dashboard and via `rig-server reset-password`) immediately revoke all active browser sessions **and** API tokens for that user.
+
+## Organization audit log
+
+Rig records security-sensitive actions in `audit_log` (viewable under **Settings → Audit log** or via `rig audit`), including:
+
+- `org.setup`, `auth.login`, `auth.login_challenge`, `auth.login_failed`, `auth.logout`, `auth.password_change`, `auth.password_change_failed`, `auth.password_confirm_failed`, `auth.password_reset`, `auth.session_revoked`, `auth.totp_enabled`, `auth.totp_disabled`, `auth.recovery_codes_regenerated`, `auth.totp_reset`
+- `token.create`, `token.revoke`, `member.add`, `member.role`, `member.remove`
+- `project.create`, `project.update`, `project.delete`
+- `app.create`, `app.update`, `app.delete`, `app.deploy`, `app.start`, `app.restart`, `app.stop`, `app.rollback`, `app.terminal`, `app.webhook_read`, `app.webhook_rotate`
+- `env.set`, `env.bulk_set`, `env.delete`, `env.reveal`
+- `domain.add`, `domain.delete`, `system.dashboard_domain`, `system.dashboard_access`
+- `database.create`, `database.start`, `database.stop`, `database.delete`, `database.reveal`, `backup.create`, `backup.download`, `backup.restore`, `backup.delete`
+- `github.connect`, `github.disconnect`, `git.poll`, `alert.create`, `alert.update`, `alert.delete`, `alert.test`
+
+## Workspace branding and operator preferences
+
+### Organization branding (**Settings → General**, Admin/Owner)
+
+- **Organization name and logo:** Upload a custom raster logo (`PNG`, `JPEG`, `WebP`, or `GIF` up to `768 KB`, validated by magic bytes; SVG uploads are disallowed) or link an external `https://` image URL (without embedded credentials or local/private hosts).
+- **Brand accent color:** Choose from 7 contrast-verified OKLCH presets: `emerald` (default), `indigo`, `sky`, `violet`, `amber`, `rose`, or `graphite`.
+- **Environment badge:** Display an optional pill badge in the sidebar header (such as `Production`, `Staging`, or `Homelab`) with a semantic color (`emerald`, `amber`, `red`, `blue`, `purple`, or `gray`).
+- **Public branding surface:** Organization name, logo, accent color, and environment badge automatically brand the sidebar, browser tab title, dynamic favicon, and split-screen sign-in page (`GET /api/v1/setup`).
+
+### Account profile and personal preferences (**Account**)
+
+- **Display name and avatar:** Pick from 12 built-in geometric/orb avatar presets (`preset:*`), upload a raster photo (`PNG`, `JPEG`, `WebP`, or `GIF`, stored privately as `is_public = 0` with `Cache-Control: private` and uniform `404` for unauthorized requests), or paste an `https://` image URL.
+- **Operator ergonomics (persisted per user):**
+  - **Color theme:** `Light`, `Dark`, or `System`
+  - **Personal accent override:** Override the organization accent color locally
+  - **UI density:** `Default` (`36px` control height) or `Compact` (`28px` control height)
+  - **Corner geometry:** `Rounded`, `Sharp`, or `Pill`
+  - **Sidebar style:** `Classic`, `Floating`, or `Inset` with persisted collapse state, hover-peek, and pinned projects
+  - **Default landing page:** Overview, Projects, Databases, or Catalog
+  - **Timestamps:** Relative (`3m ago`) vs. exact ISO/formatted timestamps, Local vs. UTC timezone, and 12-hour vs. 24-hour clock
+  - **Log & terminal viewer:** Font size (`11px–15px`) and line wrapping toggle

@@ -1,0 +1,147 @@
+---
+title: Monitoring, Team, Security & Git
+description: Reference for rig metrics, rig top, rig tokens, rig members, rig audit, rig alerts, rig webhook, and rig github.
+---
+
+Use these commands to inspect server and container resource metrics, manage API tokens and team members, review the audit log, configure outbound alert webhooks, and inspect GitHub integrations.
+
+## Resource metrics (`rig metrics`)
+
+Render CPU, memory, and network throughput time series with Unicode sparklines in your terminal (or raw `MetricSeries` JSON with `--json`):
+
+```sh
+# Host server metrics (default range: 1h)
+rig metrics [--range <1h|6h|24h>]
+
+# Application container metrics
+rig metrics <app> [--range <1h|6h|24h>]
+
+# Managed database container metrics (pass --db or prefix with db:)
+rig metrics <database> --db [--range <1h|6h|24h>]
+rig metrics db:<database> [--range <1h|6h|24h>]
+```
+
+```text
+App production/web · range 1h · 120 sample(s) (step 30s)
+CPU     now   2.4% · avg   1.8% · peak   9.2%  ▂▁▁▂▃▂▁▁▂█▄▂▁▁▂▂▁▁▂▃▂▁▁▂
+Memory  now 118 MB / 512 MB · peak 142 MB  ▄▄▄▄▅▅▅▅▆▆▅▅▅▅▅▅▅▅▅▅▅▅▅▅
+Net     rx 14.2 KB/s · tx 38.6 KB/s
+```
+
+## Live server monitor (`rig top`)
+
+Display a live, auto-refreshing overview of host CPU, RAM, disk usage, and every application and managed database:
+
+```sh
+# Refresh every 2 seconds in an interactive terminal (Ctrl-C to exit)
+rig top [--interval <seconds>]
+
+# Print one snapshot and exit
+rig top --once
+```
+
+When `stdout` is not a TTY or `--json` is passed, `rig top` automatically runs a single snapshot (`--once`).
+
+## API tokens (`rig tokens`)
+
+Inspect personal API tokens associated with your user account, or revoke the active token:
+
+```sh
+# List your API tokens
+rig tokens
+rig tokens ls
+
+# Revoke your currently active API token (or use `rig logout --revoke`)
+rig tokens revoke <current-token> [--yes]
+```
+
+<Callout type="info" title="Minting tokens and revoking other tokens requires a browser session">
+  To prevent a leaked API token from minting persistent tokens or revoking other credentials, `POST /api/v1/tokens` (up to 25 active tokens per user) and revoking *other* tokens require an interactive browser session in the dashboard (**Settings → API tokens**). Calling `rig tokens create` or `rig tokens revoke <other-token>` with a Bearer API token returns `403 Forbidden`.
+</Callout>
+
+## Organization members (`rig members`)
+
+Inspect organization team members and roles (<RoleBadge role="Admin" /> required):
+
+```sh
+# List organization members
+rig members
+rig members ls
+```
+
+<Callout type="info" title="Member management requires a browser session">
+  Adding members, changing roles, resetting passwords, and removing members (`POST`/`PATCH`/`DELETE /api/v1/members/*`) require an interactive browser session in the dashboard (**Settings → Members**) and reject Bearer API tokens with `403 Forbidden`. To reset a locked-out user's password from the server console over SSH, use `sudo -u rig rig-server --data-dir /var/lib/rig reset-password <email>`.
+</Callout>
+
+## Audit log (`rig audit`)
+
+View the organization's latest 200 security and operational audit entries (<RoleBadge role="Admin" /> required), with optional client-side filters:
+
+```sh
+rig audit [--limit <N>] [--action <substring>] [--actor <substring>]
+```
+
+```sh
+# Show the last 20 secret or credential reveals
+rig audit --action reveal --limit 20
+
+# Show actions performed by a specific user or webhook
+rig audit --actor ada@example.com
+```
+
+## Alert channels (`rig alerts`)
+
+Configure outbound webhook channels for operational alerts (<RoleBadge role="Admin" /> required):
+
+```sh
+# List configured alert channels
+rig alerts
+rig alerts ls
+
+# Add a webhook channel (prints the HMAC signing secret once)
+# Default events: deploy_failed,app_crashed,app_down,disk_low,backup_failed
+rig alerts add <name> <https-url> [--events <comma-separated-events>]
+
+# Update a channel's name, subscribed events, or enabled/disabled state
+rig alerts set <name-or-id> [--name <new-name>] [--events <list>] [--enable | --disable]
+
+# Send a live test alert to verify delivery and signature verification
+rig alerts test <name-or-id>
+
+# Remove an alert channel
+rig alerts rm <name-or-id> [--yes]
+```
+
+```sh
+rig alerts add ops-slack https://hooks.slack.com/services/T00/B00/X00 \
+  --events deploy_failed,app_crashed,app_down,disk_low,backup_failed
+rig alerts test ops-slack
+```
+
+## App deploy webhooks (`rig webhook`)
+
+Inspect or rotate an application's push-to-deploy webhook URL and HMAC secret (<RoleBadge role="Developer" /> required; both actions are recorded in the audit log):
+
+```sh
+# Show webhook URL and current signing secret
+rig webhook show [app]
+
+# Rotate the signing secret (invalidates old signatures immediately)
+rig webhook rotate [app] [--yes]
+```
+
+## GitHub App inspection (`rig github`)
+
+Inspect your organization's connected GitHub App, accessible repositories, and branches:
+
+```sh
+# Show connected GitHub App details, webhook URL, and branch poll interval
+rig github
+rig github status
+
+# List repositories the GitHub App is installed on (Developer+ required)
+rig github repos
+
+# List branches of a connected repository in owner/repo format (Developer+ required)
+rig github branches <owner/repo>
+```

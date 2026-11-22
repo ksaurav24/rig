@@ -1,0 +1,14 @@
+{
+  "title": "Platform",
+  "pages": [
+    "index",
+    "apps-and-deployments",
+    "databases-and-backups",
+    "domains-and-networking",
+    "environment-and-secrets",
+    "git-and-webhooks",
+    "monitoring-and-alerts",
+    "catalog",
+    "dashboard-and-rbac"
+  ]
+}

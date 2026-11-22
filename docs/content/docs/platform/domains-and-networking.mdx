@@ -1,0 +1,72 @@
+---
+title: Domains, TLS & Access Modes
+description: Route traffic through Caddy with automatic Let's Encrypt HTTPS, Private CA, or Tailscale certificates, and restrict access by network scope.
+---
+
+Every application domain — and the Rig dashboard itself — is served through **Caddy** (`rig-caddy`). You can configure each domain's **TLS mode**, **network access scope**, and optional **custom listener port** independently.
+
+## TLS certificate modes (`TlsMode`)
+
+Rig supports four TLS modes (`crates/rig-server/src/proxy.rs`):
+
+| Mode | API / CLI value | How certificates work | When to use |
+| --- | --- | --- | --- |
+| **Automatic HTTPS** | `auto` | Caddy provisions and renews public certificates automatically via Let's Encrypt (HTTP-01 / TLS-ALPN-01 challenge) and redirects port `80` to `443`. | Public domain names (such as `app.example.com`) whose DNS **A** / **AAAA** record points to your server. Bare IP addresses are rejected for `auto`. |
+| **Private CA** | `internal` | Caddy issues a certificate signed by Rig's local Caddy internal certificate authority (`"issuers": [{ "module": "internal" }]`). | Homelab `.lan` / `.internal` hostnames or bare IPv4/IPv6 addresses where you want encrypted HTTPS without a public domain. |
+| **Tailscale HTTPS** | `tailscale` | Caddy requests a publicly trusted Let's Encrypt certificate for your machine's `*.ts.net` MagicDNS name from the local `tailscaled` daemon (`"get_certificate": [{ "via": "tailscale" }]`). | Accessing apps or the dashboard over your Tailscale tailnet using `<machine>.<tailnet>.ts.net`. |
+| **Plain HTTP** | `off` | Serves plain HTTP on port `80` (or on a custom listener port with `automatic_https.disable: true`). | Apps behind an external reverse proxy, Cloudflare Tunnel, or local port-forwarded testing. |
+
+## Network access scopes (`Access`)
+
+Each domain and the Rig dashboard can be restricted to one of three network scopes (`crates/rig-server/src/access.rs`). Rig uses the exact same CIDR definitions in Caddy's `remote_ip` matcher (for app domains) and in `access::guard` middleware (for the dashboard and API):
+
+| Access mode | Allowed CIDR ranges | Unmatched client behavior |
+| --- | --- | --- |
+| **`public`** | Any IPv4 or IPv6 address (`0.0.0.0/0`, `::/0`). | Allowed through to the app or dashboard. |
+| **`lan`** | Private networks and loopback: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `127.0.0.0/8`, `::1/128`, `fc00::/7`, `fe80::/10`, **excluding** local container bridge subnets (`docker*`, `br-*`, `podman*`, `cni*`). | Caddy returns `403 Forbidden` (`"This address is not allowed to reach this app."`); the dashboard returns `403` (`"This Rig dashboard only answers on the local network."`). |
+| **`tailscale`** | Tailscale CGNAT and ULA ranges plus loopback: `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `127.0.0.0/8`, `::1/128`, **excluding** local container bridge subnets (`docker*`, `br-*`, `podman*`, `cni*`). | Caddy returns `403 Forbidden`; the dashboard returns `403` (`"This Rig dashboard only answers on its tailnet."`). |
+
+<Callout type="info" title="Deploy webhooks remain reachable">
+  When `dashboard_access` is set to `lan` or `tailscale`, push-to-deploy webhook endpoints (`/api/v1/hooks/apps/{id}` and `/api/v1/hooks/github/{org_id}`) stay reachable from public Git hosts because they authenticate each request using HMAC-SHA256 webhook signatures.
+</Callout>
+
+## Custom listener ports (sharing one hostname across apps)
+
+A server on Tailscale has a single MagicDNS hostname (such as `box.tail1234.ts.net`), and a server without a domain has a single IP address. To serve multiple applications on the same hostname:
+
+1. Attach the hostname to the first app on the standard ports (`port: null`, served on `443` or `80`).
+2. Attach the same hostname to additional apps with a **custom listener port** between `1024` and `65535` (excluding port `7460`, which belongs to `rig-server`, and ports `80`/`443`).
+
+```sh
+# Primary app on https://box.tail1234.ts.net (port 443)
+rig domains add web box.tail1234.ts.net --tls tailscale --access tailscale
+
+# Second app on https://box.tail1234.ts.net:8443
+rig domains add api box.tail1234.ts.net --tls tailscale --access tailscale --port 8443
+
+# Third app on http://192.168.1.50:9000 (LAN only, plain HTTP)
+rig domains add metrics 192.168.1.50 --tls off --access lan --port 9000
+```
+
+Rig creates a dedicated Caddy server block (`rig_port_<port>`) for each custom listener port and applies the domain's TLS policy and `remote_ip` access rules to that port.
+
+## Dashboard domain and lockout prevention
+
+You can configure the Rig dashboard's own hostname and access scope during `install.sh` or at any time under **Settings → Network** (`PUT /api/v1/system/dashboard-domain` and `PUT /api/v1/system/dashboard-access`, interactive <RoleBadge role="Owner" /> browser session required):
+
+- **Lockout check on access changes:** When you switch `dashboard_access` to `lan` or `tailscale` in the dashboard, Rig checks your current connecting IP address first. If your current connection is not coming from a LAN or Tailscale IP, Rig rejects the change with `422 Unprocessable Entity` so you cannot accidentally lock out your active browser session.
+- **HSTS over HTTPS:** Whenever the dashboard is served over HTTPS, `rig-server` emits `Strict-Transport-Security: max-age=31536000; includeSubDomains`.
+- **Fallback behavior without a dashboard domain:** When no dashboard domain is set, Caddy serves the dashboard on port `80` for any hostname not claimed by an app, while preserving HTTP-to-HTTPS redirects for all HTTPS app domains.
+
+### Emergency console recovery
+
+If you change DNS or network interfaces and lock yourself out of the dashboard, run these commands on the server via SSH:
+
+```sh
+# Clear the dashboard domain and serve the dashboard over plain HTTP on the server's IP again
+sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear
+
+# Reset dashboard network access back to public
+sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public
+sudo systemctl restart rig
+```

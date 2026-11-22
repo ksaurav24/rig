@@ -1,0 +1,416 @@
+---
+title: Endpoints Reference
+description: Complete HTTP endpoint reference for the Rig REST API (/api/v1/*), grouped by resource domain with required roles and payloads.
+---
+
+Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <RoleBadge role="Public" />, endpoints require either `Authorization: Bearer rig_<token>` or the `rig_session` cookie (with `x-rig-csrf` on state-changing requests).
+
+## Setup & Authentication
+
+<Endpoint method="GET" path="/api/v1/setup" role="Public">
+  Returns `{ "setup_complete": bool, "branding": PublicBranding | null }` (server `version` is omitted from unauthenticated responses). Used by the browser to decide whether to render the first-time setup screen or the sign-in screen.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/setup" role="Public">
+  Consumes the one-time 30-minute setup token (`SetupRequest: { token, name, email, password, org_name }`), creates the initial organization and `Owner` account, sets the `rig_session` cookie, and returns `Me`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/auth/login" role="Public">
+  Authenticates with `{ email, password, code? }` or step-2 `{ challenge_token, code }`. If TOTP 2FA is enabled on the account and `code` is omitted, returns `401` with `error.code = "second_factor_required"` and a single-use, 5-minute, IP/UA-bound `error.challenge_token`. On success, sets `rig_session` and returns `Me`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/auth/logout" role="Viewer">
+  Deletes the current browser session and clears the `rig_session` cookie (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/auth/me" role="Viewer">
+  Returns the currently authenticated principal (`Me: { user, org, role, csrf_token, must_change_password }`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/auth/password" role="Session Only">
+  Changes the signed-in user's password (`ChangePasswordRequest: { current_password, new_password }`), clears `must_change_password`, rotates the active session (returning a fresh `x-rig-csrf` response header), and revokes all other active browser sessions (`204 No Content`).
+</Endpoint>
+
+---
+
+## API Tokens & Audit Log
+
+<Endpoint method="GET" path="/api/v1/tokens" role="Viewer">
+  Lists the signed-in user's API tokens (`ApiToken[]`, showing `id`, `name`, `prefix`, `role`, `last_used_at`, `expires_at`, `created_at`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/tokens" role="Session Only">
+  Creates a new scoped API token (`CreateApiTokenRequest: { name, role, expires_in_days? }`, capped at 25 active tokens per user). Requires an interactive browser session. Returns `201 Created` with `CreatedApiToken: { token, secret }`. The `secret` is shown once.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/tokens/{id}" role="Viewer">
+  Revokes an API token belonging to the signed-in user (`204 No Content`). When authenticated with a Bearer API token, only self-revocation (`id` matches the calling token) is allowed; revoking *other* tokens requires an interactive browser session (<RoleBadge role="Session Only" />).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/audit" role="Admin">
+  Returns the organization's latest 200 audit log entries (`AuditEntry[]`), newest first.
+</Endpoint>
+
+---
+
+## Account Profile, Sessions & Two-Factor Authentication (TOTP)
+
+<Endpoint method="PATCH" path="/api/v1/account/profile" role="Viewer">
+  Updates the signed-in user's display name or avatar (`UpdateProfileRequest: { name?, avatar_url? }`). Supports `preset:<slug>`, external `https://` URLs (no embedded credentials or local/private hosts), or empty string `""` to reset to initials. Returns `User`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/account/avatar" role="Viewer">
+  Uploads a custom raster profile avatar (`UploadImageRequest: { content_type, data_base64 }`, max 768 KB, `PNG`/`JPEG`/`WebP`/`GIF` only, stored privately with `is_public = 0`). Returns `User`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/account/avatar" role="Viewer">
+  Removes the signed-in user's avatar and resets to initials. Returns `User`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/account/sessions" role="Session Only">
+  Lists the signed-in user's active browser sessions (`SessionInfo[]`, including `id`, `user_agent`, `ip`, `created_at`, `last_active_at`, `expires_at`, and `current`).
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/account/sessions/{id}" role="Session Only">
+  Revokes one active browser session belonging to the signed-in user (`204 No Content`). Audited (`auth.session_revoked`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/account/totp" role="Viewer">
+  Returns the signed-in user's 2FA status (`TotpStatus: { enabled, enabled_at, recovery_codes_left }`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/account/totp/setup" role="Session Only">
+  Confirms current password (rate-limited and audited on failure, `PasswordConfirm: { password }`) and generates a pending TOTP secret valid for 15 minutes (`TotpEnrollment: { secret, otpauth_uri, qr_svg }`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/account/totp/enable" role="Session Only">
+  Verifies a 6-digit authenticator code (`TotpCode: { code }`) against the pending TOTP secret, enables 2FA, rotates the active session (emitting a fresh `x-rig-csrf` response header), and returns 10 single-use 16-character recovery codes (`RecoveryCodes: { codes }`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/account/totp/disable" role="Session Only">
+  Verifies current password (rate-limited) and a TOTP or recovery code (`TotpDisable: { password, code }`), turns off 2FA, and rotates the active session (`204 No Content`, emitting a fresh `x-rig-csrf` response header).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/account/totp/recovery-codes" role="Session Only">
+  Verifies current password (rate-limited, `PasswordConfirm: { password }`), invalidates old recovery codes, and returns 10 fresh 16-character recovery codes (`RecoveryCodes: { codes }`).
+</Endpoint>
+
+---
+
+## Organization, Branding & Members
+
+<Endpoint method="PATCH" path="/api/v1/org" role="Admin">
+  Updates organization branding (`UpdateOrganizationRequest: { name?, logo_url?, accent_color?, env_label?, env_color? }`). External `logo_url` values must use `https://` without credentials or private hosts. Valid accents: `emerald`, `indigo`, `sky`, `violet`, `amber`, `rose`, `graphite`. Returns `Organization`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/org/logo" role="Admin">
+  Uploads a custom raster organization logo (`UploadImageRequest: { content_type, data_base64 }`, max 768 KB, `PNG`/`JPEG`/`WebP`/`GIF` only, stored with `is_public = 1`). Returns `Organization`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/org/logo" role="Admin">
+  Deletes the custom organization logo and falls back to the default Rig mark. Returns `Organization`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/media/{id}" role="Public">
+  Serves uploaded media bytes with `nosniff`. Public logos (`is_public = 1`) are cached immutably without auth; user avatars (`is_public = 0`) require `Auth<Viewer>` in the same organization (returning uniform `404 Not Found` otherwise) and set `Cache-Control: private, max-age=3600`. Legacy SVGs continue to serve with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/members" role="Admin">
+  Lists all members of the organization (`Member[]`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/members" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Adds a member (`AddMemberRequest: { name, email, role }`) with a 7-day temporary password requiring change on first sign-in. Creating `Admin` or `Owner` members requires <RoleBadge role="Owner" />. Returns `201 Created` with `MemberWithPassword: { member, temporary_password }`.
+</Endpoint>
+
+<Endpoint method="PATCH" path="/api/v1/members/{user_id}" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Atomically changes a member's role (`UpdateMemberRequest: { role }`). Modifying `Admin`/`Owner` roles requires <RoleBadge role="Owner" />. Returns `Member`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/members/{user_id}" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Removes a member from the organization and revokes their active sessions and API tokens (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/members/{user_id}/reset-password" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Generates a new 7-day temporary password requiring change on next sign-in, revokes active sessions, API tokens, and pending 2FA challenges, clears login rate limits, and returns `MemberWithPassword`.
+</Endpoint>
+
+---
+
+## System & Network
+
+<Endpoint method="GET" path="/api/v1/system" role="Viewer">
+  Returns host resource usage, container engine version, Caddy proxy status, and app counts (`SystemInfo`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/system/network" role="Viewer">
+  Returns private LAN IPv4 addresses, Tailscale MagicDNS and IP info, current `dashboard_access`, caller's seen IP (`your_address`), and configured `dashboard_domain` (`NetworkInfo`).
+</Endpoint>
+
+<Endpoint method="PUT" path="/api/v1/system/dashboard-access" role="Owner">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Updates who may reach the dashboard (`DashboardAccessRequest: { access: "public" | "lan" | "tailscale" }`). Refuses with `422` if the caller's current IP would be locked out. Returns `NetworkInfo`.
+</Endpoint>
+
+<Endpoint method="PUT" path="/api/v1/system/dashboard-domain" role="Owner">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Sets or clears the dashboard hostname and TLS mode (`DashboardDomainRequest: { host: string | null, tls_mode?: "auto" | "internal" | "tailscale" | "off" }`). Returns `NetworkInfo`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/system/metrics" role="Viewer">
+  Returns host CPU, memory, and network throughput time series (`MetricSeries`). Query parameter: `?range=1h|6h|24h` (default `1h`).
+</Endpoint>
+
+---
+
+## Projects
+
+<Endpoint method="GET" path="/api/v1/projects" role="Viewer">
+  Lists all projects in the organization (`Project[]`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/projects" role="Developer">
+  Creates a project (`CreateProjectRequest: { name, description? }`). Returns `201 Created` with `Project`.
+</Endpoint>
+
+<Endpoint method="PATCH" path="/api/v1/projects/{id}" role="Developer">
+  Renames a project or updates its description (`UpdateProjectRequest: { name?, description? }`). Keeps `slug` unchanged. Returns `Project`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/projects/{id}" role="Admin">
+  Deletes a project and all of its apps (`204 No Content`). Query parameters when the project has databases: `?databases=move&move_to=<target_project_id>` or `?databases=delete`.
+</Endpoint>
+
+---
+
+## Applications, Logs & Terminal
+
+<Endpoint method="GET" path="/api/v1/apps" role="Viewer">
+  Lists applications (`App[]`). Optional query parameter: `?project_id=<uuid>`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/apps/resolve" role="Viewer">
+  Resolves an application by name, slug, `project/app`, or UUID (`?ref=<query>`). Returns `App`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps" role="Developer">
+  Creates an application (`CreateAppRequest`). Returns `201 Created` with `App`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/apps/{id}" role="Viewer">
+  Returns full details for one application (`App`), including `volumes`, `domains`, and `last_crash`.
+</Endpoint>
+
+<Endpoint method="PATCH" path="/api/v1/apps/{id}" role="Developer">
+  Updates application settings (`UpdateAppRequest`). Changes take effect on the next deploy or restart. Returns `App`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/apps/{id}" role="Admin">
+  Stops and removes the app's containers, persistent named volumes, domains, env vars, and deployment history (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/deploy" role="Developer">
+  Queues a new build and deployment for the app. Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/start" role="Developer">
+  Queues a deployment to start a `stopped` or `failed` app, reusing its most recent image when available. Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/restart" role="Developer">
+  Queues a zero-downtime restart deployment reusing the currently live image. Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/stop" role="Developer">
+  Stops the app's container and removes its active route from Caddy. Returns `App`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/apps/{id}/webhook" role="Developer">
+  Returns the app's push-to-deploy webhook path and secret (`AppWebhook: { path, secret }`). Audited (`app.webhook_read`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/webhook/rotate" role="Developer">
+  Rotates the app's webhook secret and returns the new `AppWebhook`. Audited (`app.webhook_rotate`).
+</Endpoint>
+
+<Endpoint method="SSE" path="/api/v1/apps/{id}/logs" role="Viewer">
+  Streams runtime container logs over Server-Sent Events (`event: log`, data: `LogLine`), re-verifying the caller's session or API token every 30 seconds. Query parameters: `tail` (`1–5000`, default `200`), `follow` (`true`/`false`), `since` (`10m`, `2h`, or RFC 3339), `timestamps` (`true`/`false`), `grep` (case-insensitive substring).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/apps/{id}/metrics" role="Viewer">
+  Returns container CPU, memory, and network time series (`MetricSeries`). Query parameter: `?range=1h|6h|24h`.
+</Endpoint>
+
+<Endpoint method="WS" path="/api/v1/apps/{id}/terminal" role="Developer">
+  Upgrades to a bidirectional WebSocket attached to a PTY (`/bin/bash` or `/bin/sh`) inside the running app container. Capped at 5 concurrent sessions per app and 5 per user, with 30-second periodic authorization re-checks (`Developer` role required). Query parameters: `cols` (default `80`), `rows` (default `24`). Accepts text control frames `{"type":"resize","cols":120,"rows":40}`. Audited (`app.terminal`).
+</Endpoint>
+
+---
+
+## Deployments
+
+<Endpoint method="GET" path="/api/v1/apps/{id}/deployments" role="Viewer">
+  Lists deployments for an app (`Deployment[]`), newest first. Optional pagination query parameters: `?limit=<1-200>&before=<deployment_id>`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/deployments/{id}" role="Viewer">
+  Returns one deployment by ID (`Deployment`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/deployments/{id}/rollback" role="Developer">
+  Queues a rollback deployment that redeploys the target deployment's built image without rebuilding. Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/deployments/{id}/cancel" role="Developer">
+  Signals an active or queued deployment to cancel. Returns `Deployment` with `status: "cancelled"`.
+</Endpoint>
+
+<Endpoint method="SSE" path="/api/v1/deployments/{id}/logs" role="Viewer">
+  Streams build and deploy logs over Server-Sent Events (`event: log` with `id: <seq>` and `LogLine` JSON, followed by `event: end` with `DeploymentEndEvent: { status, domains }`), re-verifying the caller's session or API token every 30 seconds. Supports stream resumption via `?after=<seq>` or the `Last-Event-ID` header.
+</Endpoint>
+
+---
+
+## Environment Variables & Domains
+
+<Endpoint method="GET" path="/api/v1/apps/{id}/env" role="Viewer">
+  Lists environment variables for an app (`EnvVar[]`). Secret values are masked (`value: null`).
+</Endpoint>
+
+<Endpoint method="PUT" path="/api/v1/apps/{id}/env" role="Developer">
+  Creates or updates one variable (`SetEnvVarRequest: { key, value, is_secret }`, returning `EnvVar`) **or** atomically updates a batch of variables (`BulkSetEnvRequest: { vars: SetEnvVarRequest[], replace?: bool }`, returning `EnvVar[]`).
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/apps/{id}/env/{key}" role="Developer">
+  Deletes an environment variable (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/env/{key}/reveal" role="Developer">
+  Decrypts and returns a secret variable's value (`RevealedEnvVar: { key, value }`). Audited (`env.reveal`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/apps/{id}/domains" role="Viewer">
+  Lists custom domains attached to an app (`Domain[]`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/domains" role="Developer">
+  Attaches a domain to an app (`AddDomainRequest: { host, tls_mode, access?, port? }`) and triggers an immediate Caddy config sync. Returns `201 Created` with `Domain`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/apps/{id}/domains/{domain_id}" role="Developer">
+  Removes a domain from an app and updates Caddy (`204 No Content`).
+</Endpoint>
+
+---
+
+## Managed Databases & Backups
+
+<Endpoint method="GET" path="/api/v1/databases/engines" role="Viewer">
+  Lists supported database engines, versions, and internal ports (`DatabaseEngineInfo[]`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/databases" role="Viewer">
+  Lists all managed databases in the organization (`Database[]`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/databases" role="Developer">
+  Creates and starts provisioning a managed database (`CreateDatabaseRequest: { project_id, name, engine, version? }`). Returns `202 Accepted` with `Database` (`status: "creating"`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/databases/{id}" role="Viewer">
+  Returns one managed database (`Database`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/databases/{id}/start" role="Developer">
+  Starts a `stopped` or `failed` database on its existing persistent volume. Returns `202 Accepted` with `Database`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/databases/{id}/stop" role="Developer">
+  Stops and removes the database container while keeping its data volume. Returns `Database` (`status: "stopped"`).
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/databases/{id}" role="Admin">
+  Permanently deletes the database container, its persistent data volume, and all backup dump files (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/databases/{id}/reveal" role="Developer">
+  Audits `database.reveal`, decrypts the database password, and returns `DatabaseCredentials: { password, url }`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/databases/{id}/metrics" role="Viewer">
+  Returns database container CPU, memory, and network time series (`MetricSeries`). Query parameter: `?range=1h|6h|24h`.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/databases/{id}/backups" role="Viewer">
+  Lists backups for a database (`Backup[]`), newest first.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/databases/{id}/backups" role="Admin">
+  Starts a new native backup dump of a running database, encrypted at rest in 64 KiB XChaCha20-Poly1305 chunks. Returns `202 Accepted` with `Backup` (`status: "running"`), or `409 Conflict` if another operation is in progress on the database.
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/backups/{id}/download" role="Admin">
+  Decrypts on the fly and streams the backup dump file (`application/octet-stream`) with a `Content-Disposition: attachment; filename="<db>-<timestamp>.<ext>"` header. Audited (`backup.download`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/backups/{id}/restore" role="Admin">
+  Decrypts and restores a backup dump in place into its running database (`204 No Content`, or `409 Conflict` if the database is busy). Audited (`backup.restore`).
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/backups/{id}" role="Admin">
+  Deletes a backup row and removes its dump file from disk (`204 No Content`).
+</Endpoint>
+
+---
+
+## GitHub Integration, Alerts & Deploy Webhooks
+
+<Endpoint method="GET" path="/api/v1/github" role="Viewer">
+  Returns the organization's connected GitHub App status, branch poll interval, and push webhook path (`GithubStatus`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/github/manifest" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Starts the GitHub App manifest creation flow (`GithubManifestRequest: { organization? }`, max 64 concurrent pending states). Returns `GithubManifest: { post_url, manifest }`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/github/manifest/complete" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Completes the GitHub App manifest exchange (`GithubManifestComplete: { code, state }`), encrypts the App's credentials in `Vault`, and returns `GithubAppInfo`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/github" role="Admin">
+  Requires an interactive browser session (<RoleBadge role="Session Only" />). Disconnects the organization's GitHub App and purges cached installation tokens (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/github/repos" role="Developer">
+  Lists repositories accessible to the organization's GitHub App (`GithubRepo[]`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/github/repos/{owner}/{repo}/branches" role="Developer">
+  Lists branches for a repository (`GithubBranch[]`).
+</Endpoint>
+
+<Endpoint method="GET" path="/api/v1/alerts/channels" role="Admin">
+  Lists configured outbound alert channels (`AlertChannel[]`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/alerts/channels" role="Admin">
+  Creates an outbound alert webhook channel (`CreateAlertChannelRequest: { name, url, events }`). Rejects loopback/private/metadata destinations unless `--allow-private-alerts` is set; encrypts both `url` and `signing_secret` at rest. Returns `201 Created` with `CreatedAlertChannel: { channel, signing_secret }`.
+</Endpoint>
+
+<Endpoint method="PATCH" path="/api/v1/alerts/channels/{id}" role="Admin">
+  Updates an alert channel's name, subscribed events, or enabled state (`UpdateAlertChannelRequest`). Returns `AlertChannel`.
+</Endpoint>
+
+<Endpoint method="DELETE" path="/api/v1/alerts/channels/{id}" role="Admin">
+  Deletes an alert channel (`204 No Content`).
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/alerts/channels/{id}/test" role="Admin">
+  Sends a live signed test alert to the channel (validating resolved IPs at connect time and returning sanitized errors) and returns `AlertTestResult: { ok, error? }`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/hooks/apps/{id}" role="Public">
+  Triggers a push-to-deploy build for an application when signed with the app's webhook secret in `X-Hub-Signature-256`, `X-Rig-Signature`, or `X-Gitlab-Token`. Returns `202 Accepted` (or `200 OK` when skipped) with `WebhookResult: { deployment_id, skipped }`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/hooks/github/{org_id}" role="Public">
+  Receives GitHub App `push` webhook deliveries verified strictly via HMAC-SHA256 (`X-Hub-Signature-256` or `X-Rig-Signature`, rejecting `X-Gitlab-Token`) using the organization's GitHub App webhook secret and queues deployments for all matching `auto_deploy` applications. Returns `GithubPushResult: { deployment_ids, skipped }`.
+</Endpoint>

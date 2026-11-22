@@ -1,0 +1,228 @@
+---
+title: Projects, Apps & Domains
+description: Reference for rig status, rig projects, rig apps, and rig domains commands.
+---
+
+Use these commands to inspect server health, organize projects, create and configure applications, and manage custom domains and TLS modes.
+
+## Server status (`rig status`)
+
+Fetch your authenticated identity (`/api/v1/auth/me`) and server health (`/api/v1/system`) concurrently:
+
+```sh
+rig status [--json]
+```
+
+```text
+Ada Lovelace (ada@example.com) in Acme, as owner
+Server   https://rig.example.com · Rig 0.1.0
+Engine   podman 5.2.2
+Proxy    ready
+Apps     3 running of 4
+Load     CPU 6% · memory 620 MB of 3.8 GB · disk 4.2 GB of 38.4 GB
+```
+
+## Manage projects (`rig projects`)
+
+### List projects (`rig projects` / `rig projects ls`)
+
+```sh
+rig projects
+rig projects ls [--json] [-o name]
+```
+
+### Create a project (`rig projects create`)
+
+Requires <RoleBadge role="Developer" /> or higher:
+
+```sh
+rig projects create <name> [--description <text>]
+```
+
+```sh
+rig projects create production --description "Customer-facing services"
+```
+
+### Rename a project (`rig projects rename`)
+
+Renames a project or updates its description while keeping its URL/network slug stable so existing app references and internal DNS never break:
+
+```sh
+rig projects rename <project> <new-name> [--description <text>]
+```
+
+### Delete a project (`rig projects rm`)
+
+Requires <RoleBadge role="Admin" /> or higher. Deletes the project and all of its applications. If the project contains managed databases, specify `--databases delete` or `--databases move --move-to <target-project>`:
+
+```sh
+# Delete a project and move its databases (with their volumes and backups) to another project
+rig projects rm staging --databases move --move-to production --yes
+
+# Delete a project and permanently destroy its databases
+rig projects rm scratch --databases delete --yes
+```
+
+## Manage applications (`rig apps`)
+
+Apps can be referenced anywhere in the CLI by **name** (`web`), **slug**, **`project/app`** (`production/web`, required when two projects contain an app with the same name), or **UUID** (`019a1e2c-...`). When omitted on supported commands, `<app>` defaults to the app linked in `rig.toml`.
+
+### List apps (`rig apps` / `rig apps ls`)
+
+```sh
+rig apps [--project <project>]
+rig apps ls [--project <project>]
+```
+
+### Inspect an app (`rig apps show`)
+
+Prints the complete configuration, runtime status, source, container port, loopback port, resource limits, health check path, active deployment ID, attached domains, persistent volumes, and most recent crash details:
+
+```sh
+rig apps show [app]
+```
+
+```text
+production/web (019a1e2c-6049-70bb-85e7-91caec40688e)
+Status      running
+Source      git
+Git         https://github.com/acme/web.git (main)
+Dockerfile  Dockerfile
+Auto-deploy on
+Port        3000
+Loopback    http://127.0.0.1:32768
+Memory      512 MB
+CPU         1000m
+Health      /healthz
+Deployment  91caec40 (019a1e2d-1122-7333-8444-5566778891caec40)
+Domains     https://app.example.com
+Volumes     /app/uploads
+```
+
+### Create an app (`rig apps create`)
+
+Requires <RoleBadge role="Developer" /> or higher. Specify either `--image <ref>` (for a prebuilt registry image) or `--git <url>` (for a Git repository):
+
+```sh
+rig apps create <name> \
+  --project <project> \
+  (--image <image-ref> | --git <repo-url>) \
+  [--branch <branch>] \
+  [--dockerfile <path>] \
+  [--port <port>] \
+  [--memory <mb>] \
+  [--cpu <millicores>] \
+  [--health <http-path>] \
+  [--volume <container-path>...] \
+  [--env <KEY=VALUE>...]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--project <project>` | Required | Target project name, slug, or ID. |
+| `--image <ref>` | — | Prebuilt container image (for example `nginx:alpine`). Mutually exclusive with `--git`. |
+| `--git <url>` | — | Git repository URL (`https://` or `ssh://`). Mutually exclusive with `--image`. |
+| `--branch <branch>` | Repo default | Git branch to build and deploy. |
+| `--dockerfile <path>` | `Dockerfile` | Path to Dockerfile relative to repo root (uses Railpack automatically if absent). |
+| `--port <port>` | `80` | TCP port the app listens on inside its container. |
+| `--memory <mb>` | `512` (server default) | Memory limit in megabytes. |
+| `--cpu <millicores>` | Unlimited | CPU limit in thousandths of a core (`500` = 0.5 core, `1000` = 1 core). |
+| `--health <path>` | TCP check | HTTP path that must answer `2xx`/`3xx` before traffic switches (for example `/healthz`). |
+| `--volume <path>` | None | Repeatable absolute container path backed by a persistent named volume (for example `--volume /data`). |
+| `--env <KEY=VALUE>` | None | Repeatable initial secret environment variable set before the first deploy. |
+
+<Tabs items={['Git App', 'Prebuilt Image App']}>
+  <Tab value="Git App">
+    ```sh
+    rig apps create api \
+      --project production \
+      --git https://github.com/acme/api.git \
+      --branch main \
+      --port 8080 \
+      --memory 1024 \
+      --cpu 1000 \
+      --health /healthz \
+      --env NODE_ENV=production
+    ```
+  </Tab>
+  <Tab value="Prebuilt Image App">
+    ```sh
+    rig apps create uptime \
+      --project production \
+      --image louislam/uptime-kuma:2 \
+      --port 3001 \
+      --memory 512 \
+      --health / \
+      --volume /app/data
+    ```
+  </Tab>
+</Tabs>
+
+### Update an app (`rig apps set`)
+
+Modify any configuration field on an existing app. Changes apply on the next `rig deploy` or `rig restart`:
+
+```sh
+rig apps set [app] \
+  [--name <new-name>] \
+  [--image <ref>] \
+  [--git <url>] \
+  [--branch <branch>] \
+  [--dockerfile <path>] \
+  [--port <port>] \
+  [--memory <mb>] \
+  [--cpu <millicores>] \
+  [--health <path>] \
+  [--auto-deploy <true|false>]
+```
+
+- Pass `--memory 0` or `--cpu 0` to remove an existing memory or CPU limit.
+- Pass `--health ""` to switch from an HTTP health check back to a TCP port check.
+- Pass `--branch ""` to reset the Git branch to the repository's default branch.
+
+### Delete an app (`rig apps rm`)
+
+Requires <RoleBadge role="Admin" /> or higher. Stops and removes the app's containers, persistent volumes, environment variables, deployment history, and domains:
+
+```sh
+rig apps rm [app] [--yes]
+```
+
+## Manage custom domains (`rig domains`)
+
+### List domains (`rig domains ls`)
+
+```sh
+rig domains ls [app]
+```
+
+```text
+URL                            TLS         ACCESS      CREATED   ID
+https://app.example.com        auto        public      2h ago    019a1e2e-...
+https://box.tail1.ts.net:8443  tailscale   tailscale   1h ago    019a1e2f-...
+```
+
+### Add a domain (`rig domains add`)
+
+Requires <RoleBadge role="Developer" /> or higher:
+
+```sh
+rig domains add <app> <host> \
+  [--tls <auto|internal|off|tailscale>] \
+  [--access <public|lan|tailscale>] \
+  [--port <1024-65535>]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--tls` | `auto` | Certificate mode: `auto` (Let's Encrypt), `internal` (Rig Private CA), `tailscale` (`*.ts.net` cert), or `off` (plain HTTP). |
+| `--access` | `public` | Network access scope: `public`, `lan` (private networks), or `tailscale` (tailnet only). |
+| `--port` | Standard (`443`/`80`) | Custom listener port (`1024–65535`) for sharing a single hostname or IP across multiple apps. |
+
+### Remove a domain (`rig domains rm`)
+
+Remove a domain by hostname or domain UUID:
+
+```sh
+rig domains rm <app> <host-or-id> [--yes]
+```

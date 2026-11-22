@@ -1,0 +1,108 @@
+---
+title: REST API Overview & Authentication
+description: Authenticate with Rig's HTTP API using scoped Bearer tokens or browser session cookies, inspect the OpenAPI 3.1 contract, and handle errors.
+---
+
+The Rig dashboard, `rig` CLI, and `rig mcp` server all communicate with `rig-server` through a single versioned REST API under `/api/v1/`.
+
+## OpenAPI 3.1 contract
+
+Rig generates its OpenAPI 3.1 specification directly from its Rust route handlers and `rig-api` wire types using `utoipa`:
+
+- **Generate offline from the binary:**
+  ```sh
+  rig-server openapi > openapi.json
+  ```
+- **Fetch from a running server (requires <RoleBadge role="Viewer" />):**
+  ```sh
+  curl -fsSL https://rig.example.com/api/openapi.json \
+    -H "Authorization: Bearer rig_<token>" > openapi.json
+  ```
+- **Interactive Scalar reference UI (opt-in):** Disabled by default. Start `rig-server` with `--enable-api-docs` (`RIG_ENABLE_API_DOCS=true`) and open `https://<your-rig-server>/api/docs` while signed in (`Auth<Viewer>`). The UI loads Scalar pinned to `@1.28.11` under a dedicated strict CSP.
+- **TypeScript client codegen:** Inside `web/`, running `pnpm gen:api` exports `rig-server openapi` and generates `web/src/api/schema.d.ts` via `openapi-typescript`.
+
+## Authentication methods
+
+Every protected endpoint uses a compile-time role extractor (`Auth<Viewer>`, `Auth<Developer>`, `Auth<Admin>`, or `Auth<Owner>`) that accepts either an **API token** or a **browser session cookie**.
+
+### 1. Bearer API token (recommended for CLI, CI/CD, and scripts)
+
+Create an API token in the dashboard (**Settings → API tokens**), and pass it in the `Authorization` header:
+
+```sh
+curl -fsSL https://rig.example.com/api/v1/system \
+  -H "Authorization: Bearer rig_8fK9mP2xQ4vL8nR1wY5zT3bC7dE0aH6j"
+```
+
+- **Role ceiling:** An API token's effective role is `min(token.role, member.role)`.
+- **`last_used_at` tracking:** Rig updates the token's `last_used_at` timestamp asynchronously when used.
+- **Temporary-password lockout:** While `must_change_password` is true on a user account, API token authentication is rejected until the user changes their temporary password via a browser session.
+- **Session-only endpoints:** Sensitive account and control-plane routes (`/api/v1/auth/password`, `/api/v1/account/totp/*`, `/api/v1/account/sessions*`, `POST /api/v1/tokens`, revoking *other* tokens via `DELETE /api/v1/tokens/{id}`, `/api/v1/members/*`, `PUT /api/v1/system/dashboard-access`, `PUT /api/v1/system/dashboard-domain`, `POST /api/v1/github/manifest*`, and `DELETE /api/v1/github`) require an interactive browser session cookie and reject Bearer API tokens with `403 Forbidden`. An API token may still call `DELETE /api/v1/tokens/{own_id}` to revoke itself (`rig logout --revoke`).
+
+### 2. Browser session cookie + CSRF header
+
+When signing in via `POST /api/v1/auth/login` (or `POST /api/v1/setup`), Rig sets an `HttpOnly`, `SameSite=Strict` cookie named `rig_session` (plus `Secure` when HTTPS is enabled) and returns a `Me` object containing a 192-bit `csrf_token`:
+
+```json
+{
+  "user": {
+    "id": "019a1e2c-...",
+    "email": "ada@example.com",
+    "name": "Ada Lovelace",
+    "avatar_url": null
+  },
+  "org": {
+    "id": "019a1e2b-...",
+    "name": "Acme",
+    "slug": "acme",
+    "logo_url": null,
+    "accent_color": "emerald",
+    "env_label": "Production",
+    "env_color": "emerald"
+  },
+  "role": "owner",
+  "csrf_token": "9xK2mP4vL8nR1wY5zT3bC7dE",
+  "must_change_password": false
+}
+```
+
+For every state-changing request (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated with the `rig_session` cookie, you must include the `x-rig-csrf: <csrf_token>` header (verified in constant time) and a matching `Origin` header (exact scheme + host). Sessions expire after 14 days total or 7 days idle (`last_active_at`). Actions that rotate the session (password change, TOTP enable/disable) issue a new `rig_session` cookie and return the new CSRF token in the `x-rig-csrf` response header.
+
+## Standard error envelope (`ErrorBody`)
+
+All API errors return a consistent JSON structure (`rig_api::ErrorBody`):
+
+```json
+{
+  "error": {
+    "code": "validation",
+    "message": "automatic HTTPS requires a domain name, not an IP address; choose Private CA for an IP"
+  }
+}
+```
+
+### Error codes and HTTP status codes
+
+| HTTP Status | `error.code` | When it occurs |
+| --- | --- | --- |
+| **`400 Bad Request`** | `bad_request` | Malformed JSON body or invalid query string parameters. |
+| **`401 Unauthorized`** | `unauthorized` | Missing, expired, or invalid session cookie / Bearer token, or invalid login credentials. |
+| **`401 Unauthorized`** | `second_factor_required` | Valid email and password on an account with TOTP 2FA enabled when `code` was omitted. Includes a single-use, 5-minute, IP/UA-bound `error.challenge_token`; complete login by posting `{ "challenge_token": "...", "code": "<6-digit-or-recovery-code>" }` to `POST /api/v1/auth/login`. |
+| **`403 Forbidden`** | `forbidden` | Authenticated user's role is lower than the endpoint's minimum required role, missing/invalid `x-rig-csrf` header, `must_change_password` active, or `Via::ApiToken` used on a session-only endpoint. |
+| **`404 Not Found`** | `not_found` | Requested project, app, deployment, domain, database, backup, private media, or member does not exist in your organization. |
+| **`409 Conflict`** | `conflict` | Resource conflict (for example queueing a deploy while another deployment is already in progress, a concurrent database operation, deleting an app while deploying, or duplicate slug). |
+| **`422 Unprocessable Entity`** | `validation` | Input failed domain validation (for example invalid hostname, weak password, disallowed private URL, invalid port range, or lockout check). |
+| **`429 Too Many Requests`** | `rate_limited` | Exceeded authentication or password verification rate limits over a 15-minute window, or concurrent terminal/token limits. |
+| **`500 Internal Server Error`** | `internal` | Unexpected runtime, container engine, or SQLite error. |
+
+## Security headers and body limits
+
+Every HTTP response from `rig-server` includes:
+
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: same-origin`
+- `Strict-Transport-Security: max-age=31536000; includeSubDomains` (on HTTPS responses)
+- `X-Rig-Version: 0.1.0`
+- Dashboard HTML responses enforce a strict `Content-Security-Policy` (`img-src 'self' data: blob: https:`, disallowing plain `http:` external images).
+- Request bodies are capped at **2 MiB** (`RequestBodyLimitLayer::new(2 * 1024 * 1024)`), and responses support transparent `gzip` compression.

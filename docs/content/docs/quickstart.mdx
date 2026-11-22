@@ -1,0 +1,156 @@
+---
+title: Quickstart
+description: Claim your Rig server, create a project, deploy your first application with HTTPS, and connect the rig CLI in five minutes.
+---
+
+After [installing Rig on your server](/docs/installation/), follow this guide to create your owner account, deploy a container or Git application, attach a domain with automatic HTTPS, and operate the app from your terminal.
+
+## Prerequisites
+
+- A running Rig server with the one-time setup URL and token printed by `install.sh`.
+- Optional: A DNS **A** record (such as `app.example.com`) pointing to your server's IP address.
+
+<Steps>
+  <Step>
+    ### Claim the server and create the owner account
+
+    Open the printed dashboard URL in your browser (for example `https://rig.example.com` or `https://<server-ip>`).
+
+    Enter the **30-minute one-time setup token**, your display name, email address, password (10–256 characters), and organization name.
+
+    <Callout type="info" title="Expired or lost setup token?">
+      If the 30-minute token expires before you complete setup, generate a fresh token on the server console:
+      ```sh
+      sudo -u rig rig-server --data-dir /var/lib/rig setup-token
+      ```
+    </Callout>
+
+    Until setup is completed, Rig rejects all other dashboard and API requests so no one else can claim your server.
+  </Step>
+
+  <Step>
+    ### Create a project
+
+    In the dashboard sidebar, open **Projects** and click **New project**.
+
+    Enter a name such as `production` and an optional description. Rig creates an isolated container bridge network (`rig-net-<project_id>`) so apps and managed databases inside this project can reach each other by name while staying isolated from other projects.
+  </Step>
+
+  <Step>
+    ### Deploy your first application
+
+    Inside your new project, click **New app** and choose a source:
+
+    <Tabs items={['Prebuilt Image', 'Git Repository']}>
+      <Tab value="Prebuilt Image">
+        - **Name:** `web`
+        - **Source:** **Image**
+        - **Image reference:** `nginx:alpine`
+        - **Container port:** `80`
+        - **Health check path:** `/`
+
+        Click **Create & Deploy**. Rig pulls `nginx:alpine`, starts the container with a 512 MB default memory ceiling, binds a loopback port on `127.0.0.1`, and verifies that `GET /` responds with HTTP `2xx` or `3xx`.
+      </Tab>
+      <Tab value="Git Repository">
+        - **Name:** `api`
+        - **Source:** **Git**
+        - **Repository URL:** `https://github.com/your-org/your-app.git`
+        - **Branch:** `main`
+        - **Dockerfile path:** `Dockerfile` (if the file is absent in the repo, Rig automatically downloads and runs pinned **Railpack v0.43.0** + BuildKit to build the repository without a Dockerfile).
+        - **Container port:** `3000`
+
+        Click **Create & Deploy** and watch the live build and deploy log stream.
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step>
+    ### Attach a domain or port
+
+    Open your application's **Domains** tab and click **Add domain**:
+
+    - **With a DNS domain:** Enter `app.example.com`, keep TLS on **Automatic (Let's Encrypt)**, and keep access on **Public**. Rig pushes the route to Caddy's admin API, Caddy obtains a TLS certificate, and traffic routes to your container with zero downtime.
+    - **Without a domain (Tailscale or LAN):** Enter your machine's Tailscale MagicDNS hostname (with **Tailscale** TLS and a custom port such as `8443`), or a `.lan` hostname / server IP with **Private CA (`internal`)** or **Plain HTTP (`off`)** and a custom listener port (such as `8081`).
+  </Step>
+
+  <Step>
+    ### Connect the `rig` CLI from your laptop
+
+    Create a scoped API token in the dashboard under **Settings → API tokens** (or **Account → Access tokens**), then sign in from your terminal:
+
+    ```sh
+    rig login https://rig.example.com
+    ```
+
+    Paste your API token at the hidden prompt. Verify your connection and inspect your running app:
+
+    ```sh
+    rig status
+    rig apps
+    rig logs production/web --tail 50 --no-follow
+    ```
+
+    Expected `rig status` output:
+
+    ```text
+    Ada Lovelace (ada@example.com) in Acme, as owner
+    Server   https://rig.example.com · Rig 0.1.0
+    Engine   podman 5.2.2
+    Proxy    ready
+    Apps     1 running of 1
+    Load     CPU 4% · memory 412 MB of 3.8 GB · disk 2.1 GB of 38.4 GB
+    ```
+  </Step>
+</Steps>
+
+## Link a local repository
+
+Inside your application's Git checkout on your laptop, link the directory to your Rig app so you don't have to pass the app name on every CLI command:
+
+```sh
+cd ~/code/your-app
+rig link production/web
+```
+
+This writes a `rig.toml` file in the repository root:
+
+```toml
+app = "web"
+project = "production"
+context = "rig.example.com"
+server = "https://rig.example.com"
+```
+
+Now you can run commands from anywhere inside that repository without specifying the app name:
+
+```sh
+rig deploy
+rig logs
+rig exec
+rig open
+```
+
+## Next steps
+
+<Cards>
+  <Card
+    href="/docs/platform/apps-and-deployments/"
+    title="Apps & deployments"
+    description="Configure resource limits, persistent volumes, Railpack builds, and zero-downtime rollbacks."
+  />
+  <Card
+    href="/docs/platform/databases-and-backups/"
+    title="Managed databases"
+    description="Provision PostgreSQL, MySQL, MariaDB, Redis, or MongoDB and take backups."
+  />
+  <Card
+    href="/docs/cli/"
+    title="CLI reference"
+    description="Explore all 25+ CLI subcommands, output formats, and CI/CD workflows."
+  />
+  <Card
+    href="/docs/mcp/"
+    title="MCP server"
+    description="Let Claude Code or Cursor manage deployments, logs, and databases over MCP."
+  />
+</Cards>

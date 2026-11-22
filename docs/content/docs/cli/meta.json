@@ -1,0 +1,11 @@
+{
+  "title": "CLI",
+  "pages": [
+    "index",
+    "auth-and-contexts",
+    "projects-and-apps",
+    "deployments-and-logs",
+    "env-and-databases",
+    "admin-and-monitoring"
+  ]
+}

@@ -1,0 +1,153 @@
+---
+title: Troubleshooting & Recovery
+description: Resolve common operational issues including forgotten passwords, lost 2FA, dashboard lockouts, OOM kills, low disk pauses, and proxy recovery.
+---
+
+Use this runbook to diagnose and recover from common server, authentication, network, and deployment issues.
+
+## Quick recovery cheat sheet
+
+Run these commands over SSH on your Rig server:
+
+| Symptom | Recovery command |
+| --- | --- |
+| **Setup token expired (before owner created)** | `sudo -u rig rig-server --data-dir /var/lib/rig setup-token` |
+| **Forgotten user or owner password** | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` |
+| **Lost TOTP 2FA authenticator & recovery codes** | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` |
+| **Locked out by broken dashboard domain / DNS** | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear` |
+| **Locked out by `lan` or `tailscale` access mode** | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public && sudo systemctl restart rig` |
+| **Inspect `rig-server` systemd logs** | `journalctl -u rig -f` |
+| **Inspect `rig-caddy` proxy logs (Docker)** | `sudo docker logs -f rig-caddy` |
+| **Inspect `rig-caddy` proxy logs (Podman)** | `sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman logs -f rig-caddy` |
+
+---
+
+## Authentication and access recovery
+
+### Locked out after setting a dashboard domain
+
+**Symptom:** You configured a dashboard domain under **Settings → Network → Dashboard address**, or during `install.sh`, and the browser cannot reach `https://<domain>` due to a DNS typo, unpropagated A record, or firewall block on port `443`.
+
+**Solution:**
+
+1. SSH into the server and clear the dashboard domain:
+   ```sh
+   sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear
+   ```
+2. Wait up to 60 seconds for the proxy supervisor to sync, or apply immediately by restarting Rig:
+   ```sh
+   sudo systemctl restart rig
+   ```
+3. If `/etc/rig/rig.env` has `RIG_SECURE_COOKIES=true` and you are signing in over plain `http://<server-ip>`, either access the dashboard over an SSH local tunnel (`ssh -L 7460:127.0.0.1:7460 user@server` and open `http://localhost:7460`, where browsers allow `Secure` cookies on `localhost`) or re-attach a valid HTTPS domain.
+
+### Locked out after restricting dashboard access to LAN or Tailscale
+
+**Symptom:** Opening the dashboard returns `403 Forbidden` with `"This Rig dashboard only answers on the local network."` or `"This Rig dashboard only answers on its tailnet."`
+
+**Solution:**
+
+1. Connect from a device on the allowed network, **or** SSH into the server and reset dashboard access to `public`:
+   ```sh
+   sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public
+   sudo systemctl restart rig
+   ```
+
+### Forgotten password or locked out by login rate limits
+
+**Symptom:** You cannot sign in with your password, or receive `429 Too Many Requests` after repeated failed attempts.
+
+**Solution:**
+
+Run `reset-password` on the server console:
+
+```sh
+sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com
+```
+
+This atomically sets a new 15-character temporary password (valid for 7 days and requiring a password change on next sign-in), revokes all existing browser sessions and API tokens for that account, clears `login_attempts` rate-limit entries for that email so you can sign in immediately, writes an `auth.password_reset` audit entry, and prints the temporary password to your terminal.
+
+Running `reset2fa` likewise disables TOTP, removes all recovery codes, and signs out all active browser sessions for that user.
+
+---
+
+## Deployment and container issues
+
+### Build fails with "Railpack could not work out how to build this repository"
+
+**Symptom:** A Git deployment without a `Dockerfile` fails during the `Fetching Railpack` / `railpack prepare` step.
+
+**Cause:** The repository has no `Dockerfile` at `dockerfile_path` (default `Dockerfile`) and Railpack could not infer a start command or runtime from the project files.
+
+**Solution:**
+
+- Add a `Dockerfile` to the repository (or point the app's `dockerfile_path` setting to the subdirectory containing your `Dockerfile`, such as `rig apps set <app> --dockerfile services/api/Dockerfile`), **or**
+- Add a `railpack.json` file to the root of your repository specifying the build and start commands.
+
+### Deployment fails during health check after 90 seconds
+
+**Symptom:** The image builds or pulls cleanly, the container starts, and the deployment fails after 90 seconds saying the container did not pass health checks.
+
+**Causes and fixes:**
+
+1. **Port mismatch:** Verify that the process inside your container listens on the exact TCP port configured on the app (`rig apps show <app>` → `Port`), and binds to `0.0.0.0` (not `127.0.0.1` inside the container namespace). Rig injects `PORT=<port>` into the container environment automatically.
+2. **Health check path returns 4xx/5xx:** If `health_path` is set (for example `/healthz`), the endpoint must return an HTTP `2xx` or `3xx` status code without requiring authentication. Test or switch back to a TCP check with:
+   ```sh
+   rig apps set <app> --health ""
+   rig deploy <app>
+   ```
+
+### App crashes with "ran out of memory (limit 512 MB)"
+
+**Symptom:** The app status or alert reports `ran out of memory (limit 512 MB)` (`oom_killed: true`, exit code `137`).
+
+**Solution:**
+
+Raise the application's memory limit and redeploy or restart:
+
+```sh
+rig apps set <app> --memory 1024
+rig restart <app>
+```
+
+### Deploys and backups pause due to low disk space
+
+**Symptom:** Starting a deployment or database backup fails immediately with a message that free disk space is below `1024 MB`.
+
+**Solution:**
+
+1. Inspect disk usage on the partition holding `/var/lib/rig`:
+   ```sh
+   df -h /var/lib/rig
+   ```
+2. Prune unused container images from earlier builds or remove old database backup dumps:
+   ```sh
+   # Remove old database backups via CLI
+   rig backup ls <database>
+   rig backup rm <backup-id>
+
+   # Prune unused images (Docker)
+   sudo docker image prune -f
+
+   # Prune unused images (Rootless Podman)
+   sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman image prune -f
+   ```
+
+### `rig status` shows `Proxy: not reachable`
+
+**Symptom:** `rig status` or the dashboard reports that the proxy is not reachable (`proxy_ready: false`). Running apps remain alive on their loopback ports, but public domains do not answer.
+
+**Solution:**
+
+Check whether the `rig-caddy` container is running and port `2019` on `127.0.0.1` is reachable:
+
+```sh
+# On Docker
+sudo docker ps -a --filter name=rig-caddy
+sudo docker start rig-caddy
+
+# On Rootless Podman
+sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman ps -a --filter name=rig-caddy
+sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman start rig-caddy
+```
+
+Once `rig-caddy` is running, `rig-server`'s background proxy supervisor automatically detects it within 5 seconds and reloads the full route table from SQLite.

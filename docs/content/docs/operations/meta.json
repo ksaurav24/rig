@@ -1,0 +1,8 @@
+{
+  "title": "Server & Operations",
+  "pages": [
+    "server-cli-and-config",
+    "podman-and-docker",
+    "troubleshooting"
+  ]
+}

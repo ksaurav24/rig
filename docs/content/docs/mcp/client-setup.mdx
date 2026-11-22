@@ -1,0 +1,137 @@
+---
+title: Client Configuration
+description: Configure Claude Code, Claude Desktop, Cursor, Windsurf, or VS Code to connect to your Rig server via rig mcp.
+---
+
+Because `rig mcp` speaks standard MCP over `stdio` and shares `~/.config/rig/config.toml` (as well as `--context`, `--server`, `RIG_URL`, and `RIG_TOKEN`), you can connect any MCP-compatible AI client in seconds.
+
+## Prerequisites
+
+1. Ensure the `rig` binary is installed on your machine and available on your `PATH` (for example `/usr/local/bin/rig`).
+2. Either sign in once with `rig login https://rig.example.com` **or** create a scoped API token in the dashboard (**Settings → API tokens**) to pass via `RIG_URL` and `RIG_TOKEN`.
+
+<Callout type="info" title="Recommended: use a dedicated API token for AI agents">
+  Create a dedicated `Developer` (or read-only `Viewer`) API token with an expiration date in the dashboard under **Settings → API tokens** rather than sharing an `Owner` token. That keeps every agent action identifiable in `rig audit` and prevents the agent from deleting databases or changing organization settings.
+</Callout>
+
+## Claude Code
+
+Register `rig mcp` using the `claude mcp add` CLI command:
+
+<Tabs items={['Using Saved Context', 'Using Dedicated Token (Stateless)']}>
+  <Tab value="Using Saved Context">
+    ```sh
+    # Uses your active context from ~/.config/rig/config.toml (or rig.toml in the current repo)
+    claude mcp add rig -- rig mcp
+
+    # Or pin a specific named context:
+    claude mcp add rig-prod -- rig --context prod mcp
+    ```
+  </Tab>
+  <Tab value="Using Dedicated Token (Stateless)">
+    ```sh
+    claude mcp add rig \
+      -e RIG_URL=https://rig.example.com \
+      -e RIG_TOKEN=rig_your_scoped_developer_token \
+      -- rig mcp
+    ```
+  </Tab>
+</Tabs>
+
+## Claude Desktop
+
+Add `rig` to your `claude_desktop_config.json` (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `~/.config/Claude/claude_desktop_config.json` on Linux):
+
+```json
+{
+  "mcpServers": {
+    "rig": {
+      "command": "/usr/local/bin/rig",
+      "args": ["mcp"],
+      "env": {
+        "RIG_URL": "https://rig.example.com",
+        "RIG_TOKEN": "rig_your_scoped_developer_token"
+      }
+    }
+  }
+}
+```
+
+## Cursor
+
+Add `rig` to `.cursor/mcp.json` in your project root (or `~/.cursor/mcp.json` globally):
+
+```json
+{
+  "mcpServers": {
+    "rig": {
+      "command": "rig",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+When you open a repository that has a [`rig.toml`](/docs/cli/auth-and-contexts/#link-a-project-directory-rig-link-and-rigtoml) file created by `rig link`, `rig mcp` automatically picks up the `context` or `server` defined in `rig.toml`.
+
+## Windsurf & VS Code (GitHub Copilot)
+
+<Tabs items={['Windsurf (mcp_config.json)', 'VS Code (.vscode/mcp.json)']}>
+  <Tab value="Windsurf (mcp_config.json)">
+    Add to `~/.codeium/windsurf/mcp_config.json`:
+    ```json
+    {
+      "mcpServers": {
+        "rig": {
+          "command": "rig",
+          "args": ["mcp"]
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab value="VS Code (.vscode/mcp.json)">
+    Add to `.vscode/mcp.json` in your workspace:
+    ```json
+    {
+      "servers": {
+        "rig": {
+          "type": "stdio",
+          "command": "rig",
+          "args": ["mcp"]
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Connecting to multiple Rig servers simultaneously
+
+If you operate multiple Rig servers (for example `production` and `staging`), register a separate MCP server entry for each context:
+
+```json
+{
+  "mcpServers": {
+    "rig-prod": {
+      "command": "rig",
+      "args": ["--context", "prod", "mcp"]
+    },
+    "rig-staging": {
+      "command": "rig",
+      "args": ["--context", "staging", "mcp"]
+    }
+  }
+}
+```
+
+## Verifying the MCP server from your terminal
+
+You can smoke-test `rig mcp` directly from a shell by piping a JSON-RPC `initialize` and `tools/list` request into `rig mcp`:
+
+```sh
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | rig mcp
+```

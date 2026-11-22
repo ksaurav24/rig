@@ -25,7 +25,7 @@ Then open the printed HTTPS address and enter the one-time setup token. The full
 
 ## Dashboard & customization
 
-- **Organization branding (`Settings → General`):** Set your organization name, upload a custom logo (PNG, JPEG, WebP, GIF, or SVG) or paste an image link, choose a workspace brand accent color, and optionally add an environment badge (e.g. `Production`, `Staging`, `Homelab`). Branding automatically applies to the sidebar, browser tab title, favicon, and split-screen sign-in page.
+- **Organization branding (`Settings → General`):** Set your organization name, upload a custom logo (PNG, JPEG, WebP, or GIF) or paste an HTTPS image link, choose a workspace brand accent color, and optionally add an environment badge (e.g. `Production`, `Staging`, `Homelab`). Branding automatically applies to the sidebar, browser tab title, favicon, and split-screen sign-in page.
 - **Account profiles (`Account`):** Edit your display name and pick an avatar from 12 built-in presets, upload a photo (auto-cropped and resized), or paste an image URL.
 - **Personal workspace preferences (`Account`):** Customize theme (`Light` / `Dark` / `System`), personal accent color override, UI density (`Default` / `Compact`), corner style (`Rounded` / `Sharp` / `Pill`), sidebar layout (`Classic` / `Floating` / `Inset`) with persisted collapse and hover-peek, pinned projects in the sidebar, default home page, timestamp format (relative vs. exact, local vs. UTC, 12h/24h), and log/terminal font size and line wrapping.
 

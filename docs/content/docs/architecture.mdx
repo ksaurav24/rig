@@ -1,0 +1,113 @@
+---
+title: Architecture & Concepts
+description: Understand how Rig coordinates Caddy, SQLite, Vault encryption, and Podman or Docker in a single Rust process.
+---
+
+Rig is designed around a strict separation between the **control plane** (`rig-server` + SQLite), the **ingress data plane** (`Caddy`), and the **container runtime** (`Podman` or `Docker`). Rig is always the single source of truth: it stores every application, database, secret, and domain in SQLite and pushes declarative state to Caddy and the container engine.
+
+## System overview
+
+```text
+  Browser Dashboard (React)  ·  CLI (rig)  ·  AI Assistant (rig mcp)
+                                  │
+                                  ▼  HTTPS (:443) / HTTP (:80) / Custom Ports
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ Caddy Reverse Proxy (rig-caddy)                                      │
+  │  • Automatic Let's Encrypt TLS, Private CA, or Tailscale (*.ts.net)  │
+  │  • Remote IP guards for Public, LAN, and Tailscale access scopes     │
+  └───────────────┬──────────────────────────────────────┬───────────────┘
+                  │ Dashboard & API                      │ App Routes
+                  ▼ 127.0.0.1:7460                       ▼ 127.0.0.1:<ephemeral_port>
+  ┌───────────────────────────────────────────┐  ┌───────────────────────┐
+  │ rig-server (Single Rust Binary)           │  │ Project Network       │
+  │  • Axum HTTP API + Embedded React UI      │  │ (rig-net-<project>)   │
+  │  • Auth, RBAC, TOTP, Sessions, API Tokens │  │  • App Containers     │
+  │  • Vault AEAD (XChaCha20-Poly1305)        │  │  • Managed Databases  │
+  │  • Deploy Worker, Metrics, Crash Watcher  │  │    (reachable by      │
+  │  • GitHub Poller & Proxy Supervisor       │  │     <db-slug>:<port>) │
+  │  • SQLite Database (WAL mode)             │  └───────────▲───────────┘
+  └───────────────┬───────────────────────────┘              │
+                  │ Runtime Trait (Bollard / Docker API)     │
+                  ▼                                          │
+  ┌──────────────────────────────────────────────────────────┴───────────┐
+  │ Container Engine: Rootless Podman (4.9+) or Docker Engine            │
+  │  • Dockerfile builds + on-demand Railpack v0.43.0 / BuildKit         │
+  │  • Named persistent volumes (rig-vol-*, rig-db-*)                    │
+  └──────────────────────────────────────────────────────────────────────┘
+```
+
+## Core architectural decisions
+
+### 1. Single Rust binary + SQLite WAL
+
+Many self-hosted PaaS platforms run a Node.js or Go control plane alongside dedicated PostgreSQL and Redis containers just to store platform metadata and job queues, consuming 500–600 MB of RAM while idle.
+
+Rig runs as one compiled Rust binary (`rig-server`, built with `opt-level = "z"` and thin LTO) using an embedded **SQLite database in WAL (Write-Ahead Logging) mode** (`crates/rig-server/src/state.rs`). The React dashboard (`web/dist`) is compiled into the binary at build time and served directly from memory with a strict `Content-Security-Policy`. Deployment queuing, metrics rollups, session tracking, login rate-limiting, and audit logging all live in SQLite tables.
+
+### 2. Declarative proxy synchronization with Caddy
+
+Rather than relying on container label watchers (like Traefik) that can silently drift or expose the container engine socket to the ingress proxy, Rig drives **Caddy** through its loopback Admin API (`http://127.0.0.1:2019`):
+
+- Whenever an app finishes deploying, stops, or changes domains, `proxy::sync` queries all running apps and domains from SQLite, constructs the complete Caddy JSON configuration (`proxy::caddy_config`), and atomically posts it to `POST /load`.
+- Caddy applies configuration updates in memory without dropping active connections.
+- A background **proxy supervisor** (`proxy::supervisor`) verifies and reconciles Caddy's configuration at startup and every 60 seconds (retrying every 5 seconds if Caddy was restarted externally).
+
+### 3. Unified `Runtime` trait for Podman and Docker
+
+Rig communicates with both Podman and Docker through a single `Runtime` trait (`crates/rig-server/src/runtime/mod.rs`) implemented over the Docker-compatible Unix socket API via `bollard`:
+
+- **Socket resolution:** If `--engine-socket` / `RIG_ENGINE_SOCKET` is not explicitly set, Rig checks `/var/run/docker.sock`, `$XDG_RUNTIME_DIR/podman/podman.sock`, `/run/user/<uid>/podman/podman.sock`, and `/run/podman/podman.sock`.
+- **Container labels for recovery:** Every resource created by Rig is tagged with `rig.managed=true`, plus `rig.app=<app_id>`, `rig.deployment=<deployment_id>`, or `rig.database=<database_id>`. Rig uses these labels to locate and clean up containers across restarts without trusting labels as configuration state.
+- **On-demand Railpack + BuildKit:** When building a Git repository without a `Dockerfile`, Rig generates a build plan with `railpack prepare` (`v0.43.0`, SHA-256 verified) and executes it via BuildKit (`ghcr.io/railwayapp/railpack-frontend:v0.43.0`, digest-pinned). On Docker, Rig uses the daemon's built-in BuildKit; on rootless Podman, Rig starts a temporary BuildKit container for the duration of the build and removes it immediately afterward so it consumes zero idle RAM. Rig verifies the engine is rootless before permitting `privileged` BuildKit containers.
+
+### 4. Loopback port binding and per-project network isolation
+
+App and database containers never bind ports on `0.0.0.0`. Every container binds an ephemeral host port on **`127.0.0.1`** only:
+
+- **External traffic** enters through Caddy on ports `80`, `443`, or a configured domain listener port (`1024–65535`), passes Caddy's host and `remote_ip` access checks (which automatically exclude local container bridge subnets such as `docker*`, `br-*`, `podman*`, and `cni*` from LAN/Tailscale access), and proxies to `127.0.0.1:<host_port>`.
+- **East-west traffic inside a project** travels over a dedicated bridge network named `rig-net-<project_id>`. Every managed database joins its project's network with a network alias equal to its slug (for example `main-db:5432`), so apps in the same project connect directly by hostname while containers in other projects cannot reach it.
+
+### 5. Stateless blue/green vs. stateful stop-then-start deploys
+
+Rig adapts its deployment strategy (`crates/rig-server/src/deploy.rs`) based on whether an app has persistent volumes attached:
+
+| App type | Strategy | Why |
+| --- | --- | --- |
+| **Stateless** (`volumes: []`) | **Zero-downtime swap:** Start new container → wait for HTTP/TCP health check (up to 90s) → atomically switch Caddy route to new loopback port → stop (`10s` grace) and remove old container. | If the build or health check fails, the existing container continues serving traffic uninterrupted. |
+| **Stateful** (`volumes: ["/data", ...]`) | **Stop-then-start:** Build/pull image first → stop old container → start new container mounted to the persistent named volumes (`rig-vol-<app>-<name>`) → verify health check → update Caddy route. | Prevents two containers from writing to the same SQLite database or filesystem volume concurrently. |
+
+## Background workers
+
+When `rig-server serve` boots, it recovers any interrupted deployments or database tasks and spawns five background tasks:
+
+| Worker | Cadence | Responsibility |
+| --- | --- | --- |
+| `deploy::worker` | Event-driven (`Notify`) | Processes `queued` deployments FIFO (one build/deploy at a time to protect small-server RAM), streams build/deploy logs to SQLite and SSE subscribers, and enforces a 30-minute deployment timeout and `< 1024 MB` free-disk guard. |
+| `metrics::sampler` | Every `30s` | Samples host CPU, RAM, disk, and physical network throughput alongside every running app and database container (`USAGE_TIMEOUT = 8s`). Stores 24 hours of samples in SQLite (pruned every 120 samples along with expired `sessions`, `pending_2fa`, and `login_attempts` rows) and triggers `disk.low` alerts when free disk drops below 5 GiB or 10%. |
+| `watch::watcher` | Every `15s` | Inspects every running app container's state, restart count, exit code, and `oom_killed` flag. Records crashes on the app (`last_crash`) and dispatches `app.crashed` or `app.down` alerts. |
+| `github::poller` | Every `RIG_POLL_INTERVAL` (default `120s`) | Runs `git ls-remote` against auto-deploy Git apps so private or firewalled servers that GitHub webhooks cannot reach still deploy automatically on new commits. |
+| `proxy::supervisor` | Every `60s` (`5s` on error) | Reconciles Caddy's live configuration against SQLite so a restarted Caddy container immediately regains all routes and TLS policies. |
+
+## Encryption and data directory layout
+
+All persistent state lives under `RIG_DATA_DIR` (`/var/lib/rig` in production, mode `0700`):
+
+- **`rig.db` (`SQLite WAL`):** Stores organizations, users, memberships, sessions, `pending_2fa` challenges, API tokens, TOTP recovery hashes, projects, apps, deployments, deployment log lines, environment variables, domains, databases, backup metadata, 24-hour metrics, alert channels, media blobs, and the audit log.
+- **`master.key` (32 random bytes, mode `0600`):** Used by `crypto::Vault` to encrypt and decrypt environment variables, database passwords, GitHub App keys, app webhook secrets, alert webhook URLs and signing secrets, and database backups using **XChaCha20-Poly1305** with a fresh 24-byte random nonce per value (`v1:<base64(nonce || ciphertext || tag)>`), plus a derived HMAC-SHA256 subkey for TOTP recovery code verification. `rig-server` refuses to start if `master.key` is readable by group or others (`mode & 0o077 != 0`), and automatically encrypts any legacy plaintext webhook or alert signing secrets on startup.
+- **`backups/<database_id>/<backup_id>.<ext>` (mode `0600`):** Native database dumps encrypted at rest in 64 KiB XChaCha20-Poly1305 chunks (`RIGBK1\0\0` header) and decrypted transparently on download or restore.
+- **`bin/railpack`:** Pinned Railpack CLI binary (`v0.43.0`), downloaded on first Dockerfile-less Git build and verified against its compiled-in SHA-256 digest.
+
+## Next steps
+
+<Cards>
+  <Card
+    href="/docs/platform/"
+    title="Platform overview"
+    description="Learn how organizations, projects, apps, databases, and domains fit together."
+  />
+  <Card
+    href="/docs/operations/server-cli-and-config/"
+    title="rig-server configuration"
+    description="Review all server flags, environment variables, and systemd sandboxing rules."
+  />
+</Cards>

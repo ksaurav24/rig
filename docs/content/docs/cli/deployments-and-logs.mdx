@@ -1,0 +1,132 @@
+---
+title: Deployments, Logs & Terminal
+description: Reference for rig deploy, rig start, rig restart, rig rollback, rig stop, rig deployments, rig logs, and rig exec.
+---
+
+Use these commands to build, deploy, roll back, inspect logs, and open interactive shells inside your running application containers.
+
+## Deploy an application (`rig deploy`)
+
+Queue a deployment for an app and stream its live build and deploy logs over resumable Server-Sent Events (SSE):
+
+```sh
+rig deploy [app] [--no-follow] [--attach] [--wait-healthy] [--timeout <duration>]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `[app]` | Linked `rig.toml` app | App name, `project/app`, or UUID. |
+| `--no-follow` | `false` | Return immediately as soon as the deployment is queued without streaming logs. |
+| `--attach` | `false` | If a deployment is already in progress (`409 Conflict`), automatically attach to its live log stream instead of prompting or failing. |
+| `--wait-healthy` | `false` | After the deploy stream finishes, poll the app status until it confirms `running` (`current_deployment_id` live). Useful for strict CI gates. |
+| `--timeout <dur>` | `30m` (server) | Abort waiting if the deployment takes longer than `<dur>` (for example `10m`, `300s`, `1h`), exiting with code `5`. |
+
+### Resumable SSE streaming and `Ctrl-C` detach
+
+- **Automatic stream recovery:** If your laptop's Wi-Fi or VPN drops mid-build, `rig` tracks the last received log sequence number (`seq`) and automatically reconnects up to 5 times (`200ms`, `500ms`, `1s`, `2s`, `4s` backoff) passing `?after=<seq>` and `Last-Event-ID: <seq>` so no log lines are missed or duplicated.
+- **Safe `Ctrl-C` detach:** Pressing `Ctrl-C` while following a deployment never cancels the server build. Instead, `rig` detaches cleanly with exit code `130` and prints:
+  ```text
+  Detached. Deployment 91caec40 continues on the server. Follow it with: rig deployments logs 019a1e2d-...
+  ```
+  To actually cancel a running build on the server, run `rig deployments cancel <id>`.
+
+## Start, restart, and stop
+
+```sh
+# Start a stopped or failed app (reuses its most recent image when available)
+rig start [app] [--no-follow] [--wait-healthy] [--timeout <duration>]
+
+# Restart a running app with a zero-downtime container swap
+rig restart [app] [--no-follow] [--wait-healthy] [--timeout <duration>]
+
+# Stop a running app and remove its container (keeps volumes, env vars, and domains)
+rig stop [app] [--yes]
+```
+
+## Roll back a deployment (`rig rollback`)
+
+Redeploy an earlier container image without rebuilding from Git:
+
+```sh
+rig rollback [app] [deployment-id] [--no-follow] [--wait-healthy] [--timeout <duration>]
+```
+
+- **Default target:** When `[deployment-id]` is omitted, `rig` automatically selects the most recent `superseded` deployment that has a built/pulled image.
+- **Short ID matching:** You can pass the full deployment UUID or **at least 4 characters** of its prefix or suffix (case-insensitive). If the short ID matches more than one deployment, `rig` refuses to guess and lists the ambiguous IDs.
+
+```sh
+# Roll back to the previous live deployment
+rig rollback production/web
+
+# Roll back to a specific deployment by 8-char suffix
+rig rollback production/web 91caec40
+```
+
+## Inspect and cancel deployments (`rig deployments`)
+
+```sh
+# List deployments for an app (newest first)
+rig deployments [app] [--limit <1-200>] [--before <deployment-id>]
+rig deployments ls [app] [--limit <1-200>] [--before <deployment-id>]
+
+# Show full metadata, commit SHA/message, image, timestamps, and error for a deployment
+rig deployments show <deployment-id>
+
+# Stream or print build/deploy logs for a specific deployment
+rig deployments logs <deployment-id> [--no-follow] [--json]
+
+# Cancel a queued, building, or deploying deployment
+rig deployments cancel <deployment-id>
+```
+
+Example `rig deployments production/web` output:
+
+```text
+ID         STATUS       TRIGGER    VERSION    CREATED
+91caec40   running      manual     a4f8d2c1   5m ago
+7b03e112   superseded   webhook    8c19e04a   2h ago
+3d91a004   failed       manual     5e01b92f   1d ago
+```
+
+## Stream runtime container logs (`rig logs`)
+
+Stream or query live `stdout`/`stderr` output from an application's running container:
+
+```sh
+rig logs [app] \
+  [-n / --tail <lines>] \
+  [--no-follow] \
+  [--since <duration-or-rfc3339>] \
+  [-t / --timestamps] \
+  [--grep <pattern>] \
+  [--json]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-n`, `--tail <N>` | `200` | Number of trailing log lines to fetch (`1–5000`). |
+| `--no-follow` | `false` | Print existing log lines and exit immediately instead of streaming live output. |
+| `--since <val>` | All retained | Show only logs since a relative duration (`30s`, `10m`, `2h`, `1d`) or an RFC 3339 timestamp (`2026-11-22T15:00:00Z`). |
+| `-t`, `--timestamps` | `false` | Prefix each log line with its timestamp. |
+| `--grep <pattern>` | None | Filter log lines by case-insensitive substring (evaluated server-side and verified client-side). |
+| `--json` | `false` | Emit one JSON `LogLine` (`{"seq":1,"ts":"...","stream":"stdout","line":"..."}`) per line (**NDJSON**). |
+
+```sh
+# Tail the last 100 lines from the past 15 minutes matching "error"
+rig logs production/api --tail 100 --since 15m --grep error --timestamps --no-follow
+
+# Pipe live NDJSON logs into jq
+rig logs production/api --json | jq -r 'select(.stream == "stderr") | .line'
+```
+
+## Interactive container shell (`rig exec`)
+
+Open an interactive raw-TTY WebSocket shell (`/bin/bash` or `/bin/sh`) inside a running app container (<RoleBadge role="Developer" /> required):
+
+```sh
+rig exec [app] [--cols <columns>] [--rows <rows>]
+```
+
+- Automatically detects your local terminal dimensions (`console::Term::stdout().size_checked()`, defaulting to `80x24`).
+- Enters local raw termios mode (`cfmakeraw`) with an RAII `Drop` guard that guarantees your local terminal state is restored when the session closes.
+- Listens for Unix `SIGWINCH` signals and dynamically resizes the remote container PTY as you resize your terminal window.

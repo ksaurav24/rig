@@ -1,0 +1,90 @@
+---
+title: Platform Overview
+description: Manage projects, applications, managed databases, custom domains, encrypted secrets, and team permissions in Rig.
+---
+
+Rig organizes every resource on your server under a clean three-level hierarchy: **Organization → Project → Applications & Managed Databases**. Every capability in the web dashboard is backed by the same HTTP API used by the `rig` CLI and `rig mcp` server.
+
+## Resource hierarchy
+
+```text
+Organization (Acme)
+ ├── Members, Roles (Viewer / Developer / Admin / Owner) & Audit Log
+ ├── Connected GitHub App & Outbound Alert Channels
+ ├── Workspace Branding (Logo, Accent Color, Environment Badge)
+ │
+ └── Project (production)  ─── Isolated Bridge Network: rig-net-<project_id>
+      ├── App (web)        ─── Source: Git or Image · Domains · Env Vars · Volumes
+      ├── App (worker)     ─── Reaches databases via private DNS (<db-slug>:<port>)
+      ├── Database (main-db) ── PostgreSQL 17 · Volume: rig-db-<id> · Native Backups
+      └── Database (cache)   ── Redis 7.4 · Volume: rig-db-<id> · RDB Snapshots
+```
+
+### Organizations
+
+An **organization** is the top-level tenant created during first-time setup. It owns:
+
+- **Team memberships and roles:** Users belong to the organization as `Viewer`, `Developer`, `Admin`, or `Owner`.
+- **GitHub App connection:** One GitHub App per organization provides read-only installation tokens for private repositories and receives push-to-deploy webhook deliveries.
+- **Alert channels:** Outbound HMAC-signed webhook endpoints notified on failed deploys, app crashes, downtime, low disk space, and failed backups.
+- **Workspace branding:** Custom organization name, uploaded or linked logo, brand accent color, and environment badge (such as `Production`, `Staging`, or `Homelab`).
+
+### Projects
+
+A **project** groups related applications and managed databases that work together (for example `production`, `staging`, or a specific client workload):
+
+- **Dedicated container network:** Every project gets its own container bridge network (`rig-net-<project_id>`).
+- **Private service discovery:** Managed databases attach to their project's network with a DNS alias matching their slug (for example `main-db:5432` or `cache:6379`). Apps in the same project connect directly by hostname without exposing database ports to the public internet.
+- **Database lifecycle on project deletion:** When deleting a project (`DELETE /api/v1/projects/{id}` or `rig projects rm`), you can either **move** its managed databases (and their data volumes and backups) to another project or **delete** them permanently.
+
+### Applications and databases
+
+Inside a project, you run two kinds of services:
+
+1. **Applications:** Container workloads deployed from a prebuilt registry image, a Git repository with a `Dockerfile`, a Git repository built automatically with **Railpack**, or a one-click [App Catalog](/docs/platform/catalog/) template.
+2. **Managed databases:** Turnkey **PostgreSQL**, **MySQL**, **MariaDB**, **Redis**, and **MongoDB** instances with persistent named volumes, audited credential reveal, loopback port tunneling, and native dump/restore backups.
+
+## Platform guides
+
+<Cards>
+  <Card
+    href="/docs/platform/apps-and-deployments/"
+    title="Apps & deployments"
+    description="Image vs. Git sources, Dockerfile and Railpack builds, health checks, volumes, rollbacks, and container terminals."
+  />
+  <Card
+    href="/docs/platform/databases-and-backups/"
+    title="Managed databases & backups"
+    description="Provision PostgreSQL, MySQL, MariaDB, Redis, and MongoDB, connect from apps or localhost, and manage dumps."
+  />
+  <Card
+    href="/docs/platform/domains-and-networking/"
+    title="Domains, TLS & access modes"
+    description="Configure Let's Encrypt, Private CA, Tailscale HTTPS, custom listener ports, and Public/LAN/Tailscale IP guards."
+  />
+  <Card
+    href="/docs/platform/environment-and-secrets/"
+    title="Environment variables & secrets"
+    description="XChaCha20-Poly1305 Vault encryption at rest, secret masking, audited reveal, and bulk .env workflows."
+  />
+  <Card
+    href="/docs/platform/git-and-webhooks/"
+    title="GitHub integration & webhooks"
+    description="GitHub App manifest flow, push-to-deploy HMAC webhooks, and automatic branch polling for private servers."
+  />
+  <Card
+    href="/docs/platform/monitoring-and-alerts/"
+    title="Monitoring, metrics & alerts"
+    description="30-second resource metrics, 15-second crash and OOM detection, disk safety thresholds, and webhook alerts."
+  />
+  <Card
+    href="/docs/platform/catalog/"
+    title="App catalog"
+    description="Deploy 17 curated self-hosted apps (Vaultwarden, n8n, Gitea, Jellyfin, Uptime Kuma, and more) in one click."
+  />
+  <Card
+    href="/docs/platform/dashboard-and-rbac/"
+    title="Dashboard, branding & RBAC"
+    description="Role permission matrix, TOTP two-factor sign-in, API tokens, audit log, branding, and operator preferences."
+  />
+</Cards>

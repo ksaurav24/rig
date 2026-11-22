@@ -1,0 +1,42 @@
+{
+  "name": "rig-docs",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "fumadocs-mdx && next dev --hostname 127.0.0.1 --port 4322",
+    "build": "fumadocs-mdx && next build --webpack",
+    "preview": "python3 -m http.server 4322 --bind 127.0.0.1 --directory out",
+    "typecheck": "fumadocs-mdx && next typegen && tsc --noEmit",
+    "postinstall": "fumadocs-mdx",
+    "validate": "node scripts/validate-docs.mjs",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/schibsted-grotesk": "^5.3.0",
+    "clsx": "2.1.1",
+    "fumadocs-core": "16.16.2",
+    "fumadocs-mdx": "15.4.6",
+    "fumadocs-ui": "16.16.2",
+    "lucide-react": "1.54.0",
+    "next": "16.4.0",
+    "next-themes": "0.4.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "shiki": "4.5.0",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@next/env": "16.4.0",
+    "@playwright/test": "1.63.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "^6.0.3",
+    "zod": "4.6.5"
+  }
+}
