@@ -14,6 +14,13 @@ DEV="$PWD/.dev"
 CADDY=rig-caddy-dev
 ADMIN=127.0.0.1:27019
 mkdir -p "$DEV"
+# ENGINE=podman scripts/dev.sh runs the dev proxy and server on rootless Podman.
+ENGINE=${ENGINE:-docker}
+ENGINE_FLAGS=()
+if [ "$ENGINE" = podman ]; then
+  docker() { command podman "$@"; }
+  ENGINE_FLAGS=(--engine-socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock")
+fi
 
 stop() {
   for name in server vite; do
@@ -36,12 +43,12 @@ if [ -z "$(docker ps -q -f "name=^${CADDY}$")" ]; then
   TS_MOUNT=(); [ -S /run/tailscale/tailscaled.sock ] && TS_MOUNT=(-v /run/tailscale:/run/tailscale)
   docker run -d --name "$CADDY" --network host "${TS_MOUNT[@]}" \
     -v "$DEV/caddy.json:/etc/caddy/caddy.json:ro" \
-    caddy:2-alpine caddy run --config /etc/caddy/caddy.json >/dev/null
+    docker.io/library/caddy:2-alpine caddy run --config /etc/caddy/caddy.json >/dev/null
 fi
 
 cargo build -q -p rig-server
 setsid nohup ./target/debug/rig-server --data-dir "$DEV/data" \
-  --caddy-admin "http://$ADMIN" --http-port 28080 --https-port 28443 \
+  --caddy-admin "http://$ADMIN" --http-port 28080 --https-port 28443 "${ENGINE_FLAGS[@]}" \
   </dev/null >"$DEV/server.out" 2>"$DEV/server.err" &
 echo $! > "$DEV/server.pid"
 

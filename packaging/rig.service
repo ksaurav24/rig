@@ -1,15 +1,15 @@
 [Unit]
 Description=Rig self-hosted deploy platform
 Documentation=file:///usr/local/share/doc/rig/README.md
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
+# The engine (Docker or Podman) is wired in by install.sh in
+# rig.service.d/engine.conf.
 
 [Service]
 Type=simple
 User=rig
 Group=rig
-SupplementaryGroups=docker
 EnvironmentFile=/etc/rig/rig.env
 ExecStart=/usr/local/bin/rig-server serve
 Restart=on-failure

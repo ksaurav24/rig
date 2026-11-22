@@ -34,7 +34,10 @@ sudo ./install.sh
 
 The installer:
 
-- installs Docker and git from the distribution's own packages, if missing;
+- picks Docker if it is already installed, otherwise rootless Podman (when the
+  distribution ships Podman 4.9+, falling back to Docker on older ones; set
+  `RIG_ENGINE=docker` or `RIG_ENGINE=podman` to choose explicitly);
+- installs the chosen engine and git from the distribution's own packages, if missing;
 - creates a `rig` system user, `/var/lib/rig` (data) and `/etc/rig/rig.env`
   (settings);
 - starts Caddy as the `rig-caddy` container on ports 80 and 443;
@@ -94,7 +97,7 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 
 | What | How |
 | --- | --- |
-| Logs | `journalctl -u rig -f` and `docker logs rig-caddy` |
+| Logs | `journalctl -u rig -f` and `docker logs rig-caddy` (or `sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman logs rig-caddy` on Podman) |
 | Restart | `sudo systemctl restart rig` |
 | Settings | `/etc/rig/rig.env`, then restart |
 | Back up | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
@@ -106,8 +109,10 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 
 - Rig's own port (7460) only listens on localhost. Caddy is the only public
   entry point.
-- The `rig` user belongs to the `docker` group, which is equivalent to root
-  on that machine. Treat dashboard owner and admin accounts accordingly.
-  Apps never get the Docker socket.
+- On Podman, `rig` runs its own rootless Podman instance in a private
+  subordinate UID/GID range, with no root-equivalent group membership.
+- On Docker, the `rig` user belongs to the `docker` group, which is equivalent
+  to root on that machine. Treat dashboard owner and admin accounts
+  accordingly. Apps never get the engine socket.
 - The systemd unit runs Rig without capabilities, with a read-only system
   and `/var/lib/rig` as the only writable path.

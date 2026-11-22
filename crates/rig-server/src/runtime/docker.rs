@@ -404,6 +404,14 @@ impl Runtime for DockerRuntime {
         if let Some(network) = &spec.network {
             self.ensure_network(network).await?;
         }
+        // Podman has no daemon to honour `unless-stopped` after a reboot; its
+        // podman-restart.service only brings back `always` containers (on
+        // Podman, the two policies behave the same otherwise). Rig removes
+        // every container it no longer wants, so `always` revives nothing stale.
+        let restart = match self.info().await {
+            Ok(i) if i.name == "podman" => RestartPolicyNameEnum::ALWAYS,
+            _ => RestartPolicyNameEnum::UNLESS_STOPPED,
+        };
         let host = HostConfig {
             network_mode: spec.network.clone(),
             binds: (!spec.volumes.is_empty()).then(|| {
@@ -421,7 +429,7 @@ impl Runtime for DockerRuntime {
                 }]),
             )])),
             restart_policy: Some(RestartPolicy {
-                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                name: Some(restart),
                 maximum_retry_count: None,
             }),
             memory: spec.memory_mb.map(|mb| i64::from(mb) * 1024 * 1024),

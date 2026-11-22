@@ -26,7 +26,7 @@ export function DiskBanner() {
         {blocked
           ? 'New deploys and backups are paused until you free up space.'
           : 'Deploys and backups pause below 1 GB. Remove old images or backups now.'}{' '}
-        <code className="font-mono text-xs">docker system prune</code> reclaims unused images.
+        <code className="font-mono text-xs">{data.engine === 'podman' ? 'podman' : 'docker'} system prune</code> reclaims unused images.
       </p>
     </div>
   )

@@ -612,8 +612,9 @@ wait_for 240 "push deployment finished" sh -c "curl -s -b '$JAR' '$API/api/v1/de
 check "push deployment is running" "$(call GET "/api/v1/deployments/$GH_DEP2" | jq -r '.status + " " + .trigger')" "running github"
 gh_commit three
 wait_for 90 "poller noticed the new commit" sh -c "curl -s -b '$JAR' '$API/api/v1/apps/$GH_APP/deployments' | jq -e '.[0].trigger == \"poll\"' >/dev/null"
-check "poller deployed the new head" "$(call GET "/api/v1/apps/$GH_APP/deployments" | jq -r '.[0].commit_sha')" "$(gh_head)"
 wait_for 240 "poll deployment finished" sh -c "curl -s -b '$JAR' '$API/api/v1/apps/$GH_APP/deployments' | jq -e '.[0].status | test(\"running|failed\")' >/dev/null"
+# The commit is recorded once the clone is done, not when the deployment is queued.
+check "poller deployed the new head" "$(call GET "/api/v1/apps/$GH_APP/deployments" | jq -r '.[0].commit_sha')" "$(gh_head)"
 check "poll deployment is running" "$(call GET "/api/v1/apps/$GH_APP/deployments" | jq -r '.[0].status')" running
 call DELETE /api/v1/github >/dev/null; check "App disconnected" "$(status)" 204
 check "hook refuses once disconnected" "$(gh_push push d-3 "$GH_EVENT")" 401
@@ -621,7 +622,8 @@ check "hook refuses once disconnected" "$(gh_push push d-3 "$GH_EVENT")" 401
 echo "== stop and clean up"
 call POST "/api/v1/apps/$APP/stop" >/dev/null; check "app stops" "$(status)" 200
 check "stopped app is not routed" "$(docker ps -q -f "label=rig.app=$APP" | wc -l)" 0
-call DELETE "/api/v1/projects/$PROJECT" >/dev/null; check "project deleted" "$(status)" 204
+call DELETE "/api/v1/projects/$PROJECT" >/dev/null; check "project with a database needs a choice" "$(status)" 409
+call DELETE "/api/v1/projects/$PROJECT?databases=delete" >/dev/null; check "project deleted" "$(status)" 204
 check "no containers left" "$(docker ps -aq -f "label=rig.app=$APP" -f "label=rig.database=$DB" | wc -l)" 0
 check "no network left" "$(docker network ls -q -f "name=^${NET}$" | wc -l)" 0
 check "audit log recorded the work" "$(call GET /api/v1/audit | jq '[.[] | select(.action == "app.deploy")] | length > 0')" true

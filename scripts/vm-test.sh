@@ -1,27 +1,46 @@
 #!/usr/bin/env bash
 # Installs a release bundle on a throwaway "VM" and deploys an app through it.
 #
-# The VM is a privileged Debian 12 container running systemd, with its own
-# Docker daemon, so install.sh runs exactly as on a real server: apt installs
-# Docker and git, the rig user and systemd unit are created, Caddy binds 80/443.
+# The VM is a privileged container running systemd, with no container engine
+# of its own, so install.sh runs exactly as on a fresh server: apt installs the
+# engine and git, the rig user and systemd unit are created, Caddy binds 80/443.
 #
 #   scripts/package.sh && scripts/vm-test.sh [dist/rig-*.tar.gz]
+#   VM_ENGINE=podman scripts/vm-test.sh   rootless Podman on Ubuntu 24.04
+#                                         (VM_BASE=debian:trixie for Podman 5)
 #   KEEP=1 scripts/vm-test.sh     leave the VM running (docker exec -it rig-vm bash)
+#   ENGINE=podman scripts/vm-test.sh      host the VM on Podman instead of Docker
 #
-# Needs docker, curl and jq, and network access for apt and image pulls.
+# Needs docker (or podman), curl and jq, and network access for apt and image pulls.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BUNDLE=${1:-$(ls -t dist/rig-*-x86_64-linux.tar.gz 2>/dev/null | head -1)}
 [ -f "$BUNDLE" ] || { echo "no bundle; run scripts/package.sh first" >&2; exit 2; }
+ENGINE=${ENGINE:-docker}
+[ "$ENGINE" = podman ] && docker() { command podman "$@"; }
+VM_ENGINE=${VM_ENGINE:-docker}
+case "$VM_ENGINE" in
+  docker) VM_BASE=${VM_BASE:-docker.io/library/debian:bookworm} ;;
+  podman) VM_BASE=${VM_BASE:-docker.io/library/ubuntu:24.04} ;;
+  *) echo "VM_ENGINE must be docker or podman" >&2; exit 2 ;;
+esac
 VM=rig-vm
-IMAGE=rig-vm-base
+IMAGE=rig-vm-base-$VM_ENGINE
 HTTP_PORT=${VM_HTTP_PORT:-18480}
 fails=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); return 1; }
 check() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got '$2', wanted '$3')"; fi; }
 vm() { docker exec "$VM" "$@"; }
+# The engine's CLI inside the VM, as Rig uses it.
+vm_engine() {
+  if [ "$VM_ENGINE" = podman ]; then
+    vm sh -c 'cd / && runuser -u rig -- env XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman "$@"' podman "$@"
+  else
+    vm docker "$@"
+  fi
+}
 wait_for() { # seconds, label, command...
   local n=$1 label=$2; shift 2
   for _ in $(seq 1 "$n"); do "$@" >/dev/null 2>&1 && { pass "$label"; return 0; }; sleep 1; done
@@ -30,14 +49,14 @@ wait_for() { # seconds, label, command...
 
 cleanup() {
   docker rm -f "$VM" >/dev/null 2>&1
-  docker volume rm -f rig-vm-docker >/dev/null 2>&1
+  docker volume rm -f rig-vm-docker rig-vm-rig >/dev/null 2>&1
 }
 cleanup
 [ -n "${KEEP:-}" ] || trap cleanup EXIT
 
-echo "== VM image (Debian 12 + systemd)"
-docker build -q -t "$IMAGE" - >/dev/null <<'EOF' || { echo "image build failed" >&2; exit 2; }
-FROM debian:bookworm
+echo "== VM image ($VM_BASE + systemd, for $VM_ENGINE)"
+docker build -q -t "$IMAGE" - >/dev/null <<EOF || { echo "image build failed" >&2; exit 2; }
+FROM $VM_BASE
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       systemd systemd-sysv dbus iproute2 curl ca-certificates jq procps >/dev/null \
  && rm -rf /var/lib/apt/lists/* \
@@ -49,7 +68,7 @@ pass "image built"
 
 docker run -d --name "$VM" --hostname rig-vm --privileged --cgroupns=private \
   --tmpfs /run --tmpfs /run/lock \
-  -v rig-vm-docker:/var/lib/docker \
+  -v rig-vm-docker:/var/lib/docker -v rig-vm-rig:/var/lib/rig \
   -p "127.0.0.1:$HTTP_PORT:80" \
   "$IMAGE" >/dev/null
 wait_for 30 "systemd booted" sh -c "docker exec $VM systemctl is-system-running 2>/dev/null | grep -Eq 'running|degraded'"
@@ -58,6 +77,7 @@ echo "== install"
 docker cp "$BUNDLE" "$VM:/root/rig.tar.gz"
 vm sh -c 'cd /root && tar xzf rig.tar.gz'
 DIR=$(vm sh -c 'ls -d /root/rig-*-x86_64-linux')
+check "no other engine in the VM" "$(vm sh -c 'command -v docker podman' | wc -l)" 0
 if vm sh -c "cd $DIR && RIG_PUBLIC_ADDRESS=localhost:$HTTP_PORT ./install.sh" > /tmp/rig-vm-install.log 2>&1; then
   pass "install.sh succeeded"
 else
@@ -70,7 +90,10 @@ check "runs as the rig user" "$(vm ps -o user= -C rig-server | head -1 | tr -d '
 check "data dir is private" "$(vm stat -c %a /var/lib/rig)" 700
 check "master key is private" "$(vm stat -c %a /var/lib/rig/master.key)" 600
 check "Rig listens on localhost only" "$(vm ss -Hltn 'sport = :7460' | awk '{ print $4 }')" 127.0.0.1:7460
-check "proxy container running" "$(vm docker inspect -f '{{.State.Running}}' rig-caddy)" true
+check "installer picked $VM_ENGINE" "$(vm sed -n 's/^RIG_ENGINE=//p' /etc/rig/rig.env)" "$VM_ENGINE"
+other=docker; [ "$VM_ENGINE" = docker ] && other=podman
+check "the other engine was not installed" "$(vm sh -c "command -v $other" | wc -l)" 0
+check "proxy container running" "$(vm_engine inspect -f '{{.State.Running}}' rig-caddy)" true
 
 echo "== setup through the proxy"
 BASE=http://localhost:$HTTP_PORT
@@ -88,6 +111,7 @@ call() { # method path [body]
 }
 check "signed in" "$(call GET /api/v1/auth/me | jq -r .user.email)" owner@example.com
 check "sessions not marked secure over plain HTTP" "$(grep -c '#HttpOnly_.*TRUE.*rig_session' "$JAR")" 0
+check "Rig reports $VM_ENGINE as its engine" "$(call GET /api/v1/system | jq -r .engine)" "$VM_ENGINE"
 
 echo "== deploy an app"
 PROJECT=$(call POST /api/v1/projects '{"name":"Demo"}' | jq -r .id)
@@ -109,9 +133,18 @@ vm systemctl restart rig
 wait_for 30 "console escape hatch restores the bare address" sh -c "curl -fsS $BASE/api/v1/setup | jq -e .setup_complete"
 
 echo "== survives a reboot of the services"
-vm systemctl restart docker
-wait_for 60 "rig back after the engine restarts" sh -c "docker exec $VM systemctl is-active rig | grep -qx active && curl -fsS $BASE/api/v1/setup"
-wait_for 60 "app served again" sh -c "curl -fsS -H 'host: hello.vm.test' $BASE/ | grep -q 'Welcome to nginx'"
+if [ "$VM_ENGINE" = docker ]; then
+  vm systemctl restart docker
+  wait_for 60 "rig back after the engine restarts" sh -c "docker exec $VM systemctl is-active rig | grep -qx active && curl -fsS $BASE/api/v1/setup"
+  wait_for 60 "app served again" sh -c "curl -fsS -H 'host: hello.vm.test' $BASE/ | grep -q 'Welcome to nginx'"
+fi
+
+echo "== survives a reboot of the VM"
+docker restart -t 30 "$VM" >/dev/null
+wait_for 60 "systemd booted again" sh -c "docker exec $VM systemctl is-system-running 2>/dev/null | grep -Eq 'running|degraded'"
+wait_for 90 "rig back after the reboot" sh -c "docker exec $VM systemctl is-active rig | grep -qx active && curl -fsS $BASE/api/v1/setup"
+wait_for 90 "app served after the reboot" sh -c "curl -fsS -H 'host: hello.vm.test' $BASE/ | grep -q 'Welcome to nginx'"
+check "still signed in after the reboot" "$(curl -s -b "$JAR" "$BASE/api/v1/auth/me" | jq -r .user.email)" owner@example.com
 
 echo "== upgrade in place"
 if vm sh -c "cd $DIR && ./install.sh" > /tmp/rig-vm-upgrade.log 2>&1; then pass "re-running install.sh upgrades"; else fail "upgrade failed"; tail -20 /tmp/rig-vm-upgrade.log; fi

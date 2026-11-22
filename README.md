@@ -21,12 +21,12 @@ Then open the printed address and enter the setup token. The full walkthrough
 
 | Command | What it does |
 | --- | --- |
-| `scripts/dev.sh` | Rig, a Caddy container and the Vite dev server, with hot reload |
+| `scripts/dev.sh` | Rig, a Caddy container and the Vite dev server, with hot reload (`ENGINE=podman` uses Podman) |
 | `scripts/e2e.sh` | End-to-end API checks against local Docker (`OFFLINE=1` skips the network, `ENGINE=podman` uses Podman) |
 | `cd web && pnpm test:ui` | Browser flows with Playwright against a built dashboard |
-| `scripts/vm-test.sh` | Installs the release bundle on a throwaway systemd "VM" and deploys an app |
+| `scripts/vm-test.sh` | Installs the release bundle on a throwaway systemd "VM" and deploys an app (`VM_ENGINE=podman` tests Podman) |
 | `cd web && pnpm gen:api` | Regenerates the TypeScript API types from the server's OpenAPI document |
 
-Requirements: Rust (stable), Node with pnpm, Docker, `curl` and `jq`.
+Requirements: Rust (stable), Node with pnpm, Docker or Podman (4.9+), `curl` and `jq`.
 Build the dashboard (`cd web && pnpm build`) before `cargo build`, because
 the server embeds `web/dist`.

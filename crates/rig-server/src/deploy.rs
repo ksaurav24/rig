@@ -307,9 +307,15 @@ pub async fn ensure_disk_space(state: &AppState) -> Result<()> {
     let dir = state.config.data_dir.clone();
     let usage = tokio::task::spawn_blocking(move || crate::metrics::sample_host(&dir)).await??;
     if let Some(free) = short_of_disk(usage.disk_total, usage.disk_used) {
+        let engine = state
+            .runtime
+            .info()
+            .await
+            .map(|e| e.name)
+            .unwrap_or_else(|_| "docker".into());
         bail!(
             "only {} MB free on the disk that holds {}. Remove old backups, or run \
-             `docker system prune` if the engine stores its images on the same disk, \
+             `{engine} system prune` if the engine stores its images on the same disk, \
              then try again",
             free / (1024 * 1024),
             state.config.data_dir.display()
