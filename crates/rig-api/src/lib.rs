@@ -3,10 +3,10 @@
 //! Timestamps are RFC 3339 UTC strings. Ids are UUIDv7 strings.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Organization role. Ordered: a higher role includes every lower one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Viewer,
@@ -36,12 +36,14 @@ impl Role {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ErrorBody {
     pub error: ErrorDetail,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ErrorDetail {
     /// Stable machine-readable code, e.g. `unauthorized`, `validation`.
     pub code: String,
@@ -51,7 +53,8 @@ pub struct ErrorDetail {
 
 // ---------------------------------------------------------------- setup/auth
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct PublicBranding {
     pub org_name: String,
     pub logo_url: Option<String>,
@@ -60,7 +63,8 @@ pub struct PublicBranding {
     pub env_color: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SetupStatus {
     /// False until the first owner account has been created.
     pub setup_complete: bool,
@@ -70,7 +74,8 @@ pub struct SetupStatus {
     pub branding: Option<PublicBranding>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SetupRequest {
     /// One-time token printed by the server on first start.
     pub token: String,
@@ -80,7 +85,8 @@ pub struct SetupRequest {
     pub org_name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
@@ -91,21 +97,24 @@ pub struct LoginRequest {
 }
 
 /// Whether the signed-in user has a second factor.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TotpStatus {
     pub enabled: bool,
     pub enabled_at: Option<String>,
     pub recovery_codes_left: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct PasswordConfirm {
     pub password: String,
 }
 
 /// A new secret to add to an authenticator app. It only takes effect once
 /// confirmed with a code.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TotpEnrollment {
     pub secret: String,
     pub otpauth_uri: String,
@@ -113,24 +122,28 @@ pub struct TotpEnrollment {
     pub qr_svg: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TotpCode {
     pub code: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TotpDisable {
     pub password: String,
     pub code: String,
 }
 
 /// Shown once; only hashes are kept.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct RecoveryCodes {
     pub codes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct User {
     pub id: String,
     pub email: String,
@@ -139,7 +152,8 @@ pub struct User {
     pub avatar_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Organization {
     pub id: String,
     pub name: String,
@@ -160,7 +174,8 @@ fn default_accent_color() -> String {
 
 /// Update organization branding and workspace metadata. Omitted fields are kept.
 /// Send an empty string for `logo_url`, `env_label`, or `env_color` to clear it.
-#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateOrganizationRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -176,7 +191,8 @@ pub struct UpdateOrganizationRequest {
 
 /// Update the signed-in user's display name or avatar. Omitted fields are kept.
 /// Send an empty string for `avatar_url` to reset to initials.
-#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateProfileRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -185,7 +201,8 @@ pub struct UpdateProfileRequest {
 }
 
 /// Upload an image (PNG, JPEG, WebP, GIF, or SVG) encoded as base64.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UploadImageRequest {
     pub content_type: String,
     pub data_base64: String,
@@ -193,7 +210,8 @@ pub struct UploadImageRequest {
 
 /// The signed-in principal. `csrf_token` must be echoed in `x-rig-csrf`
 /// on every state-changing request made with the session cookie.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Me {
     pub user: User,
     pub org: Organization,
@@ -203,7 +221,8 @@ pub struct Me {
 
 // ------------------------------------------------------------------ tokens
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ApiToken {
     pub id: String,
     pub name: String,
@@ -215,7 +234,8 @@ pub struct ApiToken {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreateApiTokenRequest {
     pub name: String,
     pub role: Role,
@@ -223,7 +243,8 @@ pub struct CreateApiTokenRequest {
     pub expires_in_days: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreatedApiToken {
     pub token: ApiToken,
     /// The full secret. Shown once and never retrievable again.
@@ -232,7 +253,8 @@ pub struct CreatedApiToken {
 
 // ------------------------------------------------------------------- audit
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AuditEntry {
     pub id: String,
     pub actor: String,
@@ -245,7 +267,8 @@ pub struct AuditEntry {
 
 // ---------------------------------------------------------------- projects
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -255,7 +278,8 @@ pub struct Project {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreateProjectRequest {
     pub name: String,
     #[serde(default)]
@@ -264,7 +288,8 @@ pub struct CreateProjectRequest {
 
 /// Rename a project or change its description. Omitted fields are kept.
 /// The slug stays as it was, so nothing addressing the project breaks.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateProjectRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -273,7 +298,8 @@ pub struct UpdateProjectRequest {
 }
 
 /// What happens to a project's databases when the project is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectDatabasesOnDelete {
     /// Move them, with their data and backups, to another project.
@@ -285,7 +311,8 @@ pub enum ProjectDatabasesOnDelete {
 // -------------------------------------------------------------------- apps
 
 /// Where an app's image comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
     /// A prebuilt image pulled from a registry.
@@ -303,7 +330,8 @@ impl SourceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum AppStatus {
     /// Never deployed.
@@ -314,7 +342,8 @@ pub enum AppStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct App {
     pub id: String,
     pub project_id: String,
@@ -349,7 +378,8 @@ pub struct App {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AppCrash {
     pub at: String,
     pub reason: String,
@@ -357,7 +387,8 @@ pub struct AppCrash {
     pub restarts: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreateAppRequest {
     pub project_id: String,
     pub name: String,
@@ -382,7 +413,8 @@ pub struct CreateAppRequest {
 
 /// Every field is optional; only the ones present are changed. Changes take
 /// effect on the next deployment.
-#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateAppRequest {
     pub name: Option<String>,
     pub image: Option<String>,
@@ -402,7 +434,8 @@ pub struct UpdateAppRequest {
 
 // ------------------------------------------------------------- deployments
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DeploymentStatus {
     Queued,
@@ -422,7 +455,8 @@ impl DeploymentStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Deployment {
     pub id: String,
     pub app_id: String,
@@ -438,7 +472,8 @@ pub struct Deployment {
     pub finished_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct LogLine {
     pub seq: i64,
     pub ts: String,
@@ -449,7 +484,8 @@ pub struct LogLine {
 
 // ---------------------------------------------------------------- env vars
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct EnvVar {
     pub key: String,
     /// `None` for secrets; use the reveal endpoint to read one.
@@ -458,14 +494,16 @@ pub struct EnvVar {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SetEnvVarRequest {
     pub key: String,
     pub value: String,
     pub is_secret: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct RevealedEnvVar {
     pub key: String,
     pub value: String,
@@ -474,7 +512,8 @@ pub struct RevealedEnvVar {
 // ----------------------------------------------------------------- domains
 
 /// How a domain is served.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
     /// Public HTTPS with an automatically issued certificate.
@@ -499,7 +538,8 @@ impl TlsMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Domain {
     pub id: String,
     pub host: String,
@@ -511,7 +551,8 @@ pub struct Domain {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AddDomainRequest {
     pub host: String,
     pub tls_mode: TlsMode,
@@ -523,7 +564,8 @@ pub struct AddDomainRequest {
 
 /// Who may reach a domain or the dashboard, judged by the connecting
 /// address.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Access {
     /// Anyone.
@@ -547,7 +589,8 @@ impl Access {
 }
 
 /// Where this machine can be reached, to help pick a domain.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct NetworkInfo {
     /// Private addresses of this machine's interfaces.
     pub lan_addresses: Vec<String>,
@@ -561,13 +604,15 @@ pub struct NetworkInfo {
     pub dashboard_domain: Option<DashboardDomain>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct DashboardDomain {
     pub host: String,
     pub tls_mode: TlsMode,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct DashboardDomainRequest {
     /// The hostname, or null to serve the dashboard on the machine's
     /// addresses over plain HTTP again.
@@ -576,21 +621,24 @@ pub struct DashboardDomainRequest {
     pub tls_mode: Option<TlsMode>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TailscaleInfo {
     /// The machine's MagicDNS name, e.g. `box.tail1234.ts.net`.
     pub dns_name: Option<String>,
     pub addresses: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct DashboardAccessRequest {
     pub access: Access,
 }
 
 // ------------------------------------------------------------------ system
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SystemInfo {
     pub version: String,
     /// `docker` or `podman`, when the engine answers.
@@ -610,7 +658,8 @@ pub struct SystemInfo {
 
 // ---------------------------------------------------------------- databases
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseEngine {
     Postgres,
@@ -632,7 +681,8 @@ impl DatabaseEngine {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseStatus {
     /// The image is being pulled or the server is starting.
@@ -644,7 +694,8 @@ pub enum DatabaseStatus {
 }
 
 /// A managed database. Its password is only returned by the reveal endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Database {
     pub id: String,
     pub project_id: String,
@@ -666,7 +717,8 @@ pub struct Database {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreateDatabaseRequest {
     pub project_id: String,
     pub name: String,
@@ -677,7 +729,8 @@ pub struct CreateDatabaseRequest {
 }
 
 /// What the dashboard offers when creating a database.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct DatabaseEngineInfo {
     pub engine: DatabaseEngine,
     pub label: String,
@@ -687,14 +740,16 @@ pub struct DatabaseEngineInfo {
 }
 
 /// Credentials for a database, as returned by the audited reveal endpoint.
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct DatabaseCredentials {
     pub password: String,
     /// Connection URL for apps in the same project.
     pub url: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum BackupStatus {
     Running,
@@ -703,7 +758,8 @@ pub enum BackupStatus {
 }
 
 /// A dump of one managed database, kept on the server's disk.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Backup {
     pub id: String,
     pub database_id: String,
@@ -719,7 +775,8 @@ pub struct Backup {
 
 // ----------------------------------------------------------------- members
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct Member {
     pub user_id: String,
     pub name: String,
@@ -731,7 +788,8 @@ pub struct Member {
     pub last_login_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AddMemberRequest {
     pub name: String,
     pub email: String,
@@ -739,19 +797,22 @@ pub struct AddMemberRequest {
 }
 
 /// A member together with a temporary password, shown once.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct MemberWithPassword {
     pub member: Member,
     /// Hand this to the person; they should change it after signing in.
     pub temporary_password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateMemberRequest {
     pub role: Role,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
@@ -760,7 +821,8 @@ pub struct ChangePasswordRequest {
 // ----------------------------------------------------------------- metrics
 
 /// How far back a metric series reaches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub enum MetricRange {
     #[default]
     #[serde(rename = "1h")]
@@ -771,7 +833,8 @@ pub enum MetricRange {
     Day,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct MetricPoint {
     /// Start of the interval, in Unix seconds.
     pub ts: i64,
@@ -785,7 +848,8 @@ pub struct MetricPoint {
     pub net_tx_bps: Option<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct MetricSeries {
     pub range: MetricRange,
     /// Seconds each point covers.
@@ -797,7 +861,8 @@ pub struct MetricSeries {
 }
 
 /// The organization's GitHub App, when one is connected.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubStatus {
     pub app: Option<GithubAppInfo>,
     /// Seconds between branch polls for auto-deploy apps; 0 when polling is off.
@@ -806,7 +871,8 @@ pub struct GithubStatus {
     pub webhook_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubAppInfo {
     pub name: String,
     pub slug: String,
@@ -819,7 +885,8 @@ pub struct GithubAppInfo {
 }
 
 /// Start creating a GitHub App through GitHub's manifest flow.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubManifestRequest {
     /// Create the App under this GitHub organization instead of your account.
     #[serde(default)]
@@ -827,7 +894,8 @@ pub struct GithubManifestRequest {
 }
 
 /// POST `manifest` as a form field to `post_url` from the browser.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubManifest {
     pub post_url: String,
     /// The App manifest, as JSON text.
@@ -835,14 +903,16 @@ pub struct GithubManifest {
 }
 
 /// What GitHub sends back to the redirect URL after the App is created.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubManifestComplete {
     pub code: String,
     pub state: String,
 }
 
 /// A repository the GitHub App is installed on.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubRepo {
     pub full_name: String,
     pub clone_url: String,
@@ -851,7 +921,8 @@ pub struct GithubRepo {
 }
 
 /// A branch of a repository the GitHub App can read.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubBranch {
     pub name: String,
     /// Whether this is the repository's default branch.
@@ -860,7 +931,8 @@ pub struct GithubBranch {
 }
 
 /// Outcome of a GitHub App push delivery.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct GithubPushResult {
     /// Deployments queued, one per matching auto-deploy app.
     pub deployment_ids: Vec<String>,
@@ -869,7 +941,8 @@ pub struct GithubPushResult {
 }
 
 /// Outcome of a push-to-deploy webhook.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct WebhookResult {
     /// The queued deployment, when one was started.
     pub deployment_id: Option<String>,
@@ -878,7 +951,8 @@ pub struct WebhookResult {
 }
 
 /// Where to send push-to-deploy webhooks for an app, and the secret that signs them.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AppWebhook {
     /// Path on this server; prefix it with the dashboard's address.
     pub path: String,
@@ -886,7 +960,8 @@ pub struct AppWebhook {
 }
 
 /// Something Rig can alert about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AlertEvent {
     DeployFailed,
@@ -907,7 +982,8 @@ impl AlertEvent {
 }
 
 /// A URL Rig posts alerts to. The URL itself is never returned, only its host.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AlertChannel {
     pub id: String,
     pub name: String,
@@ -920,14 +996,16 @@ pub struct AlertChannel {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreateAlertChannelRequest {
     pub name: String,
     pub url: String,
     pub events: Vec<AlertEvent>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct UpdateAlertChannelRequest {
     pub name: Option<String>,
     pub events: Option<Vec<AlertEvent>>,
@@ -935,13 +1013,15 @@ pub struct UpdateAlertChannelRequest {
 }
 
 /// A new channel, with the secret that signs its requests. Shown once.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct CreatedAlertChannel {
     pub channel: AlertChannel,
     pub signing_secret: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AlertTestResult {
     pub ok: bool,
     pub error: Option<String>,

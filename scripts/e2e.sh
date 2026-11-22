@@ -78,7 +78,7 @@ db_status_is() { [ "$(call GET "/api/v1/databases/$1" | jq -r .status)" = "$2" ]
 via_proxy() { curl -s -o /dev/null -w '%{http_code}' -H "host: $1" "http://127.0.0.1:$HTTP/"; }
 
 echo "== build and start"
-cargo build -q -p rig-server || exit 2
+cargo build -q -p rig-server -p rig-cli || exit 2
 docker rm -f "$CADDY" >/dev/null 2>&1
 printf '{"admin":{"listen":"%s"}}' "$ADMIN" >"$WORK/caddy.json"
 TS_MOUNT=(); [ -S /run/tailscale/tailscaled.sock ] && TS_MOUNT=(-v /run/tailscale:/run/tailscale)
@@ -618,6 +618,35 @@ check "poller deployed the new head" "$(call GET "/api/v1/apps/$GH_APP/deploymen
 check "poll deployment is running" "$(call GET "/api/v1/apps/$GH_APP/deployments" | jq -r '.[0].status')" running
 call DELETE /api/v1/github >/dev/null; check "App disconnected" "$(status)" 204
 check "hook refuses once disconnected" "$(gh_push push d-3 "$GH_EVENT")" 401
+
+echo "== cli and mcp"
+CLI_BIN=./target/debug/rig
+CLI_CFG="$WORK/cli-config.toml"
+CLI_TOK_JSON=$(call POST /api/v1/tokens '{"name":"e2e-cli","role":"owner"}')
+check "CLI API token created" "$(status)" 200
+CLI_TOK_ID=$(jq -r .token.id <<<"$CLI_TOK_JSON")
+CLI_TOK=$(jq -r .secret <<<"$CLI_TOK_JSON")
+RIG_CONFIG="$CLI_CFG" RIG_TOKEN="$CLI_TOK" "$CLI_BIN" --json login "$API" --name e2e >"$WORK/cli-out.json"
+check "cli login succeeds" "$(jq -r .context "$WORK/cli-out.json")" e2e
+check "cli config is private" "$(stat -c %a "$CLI_CFG")" 600
+check "cli status returns org" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json status | jq -r .me.org.name)" Acme
+check "cli projects lists Shop" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json projects | jq -r '[.[].name] | index("Shop") != null')" true
+check "cli apps --project filters server-side" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json apps --project Shop | jq -r '[.[].name] | index("Web") != null')" true
+check "cli apps show works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json apps show Shop/Web | jq -r .id)" "$APP"
+check "cli deployments show works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json deployments show "$D1" | jq -r .id)" "$D1"
+check "cli deployments logs emits NDJSON" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json deployments logs "$D1" | head -1 | jq -r 'has("line")')" true
+check "cli env set works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env set Shop/Web CLI_VAR=hello --plain | jq -r '.set[0].key')" CLI_VAR
+check "cli env get reveals value" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env get Shop/Web CLI_VAR | jq -r .value)" hello
+check "cli env rm deletes key" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env rm Shop/Web CLI_VAR | jq -r .deleted)" CLI_VAR
+MCP_OUT=$(printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"system_status","arguments":{}}}' \
+  | RIG_CONFIG="$CLI_CFG" "$CLI_BIN" mcp)
+check "cli mcp initialize succeeds" "$(printf '%s\n' "$MCP_OUT" | sed -n '1p' | jq -r .result.serverInfo.name)" rig
+check "cli mcp system_status returns structuredContent" "$(printf '%s\n' "$MCP_OUT" | sed -n '2p' | jq -r .result.structuredContent.organization.name)" Acme
+check "cli logout removes context" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json logout e2e | jq -r .removed)" e2e
+call DELETE "/api/v1/tokens/$CLI_TOK_ID" >/dev/null
+check "CLI API token revoked" "$(status)" 204
 
 echo "== stop and clean up"
 call POST "/api/v1/apps/$APP/stop" >/dev/null; check "app stops" "$(status)" 200
