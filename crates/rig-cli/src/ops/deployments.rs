@@ -4,20 +4,42 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use rig_api::{App, Deployment, DeploymentStatus, LogLine};
+use rig_api::{App, Deployment, DeploymentEndEvent, DeploymentStatus, LogLine};
 
-use crate::api::Client;
+use crate::api::{AppLogQuery, Client};
 use crate::error::{CliError, CliResult};
 use crate::output::short;
 
 /// Minimum prefix/suffix length when matching a deployment id by partial string.
 pub const MIN_DEPLOYMENT_ID_CHARS: usize = 4;
 
+/// Final outcome parsed from a deployment SSE `end` event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeploymentOutcome {
+    pub status: Option<String>,
+    pub domains: Vec<String>,
+}
+
+/// Parses an SSE `end` event payload, accepting either JSON [`DeploymentEndEvent`]
+/// or a plain status string (from older servers).
+pub fn parse_end_event(data: &str) -> DeploymentOutcome {
+    let trimmed = data.trim();
+    if trimmed.starts_with('{')
+        && let Ok(ev) = serde_json::from_str::<DeploymentEndEvent>(trimmed)
+    {
+        return DeploymentOutcome {
+            status: Some(ev.status),
+            domains: ev.domains,
+        };
+    }
+    let plain = trimmed.trim_matches('"');
+    DeploymentOutcome {
+        status: (!plain.is_empty()).then(|| plain.to_string()),
+        domains: Vec::new(),
+    }
+}
+
 /// Picks a deployment to roll back to from an app's deployment history.
-///
-/// - `None`: the most recent `Superseded` deployment that still has an `image_ref`.
-/// - `Some(wanted)`: exact id match wins immediately; otherwise requires at least
-///   4 characters and matches a unique prefix or suffix (case-insensitive).
 pub fn resolve_rollback_target<'a>(
     app_name: &str,
     deployments: &'a [Deployment],
@@ -78,37 +100,32 @@ pub async fn enqueue_rollback(
 }
 
 /// Follows a deployment's resumable SSE log stream until `end` arrives.
-///
-/// Calls `on_log` with the raw JSON data payload of each `log` event and
-/// returns the final status reported in the `end` event (if one arrived).
 pub async fn follow_deployment(
     api: &Client,
     deployment_id: &str,
     mut on_log: impl FnMut(&str),
-) -> CliResult<Option<String>> {
-    let mut final_status = None;
+) -> CliResult<DeploymentOutcome> {
+    let mut outcome = DeploymentOutcome::default();
     api.deployment_logs_stream(deployment_id, |ev| match ev.event.as_str() {
         "log" => on_log(&ev.data),
-        "end" => final_status = Some(ev.data.trim_matches('"').to_string()),
+        "end" => outcome = parse_end_event(&ev.data),
         _ => {}
     })
     .await?;
-    Ok(final_status)
+    Ok(outcome)
 }
 
 /// Collects up to the last `tail` log lines of a deployment (resuming across drops)
 /// until `end` arrives or `limit` elapses.
-///
-/// Running out of time is not an error: returns the lines seen so far and `None` status.
 pub async fn collect_deployment_logs(
     api: &Client,
     deployment_id: &str,
     tail: usize,
     limit: Duration,
     mut on_progress: impl FnMut(usize),
-) -> CliResult<(Vec<String>, Option<String>)> {
+) -> CliResult<(Vec<String>, DeploymentOutcome)> {
     let mut lines: VecDeque<String> = VecDeque::with_capacity(tail.min(256));
-    let mut status = None;
+    let mut outcome = DeploymentOutcome::default();
     let mut total_seen: usize = 0;
 
     let stream = api.deployment_logs_stream(deployment_id, |ev| match ev.event.as_str() {
@@ -123,14 +140,58 @@ pub async fn collect_deployment_logs(
             total_seen += 1;
             on_progress(total_seen);
         }
-        "end" => status = Some(ev.data.trim_matches('"').to_string()),
+        "end" => outcome = parse_end_event(&ev.data),
         _ => {}
     });
 
     if let Ok(result) = tokio::time::timeout(limit, stream).await {
         result?;
     }
-    Ok((lines.into(), status))
+    Ok((lines.into(), outcome))
+}
+
+/// Collects runtime container logs (non-following snapshot) for an app.
+pub async fn collect_app_logs(
+    api: &Client,
+    app_id: &str,
+    tail: u32,
+    since: Option<String>,
+    grep: Option<String>,
+    limit: Duration,
+) -> CliResult<Vec<String>> {
+    let cap = tail.clamp(1, 2000) as usize;
+    let mut lines: VecDeque<String> = VecDeque::with_capacity(cap.min(256));
+    let grep_lower = grep.as_deref().map(str::to_lowercase);
+    let q = AppLogQuery {
+        tail: Some(tail),
+        follow: Some(false),
+        since,
+        timestamps: Some(true),
+        grep,
+    };
+
+    let stream = api.app_logs_stream(app_id, &q, |ev| {
+        if ev.event != "log" {
+            return;
+        }
+        let line = serde_json::from_str::<LogLine>(&ev.data)
+            .map(|l| l.line)
+            .unwrap_or(ev.data);
+        if let Some(needle) = &grep_lower
+            && !line.to_lowercase().contains(needle)
+        {
+            return;
+        }
+        if lines.len() == cap {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    });
+
+    if let Ok(result) = tokio::time::timeout(limit, stream).await {
+        result?;
+    }
+    Ok(lines.into())
 }
 
 #[cfg(test)]
@@ -154,6 +215,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_plain_and_json_end_events() {
+        let plain = parse_end_event("running");
+        assert_eq!(plain.status.as_deref(), Some("running"));
+        assert!(plain.domains.is_empty());
+
+        let rich = parse_end_event(r#"{"status":"running","domains":["a.example.com"]}"#);
+        assert_eq!(rich.status.as_deref(), Some("running"));
+        assert_eq!(rich.domains, vec!["a.example.com"]);
+    }
+
+    #[test]
     fn rollback_resolution_is_strict_and_unambiguous() {
         let deps = vec![
             dep("01940000-0000-7000-8000-0000aaaa1111", DeploymentStatus::Running, Some("img:3")),
@@ -161,36 +233,30 @@ mod tests {
             dep("01940000-0000-7000-8000-0000cccc2222", DeploymentStatus::Superseded, Some("img:1")),
         ];
 
-        // Default picks newest Superseded with image.
         assert_eq!(
             resolve_rollback_target("web", &deps, None).unwrap().id,
             "01940000-0000-7000-8000-0000bbbb1111"
         );
-        // Exact match works.
         assert_eq!(
             resolve_rollback_target("web", &deps, Some("01940000-0000-7000-8000-0000cccc2222"))
                 .unwrap()
                 .id,
             "01940000-0000-7000-8000-0000cccc2222"
         );
-        // Unique suffix >= 4 chars works.
         assert_eq!(
             resolve_rollback_target("web", &deps, Some("cccc2222"))
                 .unwrap()
                 .id,
             "01940000-0000-7000-8000-0000cccc2222"
         );
-        // Too short (< 4 chars) is rejected.
         let err = resolve_rollback_target("web", &deps, Some("1")).unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(err.to_string().contains("at least 4"));
 
-        // Ambiguous suffix (both end in 1111) is rejected instead of picking first silently.
         let err = resolve_rollback_target("web", &deps, Some("1111")).unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(err.to_string().contains("ambiguous"));
 
-        // Unknown id returns NotFound (exit code 4).
         let err = resolve_rollback_target("web", &deps, Some("deadbeef")).unwrap_err();
         assert_eq!(err.exit_code(), 4);
     }

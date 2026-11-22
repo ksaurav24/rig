@@ -552,23 +552,33 @@ impl Runtime for DockerRuntime {
         }
     }
 
-    fn logs(&self, id: &str, tail: u32, follow: bool) -> LogStream {
-        let opts = LogsOptionsBuilder::default()
+    fn logs_with(&self, id: &str, req: super::LogOptions) -> LogStream {
+        let mut builder = LogsOptionsBuilder::default()
             .stdout(true)
             .stderr(true)
-            .follow(follow)
-            .tail(&tail.to_string())
-            .build();
+            .follow(req.follow)
+            .timestamps(req.timestamps)
+            .tail(&req.tail.to_string());
+        if let Some(since) = req.since {
+            builder = builder.since(i32::try_from(since).unwrap_or(i32::MAX));
+        }
+        let opts = builder.build();
+        let want_ts = req.timestamps;
         // Following has no natural end, so it must not use the short timeout.
-        let client = if follow { &self.long } else { &self.api };
-        let stream = client.logs(id, Some(opts)).map(|item| {
+        let client = if req.follow { &self.long } else { &self.api };
+        let stream = client.logs(id, Some(opts)).map(move |item| {
             let out = item.context("reading container logs")?;
             let stream = match out {
                 LogOutput::StdErr { .. } => "stderr",
                 _ => "stdout",
             };
-            let line = String::from_utf8_lossy(out.as_ref()).trim_end().to_string();
-            Ok(LogMsg { stream, line })
+            let raw = String::from_utf8_lossy(out.as_ref()).trim_end().to_string();
+            let (ts, line) = if want_ts {
+                split_log_timestamp(&raw)
+            } else {
+                (None, raw)
+            };
+            Ok(LogMsg { stream, line, ts })
         });
         Box::pin(stream)
     }
@@ -906,6 +916,17 @@ fn pack_context(dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
+/// Splits Docker/Podman's leading RFC 3339 timestamp (`2026-...Z message`) into
+/// `(Some(ts), message)` when present.
+fn split_log_timestamp(raw: &str) -> (Option<String>, String) {
+    if let Some((head, rest)) = raw.split_once(' ')
+        && chrono::DateTime::parse_from_rfc3339(head).is_ok()
+    {
+        return (Some(head.to_string()), rest.to_string());
+    }
+    (None, raw.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,7 +1000,18 @@ pub fn qualify_image(image: &str) -> String {
 
 #[cfg(test)]
 mod qualify_tests {
-    use super::qualify_image;
+    use super::{qualify_image, split_log_timestamp};
+
+    #[test]
+    fn parses_container_log_timestamps() {
+        let (ts, msg) = split_log_timestamp("2026-11-22T10:00:00.123456Z hello world");
+        assert_eq!(ts.as_deref(), Some("2026-11-22T10:00:00.123456Z"));
+        assert_eq!(msg, "hello world");
+
+        let (ts, msg) = split_log_timestamp("plain line without timestamp");
+        assert!(ts.is_none());
+        assert_eq!(msg, "plain line without timestamp");
+    }
 
     #[test]
     fn short_names_get_the_docker_hub_registry() {

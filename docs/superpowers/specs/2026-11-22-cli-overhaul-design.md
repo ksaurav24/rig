@@ -1,7 +1,7 @@
 # Rig CLI Modularization, CLI↔MCP Deduplication, Feature Coverage & E2E Tests
 
 Date: 2026-11-22
-Status: Phase 1 Implemented (Phase 2 Planned)
+Status: Phase 1 & Phase 2 Implemented
 
 ---
 

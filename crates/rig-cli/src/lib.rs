@@ -7,6 +7,7 @@ pub mod api;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub mod link;
 pub mod mcp;
 pub mod ops;
 pub mod output;
@@ -18,6 +19,7 @@ use commands::Command;
 use config::{Config, ResolveOptions};
 use error::CliResult;
 use mcp::ClientSource;
+use output::{OutputFormat, OutputOpts};
 
 #[derive(Parser)]
 #[command(
@@ -35,21 +37,44 @@ pub struct Cli {
     /// Allow plain http:// to a server that is not on this machine.
     #[arg(long, global = true, env = "RIG_INSECURE")]
     pub insecure: bool,
-    /// Print JSON instead of tables.
+    /// Print JSON instead of tables (shorthand for `-o json`).
     #[arg(long, global = true)]
     pub json: bool,
+    /// Output format: table, json, yaml, or name.
+    #[arg(short = 'o', long = "output", global = true, value_enum)]
+    pub output: Option<OutputFormat>,
     /// Do not truncate table columns to terminal width.
     #[arg(long, global = true)]
     pub wide: bool,
+    /// Skip interactive confirmation prompts for destructive operations.
+    #[arg(short = 'y', long = "yes", global = true)]
+    pub yes: bool,
+    /// Log HTTP requests and timing to stderr.
+    #[arg(short = 'v', long = "verbose", alias = "debug", global = true)]
+    pub verbose: bool,
     #[command(subcommand)]
     pub command: Command,
 }
 
-pub async fn run(cli: Cli) -> CliResult<()> {
-    let json = cli.json;
-    let wide = cli.wide;
+impl Cli {
+    pub fn output_opts(&self) -> OutputOpts {
+        let format = if self.json {
+            OutputFormat::Json
+        } else {
+            self.output.unwrap_or(OutputFormat::Table)
+        };
+        OutputOpts {
+            format,
+            wide: self.wide,
+            yes: self.yes,
+        }
+    }
+}
 
-    // Commands that do not require an existing signed-in context.
+pub async fn run(cli: Cli) -> CliResult<()> {
+    let out = cli.output_opts();
+    let verbose = cli.verbose;
+
     match cli.command {
         Command::Completions(args) => {
             commands::completions::run(args);
@@ -67,15 +92,15 @@ pub async fn run(cli: Cli) -> CliResult<()> {
         }
         Command::Login(args) => {
             let mut config = Config::load()?;
-            commands::auth::run_login(&mut config, args, cli.insecure, json).await
+            commands::auth::run_login(&mut config, args, cli.insecure, verbose, out).await
         }
         Command::Logout(args) => {
             let mut config = Config::load()?;
-            commands::auth::run_logout(&mut config, args, cli.context.as_deref(), json)
+            commands::auth::run_logout(&mut config, args, cli.context.as_deref(), verbose, out).await
         }
         Command::Context(args) => {
             let mut config = Config::load()?;
-            commands::context::run(&mut config, args, json, wide)
+            commands::context::run(&mut config, args, out)
         }
         command => {
             let config = Config::load()?;
@@ -86,20 +111,36 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                 token: env_token.as_deref(),
                 insecure: cli.insecure,
             })?;
-            let api = Client::new(ctx)?;
+            let api = Client::with_options(ctx, verbose, !out.is_structured())?;
             match command {
-                Command::Status => commands::status::run(&api, json).await,
-                Command::Projects(args) => commands::projects::run(&api, args, json, wide).await,
-                Command::Apps(args) => commands::apps::run(&api, args, json, wide).await,
-                Command::Deploy(args) => commands::deploy::run_deploy(&api, args, json).await,
-                Command::Deployments(args) => {
-                    commands::deployments::run(&api, args, json, wide).await
+                Command::Status => commands::status::run(&api, out).await,
+                Command::Projects(args) => commands::projects::run(&api, args, out).await,
+                Command::Apps(args) => commands::apps::run(&api, args, out).await,
+                Command::Deploy(args) => commands::deploy::run_deploy(&api, args, out).await,
+                Command::Start(args) => commands::deploy::run_start(&api, args, out).await,
+                Command::Restart(args) => commands::deploy::run_restart(&api, args, out).await,
+                Command::Rollback(args) => commands::deploy::run_rollback(&api, args, out).await,
+                Command::Stop(args) => commands::deploy::run_stop(&api, args, out).await,
+                Command::Deployments(args) => commands::deployments::run(&api, args, out).await,
+                Command::Logs(args) => commands::logs::run(&api, args, out).await,
+                Command::Exec(args) => commands::exec::run(&api, args).await,
+                Command::Env(args) => commands::env::run(&api, args, out).await,
+                Command::Domains(args) => commands::domains::run(&api, args, out).await,
+                Command::Db(args) => commands::databases::run(&api, args, out).await,
+                Command::Backup(args) => commands::backup::run(&api, args, out).await,
+                Command::Metrics(args) => commands::metrics::run_metrics(&api, args, out).await,
+                Command::Top(args) => commands::metrics::run_top(&api, args, out).await,
+                Command::Tokens(args) => commands::tokens::run(&api, args, out).await,
+                Command::Members(args) => commands::members::run(&api, args, out).await,
+                Command::Audit(args) => commands::audit::run(&api, args, out).await,
+                Command::Alerts(args) => commands::alerts::run(&api, args, out).await,
+                Command::Webhook(args) => commands::webhook::run(&api, args, out).await,
+                Command::Github(args) => commands::github::run(&api, args, out).await,
+                Command::Link(args) => {
+                    let active_context = cli.context.or(config.current);
+                    commands::link::run(&api, args, active_context, out).await
                 }
-                Command::Rollback(args) => commands::deploy::run_rollback(&api, args, json).await,
-                Command::Stop(args) => commands::deploy::run_stop(&api, args, json).await,
-                Command::Logs(args) => commands::logs::run(&api, args, json).await,
-                Command::Env(args) => commands::env::run(&api, args, json, wide).await,
-                Command::Databases => commands::databases::run(&api, json, wide).await,
+                Command::Open(args) => commands::open::run(&api, args, out).await,
                 Command::Login(_)
                 | Command::Logout(_)
                 | Command::Context(_)

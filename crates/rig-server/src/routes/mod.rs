@@ -85,6 +85,10 @@ pub fn app(state: AppState) -> Router {
             HeaderValue::from_static("DENY"),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("x-rig-version"),
+            HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::REFERRER_POLICY,
             HeaderValue::from_static("same-origin"),
         ))

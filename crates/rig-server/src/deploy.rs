@@ -45,6 +45,8 @@ pub struct Deployer {
     /// Bumped whenever log lines or a deployment status are written.
     activity: watch::Sender<u64>,
     http: reqwest::Client,
+    /// Active deployment cancellation handles keyed by deployment id.
+    cancels: std::sync::Mutex<HashMap<String, watch::Sender<bool>>>,
 }
 
 impl Deployer {
@@ -57,6 +59,7 @@ impl Deployer {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .context("building health check client")?,
+            cancels: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -65,8 +68,32 @@ impl Deployer {
         self.activity.subscribe()
     }
 
-    fn touch(&self) {
+    pub fn touch(&self) {
         self.activity.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    fn register_cancel(&self, deployment_id: &str) -> watch::Receiver<bool> {
+        let (tx, rx) = watch::channel(false);
+        self.cancels
+            .lock()
+            .expect("cancel lock")
+            .insert(deployment_id.to_string(), tx);
+        rx
+    }
+
+    fn unregister_cancel(&self, deployment_id: &str) {
+        self.cancels.lock().expect("cancel lock").remove(deployment_id);
+    }
+
+    /// Signals a currently running deployment to cancel. Returns `true` if a
+    /// live worker handle was signalled.
+    pub fn signal_cancel(&self, deployment_id: &str) -> bool {
+        if let Some(tx) = self.cancels.lock().expect("cancel lock").get(deployment_id) {
+            let _ = tx.send(true);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -212,16 +239,46 @@ async fn run(state: &AppState, deployment_id: &str) {
     let (tx, rx) = mpsc::channel::<LogMsg>(1024);
     let log = LogSink::new(tx);
     let writer = tokio::spawn(write_logs(state.clone(), deployment_id.to_string(), rx));
+    let mut cancel_rx = state.deploys.register_cancel(deployment_id);
 
-    let outcome =
-        match tokio::time::timeout(DEPLOY_TIMEOUT, pipeline(state, deployment_id, &log)).await {
-            Ok(r) => r,
-            Err(_) => Err(anyhow!(
-                "the deployment took longer than 30 minutes and was stopped"
-            )),
-        };
+    let cancelled;
+    let outcome = tokio::select! {
+        res = tokio::time::timeout(DEPLOY_TIMEOUT, pipeline(state, deployment_id, &log)) => {
+            cancelled = false;
+            match res {
+                Ok(r) => r,
+                Err(_) => Err(anyhow!(
+                    "the deployment took longer than 30 minutes and was stopped"
+                )),
+            }
+        }
+        _ = cancel_rx.wait_for(|&c| c) => {
+            cancelled = true;
+            Ok(())
+        }
+    };
+    state.deploys.unregister_cancel(deployment_id);
 
-    if let Err(e) = &outcome {
+    if cancelled {
+        log.line("deploy", "Deployment cancelled").await;
+        let _ = sqlx::query(
+            "UPDATE deployments SET status = 'cancelled', error = 'Cancelled by user', finished_at = ?
+              WHERE id = ? AND status IN ('queued', 'building', 'deploying')",
+        )
+        .bind(now())
+        .bind(deployment_id)
+        .execute(&state.db)
+        .await;
+        let _ = sqlx::query(
+            "UPDATE apps SET updated_at = ?,
+                    status = CASE WHEN current_deployment_id IS NULL THEN 'idle' ELSE 'running' END
+              WHERE id = (SELECT app_id FROM deployments WHERE id = ?) AND status = 'deploying'",
+        )
+        .bind(now())
+        .bind(deployment_id)
+        .execute(&state.db)
+        .await;
+    } else if let Err(e) = &outcome {
         // The alternate form includes the cause chain, which is what tells
         // the user whether the image, the build or the container failed.
         let message = format!("{e:#}");

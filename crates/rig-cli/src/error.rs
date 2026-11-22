@@ -23,6 +23,8 @@ pub enum CliError {
     #[error("{0}")]
     Network(String),
     #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     DeployFailed(String),
     #[error("{0}")]
     Detached(String),
@@ -41,6 +43,10 @@ impl CliError {
 
     pub fn network(msg: impl Into<String>) -> Self {
         Self::Network(msg.into())
+    }
+
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
     }
 
     pub fn deploy_failed(msg: impl Into<String>) -> Self {
@@ -62,7 +68,7 @@ impl CliError {
             Self::Network(_) => 5,
             Self::DeployFailed(_) => 10,
             Self::Detached(_) => 130,
-            Self::Other(_) => 1,
+            Self::Conflict(_) | Self::Other(_) => 1,
         }
     }
 

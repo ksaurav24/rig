@@ -672,7 +672,8 @@ async fn start_mock_server() -> (String, Arc<MockState>) {
 
 fn rig_cmd(cfg: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rig"));
-    cmd.env("RIG_CONFIG", cfg)
+    cmd.stdin(Stdio::null())
+        .env("RIG_CONFIG", cfg)
         .env_remove("RIG_CONTEXT")
         .env_remove("RIG_URL")
         .env_remove("RIG_TOKEN")
@@ -1028,10 +1029,19 @@ async fn env_logs_stop_databases_and_completions_json() {
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0].line, "hello runtime");
 
-    // stop --json
+    // stop without --yes in non-TTY fails safely, and --yes --json succeeds.
     let out = rig_cmd(&cfg)
         .env("RIG_TOKEN", VALID_TOKEN)
-        .args(["--server", &url, "--json", "stop", "api"])
+        .args(["--server", &url, "stop", "api"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--yes"));
+
+    let out = rig_cmd(&cfg)
+        .env("RIG_TOKEN", VALID_TOKEN)
+        .args(["--server", &url, "--yes", "--json", "stop", "api"])
         .output()
         .await
         .unwrap();
@@ -1097,7 +1107,7 @@ async fn mcp_starts_unauthenticated_and_runs_concurrent_with_cancel_and_progress
         .collect();
     assert_eq!(replies.len(), 3);
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "rig");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 28);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(
         replies[2]["result"]["content"][0]["text"]

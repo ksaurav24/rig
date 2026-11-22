@@ -4,9 +4,10 @@ use rig_api::App;
 
 use crate::api::Client;
 use crate::error::{CliError, CliResult};
+use crate::link;
 
 /// Returns true when `s` looks like a canonical UUID string (`8-4-4-4-12`).
-fn looks_like_uuid(s: &str) -> bool {
+pub fn looks_like_uuid(s: &str) -> bool {
     let bytes = s.as_bytes();
     bytes.len() == 36
         && bytes[8] == b'-'
@@ -29,7 +30,6 @@ pub async fn list_apps(api: &Client, project: Option<&str>) -> CliResult<Vec<App
         return api.list_apps(Some(wanted)).await;
     }
 
-    // Resolve project name/slug/id to its project_id so the server filters in SQL.
     let projects = api.list_projects().await?;
     if let Some(proj) = projects.iter().find(|p| {
         p.id == wanted || p.name.eq_ignore_ascii_case(wanted) || p.slug.eq_ignore_ascii_case(wanted)
@@ -41,9 +41,34 @@ pub async fn list_apps(api: &Client, project: Option<&str>) -> CliResult<Vec<App
 }
 
 /// Resolves `name`, `slug`, `project/name`, or an app id to a single app.
+///
+/// Uses `GET /api/v1/apps/resolve?ref=` when the server supports it, falling
+/// back to client-side matching over `GET /api/v1/apps` on older servers.
 pub async fn resolve_app(api: &Client, wanted: &str) -> CliResult<App> {
-    let apps = api.list_apps(None).await?;
-    match_app(apps, wanted)
+    let wanted = wanted.trim();
+    match api.resolve_app_ref(wanted).await {
+        Ok(app) => Ok(app),
+        Err(CliError::NotFound(_)) => {
+            // Fall back to listing apps so older servers (where `/apps/{id}`
+            // captures `"resolve"` and returns 404) continue to work seamlessly.
+            let apps = api.list_apps(None).await?;
+            match_app(apps, wanted)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Resolves an explicit `<app>` argument, or falls back to the nearest `rig.toml`.
+pub async fn resolve_app_or_linked(api: &Client, wanted: Option<&str>) -> CliResult<App> {
+    if let Some(w) = wanted.map(str::trim).filter(|s| !s.is_empty()) {
+        return resolve_app(api, w).await;
+    }
+    if let Some((_, link)) = link::discover()? {
+        return resolve_app(api, &link.app_ref()).await;
+    }
+    Err(CliError::message(
+        "specify an app, or link this directory with: rig link <app>",
+    ))
 }
 
 /// Pure matching logic for [`resolve_app`], separated for deterministic unit tests.

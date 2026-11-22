@@ -7,12 +7,16 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::sse::{Event, KeepAlive, Sse},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures_util::{Stream, StreamExt};
 use rig_api::{
-    AddDomainRequest, App, AppWebhook, CreateAppRequest, Deployment, Domain, EnvVar, ErrorBody,
-    LogLine, RevealedEnvVar, SetEnvVarRequest, SourceKind, TlsMode, UpdateAppRequest,
+    AddDomainRequest, App, AppWebhook, BulkSetEnvRequest, CreateAppRequest, Deployment,
+    DeploymentEndEvent, Domain, EnvVar, ErrorBody, LogLine, RevealedEnvVar, SetEnvVarRequest,
+    SourceKind, TlsMode, UpdateAppRequest,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use sqlx::Row;
@@ -27,23 +31,29 @@ use crate::{
     error::{ApiError, ApiResult},
     proxy,
     routes::auth::{slugify, validate_name},
+    runtime::LogOptions,
     state::{AppState, new_id, now},
 };
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_apps, create_app))
+        .routes(routes!(resolve_app))
         .routes(routes!(get_app, update_app, delete_app))
         .routes(routes!(deploy_app))
         .routes(routes!(get_webhook))
         .routes(routes!(rotate_webhook))
+        .routes(routes!(start_app))
+        .routes(routes!(restart_app))
         .routes(routes!(stop_app))
         .routes(routes!(app_logs))
         .routes(routes!(list_deployments))
         .routes(routes!(get_deployment))
         .routes(routes!(rollback))
+        .routes(routes!(cancel_deployment))
         .routes(routes!(deployment_logs))
         .routes(routes!(list_env, set_env))
+        .routes(routes!(set_env_bulk))
         .routes(routes!(delete_env))
         .routes(routes!(reveal_env))
         .routes(routes!(list_domains, add_domain))
@@ -383,6 +393,73 @@ async fn list_apps(
         })
         .collect::<ApiResult<Vec<_>>>()?;
     Ok(Json(apps))
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct ResolveAppQuery {
+    /// App id, name, slug, or `project/app`.
+    #[serde(rename = "ref")]
+    r#ref: String,
+}
+
+/// Resolve an app by id, name, slug, or `project/app`.
+#[utoipa::path(get, path = "/api/v1/apps/resolve", tag = "apps", params(ResolveAppQuery),
+    responses((status = 200, body = App), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn resolve_app(
+    State(state): State<AppState>,
+    auth: Auth<Viewer>,
+    Query(q): Query<ResolveAppQuery>,
+) -> ApiResult<Json<App>> {
+    let wanted = q.r#ref.trim();
+    if wanted.is_empty() {
+        return Err(ApiError::validation("ref cannot be empty"));
+    }
+    // Fast path: exact id lookup.
+    if let Ok(app) = load_app(&state, &auth.org_id, wanted).await {
+        return Ok(Json(app));
+    }
+    let (project_filter, name_filter) = match wanted.split_once('/') {
+        Some((p, n)) => (Some(p.trim()), n.trim()),
+        None => (None, wanted),
+    };
+    let rows = sqlx::query(
+        "SELECT a.id, a.name, p.name AS project_name
+           FROM apps a JOIN projects p ON p.id = a.project_id
+          WHERE a.org_id = ?1
+            AND (a.name = ?2 COLLATE NOCASE OR a.slug = ?2 COLLATE NOCASE)
+            AND (?3 IS NULL OR p.id = ?3 OR p.name = ?3 COLLATE NOCASE OR p.slug = ?3 COLLATE NOCASE)
+          ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE",
+    )
+    .bind(&auth.org_id)
+    .bind(name_filter)
+    .bind(project_filter)
+    .fetch_all(&state.db)
+    .await?;
+
+    match rows.len() {
+        0 => Err(ApiError::NotFound("app")),
+        1 => {
+            let id: String = rows[0].get("id");
+            Ok(Json(load_app(&state, &auth.org_id, &id).await?))
+        }
+        _ => {
+            let names: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{}/{}",
+                        r.get::<String, _>("project_name"),
+                        r.get::<String, _>("name")
+                    )
+                })
+                .collect();
+            Err(ApiError::Conflict(format!(
+                "{wanted} matches several apps: {}. Use project/app",
+                names.join(", ")
+            )))
+        }
+    }
 }
 
 /// The source fields of an app after validation.
@@ -899,6 +976,149 @@ async fn rollback(
     Ok((StatusCode::ACCEPTED, Json(d)))
 }
 
+/// Start a stopped or failed app, reusing its most recent built image when available.
+#[utoipa::path(post, path = "/api/v1/apps/{id}/start", tag = "apps", params(("id" = String, Path)),
+    responses((status = 202, body = Deployment), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn start_app(
+    State(state): State<AppState>,
+    auth: Auth<Developer>,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<Deployment>)> {
+    let app = load_app(&state, &auth.org_id, &id).await?;
+    if app.status == rig_api::AppStatus::Running {
+        return Err(ApiError::Conflict(format!("{} is already running", app.name)));
+    }
+    let last_image: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT image_ref, image_id FROM deployments
+          WHERE app_id = ? AND org_id = ? AND image_ref IS NOT NULL
+          ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(&id)
+    .bind(&auth.org_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (image_ref, image_id) = last_image.unwrap_or((None, None));
+    let trigger = if auth.via == crate::auth::Via::ApiToken {
+        "api"
+    } else {
+        "manual"
+    };
+    let d = start_deployment(
+        &state,
+        &auth,
+        &id,
+        trigger,
+        image_ref.as_deref(),
+        image_id.as_deref(),
+    )
+    .await?;
+    auth.audit(&state, "app.start", Some(&id), Some(&d.id))
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(d)))
+}
+
+/// Restart an app with a zero-downtime swap reusing its current image.
+#[utoipa::path(post, path = "/api/v1/apps/{id}/restart", tag = "apps", params(("id" = String, Path)),
+    responses((status = 202, body = Deployment), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn restart_app(
+    State(state): State<AppState>,
+    auth: Auth<Developer>,
+    Path(id): Path<String>,
+) -> ApiResult<(StatusCode, Json<Deployment>)> {
+    let app = load_app(&state, &auth.org_id, &id).await?;
+    let source_dep_id = app.current_deployment_id.clone();
+    let image_pair: Option<(Option<String>, Option<String>)> = match source_dep_id {
+        Some(dep_id) => {
+            sqlx::query_as("SELECT image_ref, image_id FROM deployments WHERE id = ? AND org_id = ?")
+                .bind(dep_id)
+                .bind(&auth.org_id)
+                .fetch_optional(&state.db)
+                .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT image_ref, image_id FROM deployments
+                  WHERE app_id = ? AND org_id = ? AND image_ref IS NOT NULL
+                  ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&id)
+            .bind(&auth.org_id)
+            .fetch_optional(&state.db)
+            .await?
+        }
+    };
+    let Some((Some(image_ref), image_id)) = image_pair else {
+        return Err(ApiError::Conflict(format!(
+            "{} has not been deployed yet. Deploy it first",
+            app.name
+        )));
+    };
+    let trigger = if auth.via == crate::auth::Via::ApiToken {
+        "api"
+    } else {
+        "manual"
+    };
+    let d = start_deployment(
+        &state,
+        &auth,
+        &id,
+        trigger,
+        Some(&image_ref),
+        image_id.as_deref(),
+    )
+    .await?;
+    auth.audit(&state, "app.restart", Some(&id), Some(&d.id))
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(d)))
+}
+
+/// Cancel a queued or in-progress deployment.
+#[utoipa::path(post, path = "/api/v1/deployments/{id}/cancel", tag = "deployments",
+    params(("id" = String, Path)),
+    responses((status = 200, body = Deployment), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn cancel_deployment(
+    State(state): State<AppState>,
+    auth: Auth<Developer>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Deployment>> {
+    let dep = load_deployment(&state, &auth.org_id, &id).await?;
+    if dep.status.is_finished() {
+        return Err(ApiError::Conflict(
+            "this deployment has already finished".into(),
+        ));
+    }
+    let finished_at = now();
+    let updated = sqlx::query(
+        "UPDATE deployments SET status = 'cancelled', error = 'Cancelled by user', finished_at = ?
+          WHERE id = ? AND org_id = ? AND status IN ('queued', 'building', 'deploying')",
+    )
+    .bind(&finished_at)
+    .bind(&id)
+    .bind(&auth.org_id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    if updated == 0 {
+        return Err(ApiError::Conflict(
+            "this deployment has already finished".into(),
+        ));
+    }
+    state.deploys.signal_cancel(&id);
+    sqlx::query(
+        "UPDATE apps SET updated_at = ?,
+                status = CASE WHEN current_deployment_id IS NULL THEN 'idle' ELSE 'running' END
+          WHERE id = ? AND status = 'deploying'",
+    )
+    .bind(&finished_at)
+    .bind(&dep.app_id)
+    .execute(&state.db)
+    .await?;
+    state.deploys.touch();
+    auth.audit(&state, "deployment.cancel", Some(&id), Some(&dep.app_id))
+        .await?;
+    Ok(Json(load_deployment(&state, &auth.org_id, &id).await?))
+}
+
 /// Stop an app's containers and take it off the proxy.
 #[utoipa::path(post, path = "/api/v1/apps/{id}/stop", tag = "apps", params(("id" = String, Path)),
     responses((status = 200, body = App), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
@@ -939,21 +1159,76 @@ async fn stop_app(
     Ok(Json(load_app(&state, &auth.org_id, &id).await?))
 }
 
-#[utoipa::path(get, path = "/api/v1/apps/{id}/deployments", tag = "deployments", params(("id" = String, Path)),
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct DeploymentListQuery {
+    /// Maximum number of deployments to return (1–200, default 50).
+    limit: Option<u32>,
+    /// Return only deployments created before this deployment id.
+    before: Option<String>,
+}
+
+#[utoipa::path(get, path = "/api/v1/apps/{id}/deployments", tag = "deployments",
+    params(("id" = String, Path), DeploymentListQuery),
     responses((status = 200, body = Vec<Deployment>), (status = 404, body = ErrorBody)))]
 async fn list_deployments(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Path(id): Path<String>,
+    Query(q): Query<DeploymentListQuery>,
 ) -> ApiResult<Json<Vec<Deployment>>> {
     require_app(&state, &auth.org_id, &id).await?;
-    let rows = sqlx::query(deployment_select!(
-        "WHERE app_id = ? AND org_id = ? ORDER BY created_at DESC, id DESC LIMIT 50"
-    ))
-    .bind(&id)
-    .bind(&auth.org_id)
-    .fetch_all(&state.db)
-    .await?;
+    let limit = i64::from(q.limit.unwrap_or(50).clamp(1, 200));
+    let rows = match q.before.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(before_id) => {
+            let cursor_created: Option<String> = sqlx::query_scalar(
+                "SELECT created_at FROM deployments WHERE id = ? AND app_id = ? AND org_id = ?",
+            )
+            .bind(before_id)
+            .bind(&id)
+            .bind(&auth.org_id)
+            .fetch_optional(&state.db)
+            .await?;
+            match cursor_created {
+                Some(created_at) => {
+                    sqlx::query(deployment_select!(
+                        "WHERE app_id = ?1 AND org_id = ?2
+                           AND (created_at < ?3 OR (created_at = ?3 AND id < ?4))
+                         ORDER BY created_at DESC, id DESC LIMIT ?5"
+                    ))
+                    .bind(&id)
+                    .bind(&auth.org_id)
+                    .bind(&created_at)
+                    .bind(before_id)
+                    .bind(limit)
+                    .fetch_all(&state.db)
+                    .await?
+                }
+                None => {
+                    sqlx::query(deployment_select!(
+                        "WHERE app_id = ?1 AND org_id = ?2 AND id < ?3
+                         ORDER BY created_at DESC, id DESC LIMIT ?4"
+                    ))
+                    .bind(&id)
+                    .bind(&auth.org_id)
+                    .bind(before_id)
+                    .bind(limit)
+                    .fetch_all(&state.db)
+                    .await?
+                }
+            }
+        }
+        None => {
+            sqlx::query(deployment_select!(
+                "WHERE app_id = ?1 AND org_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
+            ))
+            .bind(&id)
+            .bind(&auth.org_id)
+            .bind(limit)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
     Ok(Json(
         rows.iter()
             .map(deployment_from_row)
@@ -1060,11 +1335,22 @@ async fn deployment_logs(
                 Some(s) => !matches!(s, "queued" | "building" | "deploying"),
             };
             if finished {
-                let _ = tx
-                    .send(Ok(Event::default()
-                        .event("end")
-                        .data(status.unwrap_or_else(|| "deleted".into()))))
-                    .await;
+                let final_status = status.unwrap_or_else(|| "deleted".into());
+                let domains: Vec<String> = sqlx::query_scalar(
+                    "SELECT host FROM domains
+                      WHERE app_id = (SELECT app_id FROM deployments WHERE id = ?)
+                      ORDER BY host",
+                )
+                .bind(&id)
+                .fetch_all(&state.db)
+                .await
+                .unwrap_or_default();
+                let payload = serde_json::to_string(&DeploymentEndEvent {
+                    status: final_status,
+                    domains,
+                })
+                .unwrap_or_default();
+                let _ = tx.send(Ok(Event::default().event("end").data(payload))).await;
                 return;
             }
             tokio::select! {
@@ -1076,16 +1362,71 @@ async fn deployment_logs(
     Ok(sse(rx))
 }
 
-/// The running container's output as server-sent events: the last 200 lines,
-/// then live output. Each `log` event's data is a `LogLine`.
-#[utoipa::path(get, path = "/api/v1/apps/{id}/logs", tag = "apps", params(("id" = String, Path)),
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct AppLogQuery {
+    /// Number of trailing lines to replay (1–10000, default 200).
+    tail: Option<u32>,
+    /// Keep streaming live lines after the initial replay (default true).
+    follow: Option<bool>,
+    /// Only return lines since this time (RFC 3339, Unix seconds, or relative like `10m`, `2h`, `30s`, `1d`).
+    since: Option<String>,
+    /// Request original container timestamps on each line.
+    timestamps: Option<bool>,
+    /// Case-insensitive substring filter applied to each log line.
+    grep: Option<String>,
+}
+
+/// Parse a `since` query parameter into Unix seconds.
+fn parse_since(raw: &str) -> ApiResult<i64> {
+    let raw = raw.trim();
+    if let Ok(secs) = raw.parse::<i64>() {
+        return Ok(secs);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(dt.timestamp());
+    }
+    if raw.len() >= 2 {
+        let (num, unit) = raw.split_at(raw.len() - 1);
+        if let Ok(n) = num.parse::<i64>()
+            && n > 0
+        {
+            let secs = match unit {
+                "s" | "S" => Some(n),
+                "m" | "M" => n.checked_mul(60),
+                "h" | "H" => n.checked_mul(3600),
+                "d" | "D" => n.checked_mul(86400),
+                _ => None,
+            };
+            if let Some(delta) = secs {
+                return Ok((chrono::Utc::now().timestamp() - delta).max(0));
+            }
+        }
+    }
+    Err(ApiError::validation(
+        "invalid `since` value; use a duration like 10m or 2h, Unix seconds, or RFC 3339",
+    ))
+}
+
+/// The running container's output as server-sent events: the last `tail` lines,
+/// then live output when `follow=true`. Each `log` event's data is a `LogLine`.
+#[utoipa::path(get, path = "/api/v1/apps/{id}/logs", tag = "apps",
+    params(("id" = String, Path), AppLogQuery),
     responses((status = 200, content_type = "text/event-stream", body = String),
-        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn app_logs(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
     Path(id): Path<String>,
+    Query(q): Query<AppLogQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let since = q
+        .since
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse_since)
+        .transpose()?;
     let container: Option<Option<String>> = sqlx::query_scalar(
         "SELECT d.container_id FROM apps a
            LEFT JOIN deployments d ON d.id = a.current_deployment_id
@@ -1099,22 +1440,37 @@ async fn app_logs(
         ApiError::Conflict("the app is not running, so it has no logs yet. Deploy it first".into())
     })?;
 
+    let opts = LogOptions {
+        tail: q.tail.unwrap_or(200).clamp(1, 10_000),
+        follow: q.follow.unwrap_or(true),
+        since,
+        timestamps: q.timestamps.unwrap_or(false),
+    };
+    let grep = q
+        .grep
+        .map(|g| g.to_lowercase())
+        .filter(|g| !g.is_empty());
+
     let mut seq = 0i64;
     let stream = state
         .runtime
-        .logs(&container, 200, true)
+        .logs_with(&container, opts)
         // An engine error ends the stream; the dashboard reconnects.
         .take_while(|item| std::future::ready(item.is_ok()))
         .filter_map(move |item| {
-            let msg = item.ok();
-            seq += 1;
-            let event = msg.map(|m| {
-                Ok(log_event(&LogLine {
+            let event = item.ok().and_then(|msg| {
+                if let Some(needle) = &grep
+                    && !msg.line.to_lowercase().contains(needle)
+                {
+                    return None;
+                }
+                seq += 1;
+                Some(Ok(log_event(&LogLine {
                     seq,
-                    ts: now(),
-                    stream: m.stream.to_string(),
-                    line: m.line,
-                }))
+                    ts: msg.ts.unwrap_or_else(now),
+                    stream: msg.stream.to_string(),
+                    line: msg.line,
+                })))
             });
             std::future::ready(event)
         });
@@ -1159,7 +1515,84 @@ async fn list_env(
     Ok(Json(vars))
 }
 
-/// Create or replace one variable. Takes effect on the next deployment.
+const MAX_BULK_ENV: usize = 256;
+
+async fn apply_bulk_env(
+    state: &AppState,
+    auth: &Auth<Developer>,
+    id: &str,
+    req: BulkSetEnvRequest,
+) -> ApiResult<Vec<EnvVar>> {
+    require_app(state, &auth.org_id, id).await?;
+    if req.vars.len() > MAX_BULK_ENV {
+        return Err(ApiError::validation(format!(
+            "set at most {MAX_BULK_ENV} variables in one request"
+        )));
+    }
+    let mut prepared = Vec::with_capacity(req.vars.len());
+    for var in &req.vars {
+        validate_env_key(&var.key)?;
+        validate_env_value(&var.value)?;
+        if prepared
+            .iter()
+            .any(|(k, _, _, _): &(&str, String, bool, &str)| *k == var.key)
+        {
+            return Err(ApiError::validation(format!(
+                "the variable {} is set twice",
+                var.key
+            )));
+        }
+        prepared.push((
+            var.key.as_str(),
+            state.vault.encrypt(&var.value)?,
+            var.is_secret,
+            var.value.as_str(),
+        ));
+    }
+
+    let at = now();
+    let mut tx = state.db.begin().await?;
+    if req.replace {
+        sqlx::query("DELETE FROM env_vars WHERE app_id = ? AND org_id = ?")
+            .bind(id)
+            .bind(&auth.org_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let mut saved = Vec::with_capacity(prepared.len());
+    for (key, value_enc, is_secret, plain_value) in prepared {
+        sqlx::query(
+            "INSERT INTO env_vars (id, org_id, app_id, key, value_enc, is_secret, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (app_id, key) DO UPDATE SET
+                value_enc = excluded.value_enc, is_secret = excluded.is_secret, updated_at = excluded.updated_at",
+        )
+        .bind(new_id())
+        .bind(&auth.org_id)
+        .bind(id)
+        .bind(key)
+        .bind(&value_enc)
+        .bind(is_secret)
+        .bind(&at)
+        .execute(&mut *tx)
+        .await?;
+        saved.push(EnvVar {
+            key: key.to_string(),
+            value: (!is_secret).then(|| plain_value.to_string()),
+            is_secret,
+            updated_at: at.clone(),
+        });
+    }
+    tx.commit().await?;
+
+    let detail = format!("{} variable(s)", saved.len());
+    auth.audit(state, "env.set_bulk", Some(id), Some(&detail))
+        .await?;
+    Ok(saved)
+}
+
+/// Create or replace one variable, or atomically update a batch (`{"vars": [...]}`).
+/// Takes effect on the next deployment.
 #[utoipa::path(put, path = "/api/v1/apps/{id}/env", tag = "env", params(("id" = String, Path)),
     request_body = SetEnvVarRequest,
     responses((status = 200, body = EnvVar), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
@@ -1167,8 +1600,16 @@ async fn set_env(
     State(state): State<AppState>,
     auth: Auth<Developer>,
     Path(id): Path<String>,
-    Json(req): Json<SetEnvVarRequest>,
-) -> ApiResult<Json<EnvVar>> {
+    Json(raw): Json<serde_json::Value>,
+) -> ApiResult<Response> {
+    if raw.get("vars").is_some() {
+        let req: BulkSetEnvRequest = serde_json::from_value(raw)
+            .map_err(|e| ApiError::validation(format!("invalid bulk env payload: {e}")))?;
+        let saved = apply_bulk_env(&state, &auth, &id, req).await?;
+        return Ok(Json(saved).into_response());
+    }
+    let req: SetEnvVarRequest = serde_json::from_value(raw)
+        .map_err(|e| ApiError::validation(format!("invalid env payload: {e}")))?;
     require_app(&state, &auth.org_id, &id).await?;
     validate_env_key(&req.key)?;
     validate_env_value(&req.value)?;
@@ -1196,7 +1637,21 @@ async fn set_env(
         key: req.key,
         is_secret: req.is_secret,
         updated_at: at,
-    }))
+    })
+    .into_response())
+}
+
+/// Atomically create or replace multiple variables in one transaction.
+#[utoipa::path(put, path = "/api/v1/apps/{id}/env/bulk", tag = "env", params(("id" = String, Path)),
+    request_body = BulkSetEnvRequest,
+    responses((status = 200, body = Vec<EnvVar>), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn set_env_bulk(
+    State(state): State<AppState>,
+    auth: Auth<Developer>,
+    Path(id): Path<String>,
+    Json(req): Json<BulkSetEnvRequest>,
+) -> ApiResult<Json<Vec<EnvVar>>> {
+    Ok(Json(apply_bulk_env(&state, &auth, &id, req).await?))
 }
 
 #[utoipa::path(delete, path = "/api/v1/apps/{id}/env/{key}", tag = "env",
@@ -1490,5 +1945,458 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_since_values() {
+        assert_eq!(parse_since("1700000000").unwrap(), 1_700_000_000);
+        assert!(parse_since("2026-11-22T10:00:00Z").unwrap() > 1_700_000_000);
+        assert!(parse_since("10m").unwrap() > 0);
+        assert!(parse_since("2h").unwrap() > 0);
+        assert!(parse_since("1d").unwrap() > 0);
+        assert!(parse_since("0m").is_err());
+        assert!(parse_since("bogus").is_err());
+    }
+
+    #[tokio::test]
+    async fn phase2_enablers_end_to_end() {
+        use std::sync::Arc;
+
+        struct StubRuntime;
+
+        #[async_trait::async_trait]
+        impl crate::runtime::Runtime for StubRuntime {
+            async fn info(&self) -> anyhow::Result<crate::runtime::EngineInfo> {
+                Ok(crate::runtime::EngineInfo {
+                    name: "stub".into(),
+                    version: "1.0".into(),
+                })
+            }
+            async fn pull(&self, _: &str, _: &crate::runtime::LogSink) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build(
+                &self,
+                _: crate::runtime::BuildSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build_plan(
+                &self,
+                _: crate::runtime::PlanSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn run(
+                &self,
+                _: &crate::runtime::ContainerSpec,
+            ) -> anyhow::Result<crate::runtime::Started> {
+                anyhow::bail!("unused")
+            }
+            async fn state(&self, _: &str) -> anyhow::Result<crate::runtime::ContainerState> {
+                Ok(crate::runtime::ContainerState::Running)
+            }
+            async fn health(&self, _: &str) -> anyhow::Result<Option<crate::runtime::Health>> {
+                Ok(None)
+            }
+            async fn start(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn stop(&self, _: &str, _: u32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn logs_with(
+                &self,
+                _: &str,
+                opts: crate::runtime::LogOptions,
+            ) -> crate::runtime::LogStream {
+                let items = vec![
+                    Ok(crate::runtime::LogMsg {
+                        stream: "stdout",
+                        line: "boot ok".into(),
+                        ts: opts
+                            .timestamps
+                            .then(|| "2026-11-22T10:00:00Z".into()),
+                    }),
+                    Ok(crate::runtime::LogMsg {
+                        stream: "stderr",
+                        line: "ERROR: disk slow".into(),
+                        ts: opts
+                            .timestamps
+                            .then(|| "2026-11-22T10:00:01Z".into()),
+                    }),
+                ];
+                Box::pin(futures_util::stream::iter(items))
+            }
+            async fn list_by_label(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn remove_volume(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove_network(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn shell(&self, _: &str, _: u16, _: u16) -> anyhow::Result<crate::runtime::Shell> {
+                anyhow::bail!("unused")
+            }
+            async fn image_id(&self, _: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            async fn usage(&self, _: &str) -> anyhow::Result<Option<crate::runtime::Usage>> {
+                Ok(None)
+            }
+            async fn resize_shell(&self, _: &str, _: u16, _: u16) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn exec(
+                &self,
+                _: &str,
+                _: Vec<String>,
+                _: Vec<String>,
+                _: Option<crate::runtime::ByteReader>,
+                _: crate::runtime::ByteWriter,
+            ) -> anyhow::Result<crate::runtime::ExecOutcome> {
+                anyhow::bail!("unused")
+            }
+        }
+
+        struct StubProxy;
+
+        #[async_trait::async_trait]
+        impl crate::proxy::Proxy for StubProxy {
+            async fn ready(&self) -> bool {
+                true
+            }
+            async fn apply(
+                &self,
+                _: &[crate::proxy::Route],
+                _: Option<&rig_api::DashboardDomain>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn ports(&self) -> (u16, u16) {
+                (80, 443)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let vault = crate::crypto::Vault::open(dir.path()).unwrap();
+        let state = AppState {
+            db: db.clone(),
+            vault,
+            config: Arc::new(crate::state::Config {
+                data_dir: dir.path().to_path_buf(),
+                secure_cookies: false,
+                github_api: "http://127.0.0.1".into(),
+                github_web: "http://127.0.0.1".into(),
+                poll_interval: 0,
+            }),
+            runtime: Arc::new(StubRuntime),
+            proxy: Arc::new(StubProxy),
+            deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
+            access: crate::access::DashboardAccess::default(),
+        };
+
+        // Seed org, user, token, two projects, and apps.
+        let token = "rig_test_enablers_secret";
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id, email, name, password_hash) VALUES ('u1', 'a@b.c', 'A', 'h')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO memberships (org_id, user_id, role) VALUES ('org1', 'u1', 'owner')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO api_tokens (id, org_id, user_id, name, token_hash, prefix, role, created_at)
+             VALUES ('t1', 'org1', 'u1', 'ci', ?, 'rig_te', 'owner', '2026-11-22T00:00:00Z')",
+        )
+        .bind(crate::crypto::hash_token(token))
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'Alpha', 'alpha', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p2', 'org1', 'Beta', 'beta', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        for (id, pid, name, status) in [
+            ("a1", "p1", "web", "stopped"),
+            ("a2", "p2", "web", "running"),
+            ("a3", "p1", "api", "running"),
+        ] {
+            sqlx::query(
+                "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, webhook_secret, created_at, updated_at)
+                 VALUES (?, 'org1', ?, ?, ?, 'image', 'nginx:alpine', 'Dockerfile', 80, ?, 'sec', '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+            )
+            .bind(id)
+            .bind(pid)
+            .bind(name)
+            .bind(name)
+            .bind(status)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO domains (id, org_id, app_id, host, tls_mode, access, created_at)
+             VALUES ('dom1', 'org1', 'a3', 'api.example.com', 'auto', 'public', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        // Seed deployments for pagination & SSE end & start/restart/cancel tests.
+        for (did, app_id, status, img, cid, ts) in [
+            ("d1", "a3", "superseded", Some("nginx:1"), None, "2026-11-22T00:01:00.000Z"),
+            ("d2", "a3", "superseded", Some("nginx:2"), None, "2026-11-22T00:02:00.000Z"),
+            ("d3", "a3", "running", Some("nginx:3"), Some("cid-3"), "2026-11-22T00:03:00.000Z"),
+            ("d4", "a1", "superseded", Some("nginx:old"), None, "2026-11-22T00:01:00.000Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO deployments (id, org_id, app_id, status, trigger, image_ref, container_id, created_at)
+                 VALUES (?, 'org1', ?, ?, 'manual', ?, ?, ?)",
+            )
+            .bind(did)
+            .bind(app_id)
+            .bind(status)
+            .bind(img)
+            .bind(cid)
+            .bind(ts)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE apps SET current_deployment_id = 'd3' WHERE id = 'a3'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, crate::routes::app(state))
+                .await
+                .unwrap();
+        });
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // 1. GET /api/v1/apps/resolve?ref= + x-rig-version header
+        let res = http
+            .get(format!("{base}/api/v1/apps/resolve?ref=api"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get("x-rig-version")
+                .and_then(|v| v.to_str().ok()),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let resolved: App = res.json().await.unwrap();
+        assert_eq!(resolved.id, "a3");
+
+        // Ambiguous ref returns 409.
+        let res = http
+            .get(format!("{base}/api/v1/apps/resolve?ref=web"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        // Qualified project/app disambiguates cleanly.
+        let res = http
+            .get(format!("{base}/api/v1/apps/resolve?ref=beta%2Fweb"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let resolved: App = res.json().await.unwrap();
+        assert_eq!(resolved.id, "a2");
+
+        // 2. Deployment pagination (?limit=&before=)
+        let page1: Vec<Deployment> = http
+            .get(format!("{base}/api/v1/apps/a3/deployments?limit=2"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, "d3");
+        assert_eq!(page1[1].id, "d2");
+
+        let page2: Vec<Deployment> = http
+            .get(format!("{base}/api/v1/apps/a3/deployments?limit=2&before=d2"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, "d1");
+
+        // 3. Deployment logs SSE `end` event includes domains
+        let body_text = http
+            .get(format!("{base}/api/v1/deployments/d3/logs"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body_text.contains("event: end"), "{body_text}");
+        assert!(body_text.contains("api.example.com"), "{body_text}");
+
+        // 4. App logs query params (follow=false, timestamps=true, grep=error)
+        let log_body = http
+            .get(format!(
+                "{base}/api/v1/apps/a3/logs?tail=50&follow=false&timestamps=true&grep=error"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(log_body.contains("ERROR: disk slow"), "{log_body}");
+        assert!(!log_body.contains("boot ok"), "{log_body}");
+        assert!(log_body.contains("2026-11-22T10:00:01Z"), "{log_body}");
+
+        // 5. Atomic bulk env PUT /api/v1/apps/{id}/env (and rollback on invalid key)
+        let bad_bulk = serde_json::json!({
+            "vars": [
+                { "key": "GOOD_KEY", "value": "1", "is_secret": false },
+                { "key": "1BAD", "value": "2", "is_secret": false }
+            ]
+        });
+        let res = http
+            .put(format!("{base}/api/v1/apps/a3/env"))
+            .bearer_auth(token)
+            .json(&bad_bulk)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Verify atomicity: GOOD_KEY was NOT persisted.
+        let vars: Vec<EnvVar> = http
+            .get(format!("{base}/api/v1/apps/a3/env"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(vars.is_empty());
+
+        // Valid bulk set
+        let good_bulk = serde_json::json!({
+            "vars": [
+                { "key": "A", "value": "1", "is_secret": false },
+                { "key": "B", "value": "secret", "is_secret": true }
+            ]
+        });
+        let res = http
+            .put(format!("{base}/api/v1/apps/a3/env"))
+            .bearer_auth(token)
+            .json(&good_bulk)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let saved: Vec<EnvVar> = res.json().await.unwrap();
+        assert_eq!(saved.len(), 2);
+
+        // Replace mode drops A and B when only C is provided.
+        let replace_bulk = serde_json::json!({
+            "vars": [{ "key": "C", "value": "3", "is_secret": false }],
+            "replace": true
+        });
+        let res = http
+            .put(format!("{base}/api/v1/apps/a3/env/bulk"))
+            .bearer_auth(token)
+            .json(&replace_bulk)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let vars: Vec<EnvVar> = http
+            .get(format!("{base}/api/v1/apps/a3/env"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "C");
+
+        // 6. Start stopped app a1 -> 202 queued with previous image, then cancel it -> 200 cancelled
+        let res = http
+            .post(format!("{base}/api/v1/apps/a1/start"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let started_dep: Deployment = res.json().await.unwrap();
+        assert_eq!(started_dep.trigger, "api");
+        assert_eq!(started_dep.image_ref.as_deref(), Some("nginx:old"));
+
+        let res = http
+            .post(format!(
+                "{base}/api/v1/deployments/{}/cancel",
+                started_dep.id
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cancelled_dep: Deployment = res.json().await.unwrap();
+        assert_eq!(cancelled_dep.status, rig_api::DeploymentStatus::Cancelled);
+
+        // 7. Restart running app a3 -> 202 queued reusing current image
+        let res = http
+            .post(format!("{base}/api/v1/apps/a3/restart"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let restarted_dep: Deployment = res.json().await.unwrap();
+        assert_eq!(restarted_dep.trigger, "api");
+        assert_eq!(restarted_dep.image_ref.as_deref(), Some("nginx:3"));
+
+        server_handle.abort();
     }
 }

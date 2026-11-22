@@ -637,16 +637,22 @@ check "cli deployments show works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json de
 check "cli deployments logs emits NDJSON" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json deployments logs "$D1" | head -1 | jq -r 'has("line")')" true
 check "cli env set works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env set Shop/Web CLI_VAR=hello --plain | jq -r '.set[0].key')" CLI_VAR
 check "cli env get reveals value" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env get Shop/Web CLI_VAR | jq -r .value)" hello
+printf 'BULK_A=one\nBULK_B=two\n' >"$WORK/bulk.env"
+check "cli env import bulk works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env import Shop/Web "$WORK/bulk.env" --plain | jq -r .imported)" 2
 check "cli env rm deletes key" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json env rm Shop/Web CLI_VAR | jq -r .deleted)" CLI_VAR
-MCP_OUT=$(printf '%s\n%s\n' \
+check "cli domains ls works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json domains ls Shop/Web | jq -r 'length >= 1')" true
+check "cli metrics works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json metrics --range 1h | jq -r .range)" 1h
+check "cli logs --no-follow works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" logs Shop/Web --tail 5 --no-follow >/dev/null && echo ok)" ok
+check "cli context current works" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" context current)" e2e
+MCP_OUT=$(printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"system_status","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_domains","arguments":{"app":"Shop/Web"}}}' \
   | RIG_CONFIG="$CLI_CFG" "$CLI_BIN" mcp)
 check "cli mcp initialize succeeds" "$(printf '%s\n' "$MCP_OUT" | sed -n '1p' | jq -r .result.serverInfo.name)" rig
 check "cli mcp system_status returns structuredContent" "$(printf '%s\n' "$MCP_OUT" | sed -n '2p' | jq -r .result.structuredContent.organization.name)" Acme
-check "cli logout removes context" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json logout e2e | jq -r .removed)" e2e
-call DELETE "/api/v1/tokens/$CLI_TOK_ID" >/dev/null
-check "CLI API token revoked" "$(status)" 204
+check "cli mcp list_domains works" "$(printf '%s\n' "$MCP_OUT" | sed -n '3p' | jq -r .result.isError)" false
+check "cli logout --revoke removes context and token" "$(RIG_CONFIG="$CLI_CFG" "$CLI_BIN" --json logout e2e --revoke | jq -r .revoked)" true
 
 echo "== stop and clean up"
 call POST "/api/v1/apps/$APP/stop" >/dev/null; check "app stops" "$(status)" 200

@@ -40,7 +40,7 @@ impl ClientSource {
             insecure: self.insecure,
         };
         let ctx = config.resolve_with(&opts)?;
-        Client::new(ctx)
+        Client::with_options(ctx, false, false)
     }
 }
 

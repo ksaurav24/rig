@@ -1,30 +1,44 @@
-//! `rig deployments <app>`, `rig deployments ls <app>`, `rig deployments show <id>`,
-//! and `rig deployments logs <id>`.
+//! `rig deployments [ls|show|logs|cancel]`.
 
 use std::time::Duration;
 
 use clap::{Args, Subcommand};
 
-use crate::api::Client;
-use crate::error::{CliError, CliResult};
+use crate::api::{Client, DeploymentListQuery};
+use crate::error::CliResult;
 use crate::ops;
-use crate::output::{label, print_json, print_log, short, table};
+use crate::output::{
+    OutputOpts, label, print_log, print_names, print_structured, relative_time, short,
+    style_status, table,
+};
 
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct DeploymentsArgs {
     #[command(subcommand)]
     pub command: Option<DeploymentsCommand>,
-    /// App name, `project/app`, or id (shorthand for `rig deployments ls <app>`).
+    /// App name, `project/app`, or id (shorthand for `rig deployments ls <app>`). Defaults to `rig.toml`.
     pub app: Option<String>,
+    /// Maximum number of deployments to show.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Show deployments created before this deployment id.
+    #[arg(long)]
+    pub before: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum DeploymentsCommand {
     /// List an app's deployments.
     Ls {
-        /// App name, `project/app`, or id.
-        app: String,
+        /// App name, `project/app`, or id. Defaults to `rig.toml`.
+        app: Option<String>,
+        /// Maximum number of deployments to show (1–200).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Cursor: return deployments created before this deployment id.
+        #[arg(long)]
+        before: Option<String>,
     },
     /// Show details of one deployment by id.
     Show {
@@ -39,34 +53,51 @@ pub enum DeploymentsCommand {
         #[arg(long)]
         no_follow: bool,
     },
+    /// Cancel a queued or in-progress deployment.
+    Cancel {
+        /// Deployment id.
+        id: String,
+    },
 }
 
-pub async fn run(
-    api: &Client,
-    args: DeploymentsArgs,
-    json_out: bool,
-    wide: bool,
-) -> CliResult<()> {
+pub async fn run(api: &Client, args: DeploymentsArgs, out: OutputOpts) -> CliResult<()> {
     match args.command {
-        Some(DeploymentsCommand::Ls { app }) => list(api, &app, json_out, wide).await,
-        Some(DeploymentsCommand::Show { id }) => show(api, &id, json_out).await,
-        Some(DeploymentsCommand::Logs { id, no_follow }) => {
-            logs(api, &id, no_follow, json_out).await
+        Some(DeploymentsCommand::Ls { app, limit, before }) => {
+            list(api, app.as_deref(), DeploymentListQuery { limit, before }, out).await
         }
-        None => match args.app {
-            Some(app) => list(api, &app, json_out, wide).await,
-            None => Err(CliError::message(
-                "specify an app or subcommand: rig deployments <app> | show <id> | logs <id>",
-            )),
-        },
+        Some(DeploymentsCommand::Show { id }) => show(api, &id, out).await,
+        Some(DeploymentsCommand::Logs { id, no_follow }) => logs(api, &id, no_follow, out).await,
+        Some(DeploymentsCommand::Cancel { id }) => cancel(api, &id, out).await,
+        None => {
+            list(
+                api,
+                args.app.as_deref(),
+                DeploymentListQuery {
+                    limit: args.limit,
+                    before: args.before,
+                },
+                out,
+            )
+            .await
+        }
     }
 }
 
-async fn list(api: &Client, wanted_app: &str, json_out: bool, wide: bool) -> CliResult<()> {
-    let app = ops::apps::resolve_app(api, wanted_app).await?;
-    let deps = api.list_deployments(&app.id).await?;
-    if json_out {
-        return print_json(&deps);
+async fn list(
+    api: &Client,
+    wanted_app: Option<&str>,
+    q: DeploymentListQuery,
+    out: OutputOpts,
+) -> CliResult<()> {
+    let app = ops::apps::resolve_app_or_linked(api, wanted_app).await?;
+    let deps = api.list_deployments_page(&app.id, &q).await?;
+    if out.is_structured() {
+        return print_structured(&deps, out.format);
+    }
+    if out.is_name() {
+        let names: Vec<String> = deps.iter().map(|d| d.id.clone()).collect();
+        print_names(&names);
+        return Ok(());
     }
     let rows = deps
         .iter()
@@ -79,10 +110,10 @@ async fn list(api: &Client, wanted_app: &str, json_out: bool, wide: bool) -> Cli
                 .unwrap_or_default();
             vec![
                 short(&d.id),
-                label(&d.status),
+                style_status(&label(&d.status)),
                 d.trigger.clone(),
                 what,
-                d.created_at.clone(),
+                relative_time(&d.created_at),
             ]
         })
         .collect();
@@ -93,19 +124,23 @@ async fn list(api: &Client, wanted_app: &str, json_out: bool, wide: bool) -> Cli
             "No deployments for {} yet. Deploy it with: rig deploy {}",
             app.name, app.name
         )),
-        wide,
+        out.wide,
     );
     Ok(())
 }
 
-async fn show(api: &Client, id: &str, json_out: bool) -> CliResult<()> {
+async fn show(api: &Client, id: &str, out: OutputOpts) -> CliResult<()> {
     let dep = api.get_deployment(id).await?;
-    if json_out {
-        return print_json(&dep);
+    if out.is_structured() {
+        return print_structured(&dep, out.format);
+    }
+    if out.is_name() {
+        println!("{}", dep.id);
+        return Ok(());
     }
     println!("Deployment  {}", dep.id);
     println!("App ID      {}", dep.app_id);
-    println!("Status      {}", label(&dep.status));
+    println!("Status      {}", style_status(&label(&dep.status)));
     println!("Trigger     {}", dep.trigger);
     if let Some(image) = &dep.image_ref {
         println!("Image       {image}");
@@ -116,7 +151,7 @@ async fn show(api: &Client, id: &str, json_out: bool) -> CliResult<()> {
     if let Some(msg) = &dep.commit_msg {
         println!("Message     {msg}");
     }
-    println!("Created     {}", dep.created_at);
+    println!("Created     {} ({})", dep.created_at, relative_time(&dep.created_at));
     if let Some(started) = &dep.started_at {
         println!("Started     {started}");
     }
@@ -129,7 +164,21 @@ async fn show(api: &Client, id: &str, json_out: bool) -> CliResult<()> {
     Ok(())
 }
 
-async fn logs(api: &Client, id: &str, no_follow: bool, json_out: bool) -> CliResult<()> {
+async fn cancel(api: &Client, id: &str, out: OutputOpts) -> CliResult<()> {
+    let dep = api.cancel_deployment(id).await?;
+    if out.is_structured() {
+        return print_structured(&dep, out.format);
+    }
+    if out.is_name() {
+        println!("{}", dep.id);
+        return Ok(());
+    }
+    println!("Cancelled deployment {}", short(&dep.id));
+    Ok(())
+}
+
+async fn logs(api: &Client, id: &str, no_follow: bool, out: OutputOpts) -> CliResult<()> {
+    let json_out = out.is_json();
     if no_follow {
         let dep = api.get_deployment(id).await?;
         let stream = ops::deployments::follow_deployment(api, &dep.id, |data| {

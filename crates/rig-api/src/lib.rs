@@ -221,7 +221,7 @@ pub struct Me {
 
 // ------------------------------------------------------------------ tokens
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ApiToken {
     pub id: String,
@@ -482,6 +482,15 @@ pub struct LogLine {
     pub line: String,
 }
 
+/// Payload of the `end` SSE event emitted when a deployment finishes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DeploymentEndEvent {
+    pub status: String,
+    #[serde(default)]
+    pub domains: Vec<String>,
+}
+
 // ---------------------------------------------------------------- env vars
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,12 +503,22 @@ pub struct EnvVar {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SetEnvVarRequest {
     pub key: String,
     pub value: String,
     pub is_secret: bool,
+}
+
+/// Atomically create or update multiple environment variables in one transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct BulkSetEnvRequest {
+    pub vars: Vec<SetEnvVarRequest>,
+    /// When true, remove existing variables that are not in `vars`.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

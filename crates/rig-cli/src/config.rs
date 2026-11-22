@@ -15,6 +15,25 @@ use crate::error::{CliError, CliResult};
 pub struct Context {
     pub url: String,
     pub token: String,
+    /// Optional metadata captured at `rig login`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl Context {
+    pub fn basic(url: String, token: String) -> Self {
+        Self {
+            url,
+            token,
+            user: None,
+            org: None,
+            role: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -109,10 +128,27 @@ impl Config {
                     "no token for {normalized}. Set RIG_TOKEN or run: rig login {normalized}"
                 )));
             };
-            return Ok(Context {
-                url: normalized,
-                token,
-            });
+            return Ok(Context::basic(normalized, token));
+        }
+
+        if opts.context.is_none()
+            && let Ok(Some((_, link))) = crate::link::discover()
+        {
+            if let Some(ctx_name) = link.context.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                && self.contexts.contains_key(ctx_name)
+            {
+                return self.resolve(Some(ctx_name));
+            }
+            if let Some(srv) = link.server.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let norm = normalize_url(srv, opts.insecure)?.to_string();
+                if let Some(found) = self
+                    .contexts
+                    .values()
+                    .find(|c| c.url.trim_end_matches('/') == norm.trim_end_matches('/'))
+                {
+                    return Ok(found.clone());
+                }
+            }
         }
 
         self.resolve(opts.context)
@@ -138,6 +174,33 @@ impl Config {
             )));
         }
         self.current = Some(name.to_string());
+        Ok(())
+    }
+
+    pub fn rename(&mut self, old: &str, new_name: &str) -> CliResult<()> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(CliError::message("context name cannot be empty"));
+        }
+        if !self.contexts.contains_key(old) {
+            return Err(CliError::not_found(format!(
+                "there is no context called {old}. See: rig context"
+            )));
+        }
+        if old == new_name {
+            return Ok(());
+        }
+        if self.contexts.contains_key(new_name) {
+            return Err(CliError::message(format!(
+                "a context called {new_name} already exists"
+            )));
+        }
+        if let Some(ctx) = self.contexts.remove(old) {
+            self.contexts.insert(new_name.to_string(), ctx);
+        }
+        if self.current.as_deref() == Some(old) {
+            self.current = Some(new_name.to_string());
+        }
         Ok(())
     }
 
@@ -230,19 +293,19 @@ mod tests {
         let mut config = Config::default();
         assert_eq!(config.resolve(None).unwrap_err().exit_code(), 3);
         for name in ["a", "b"] {
-            config.contexts.insert(
-                name.into(),
-                Context {
-                    url: format!("https://{name}/"),
-                    token: "t".into(),
-                },
-            );
+            config
+                .contexts
+                .insert(name.into(), Context::basic(format!("https://{name}/"), "t".into()));
         }
         config.select("b").unwrap();
         assert_eq!(config.resolve(None).unwrap().url, "https://b/");
         assert_eq!(config.resolve(Some("a")).unwrap().url, "https://a/");
         assert_eq!(config.select("zzz").unwrap_err().exit_code(), 4);
-        config.remove("b").unwrap();
+        config.rename("b", "beta").unwrap();
+        assert_eq!(config.current.as_deref(), Some("beta"));
+        assert!(config.contexts.contains_key("beta"));
+        assert!(!config.contexts.contains_key("b"));
+        config.remove("beta").unwrap();
         assert_eq!(config.current.as_deref(), Some("a"));
     }
 
@@ -262,10 +325,7 @@ mod tests {
         // Server without token falls back to saved context matching that URL.
         config.contexts.insert(
             "local".into(),
-            Context {
-                url: "http://127.0.0.1:7460/".into(),
-                token: "saved_tok".into(),
-            },
+            Context::basic("http://127.0.0.1:7460/".into(), "saved_tok".into()),
         );
         let ctx = config
             .resolve_with(&ResolveOptions {

@@ -5,16 +5,23 @@ use serde_json::json;
 use crate::api::Client;
 use crate::error::CliResult;
 use crate::ops;
-use crate::output::{bytes, label, print_json};
+use crate::output::{OutputOpts, bytes, label, print_structured, style_status};
 
-pub async fn run(api: &Client, json_out: bool) -> CliResult<()> {
+pub async fn run(api: &Client, out: OutputOpts) -> CliResult<()> {
     let snap = ops::system::status(api).await?;
-    if json_out {
-        return print_json(&json!({
-            "server": api.base(),
-            "me": snap.me,
-            "system": snap.system,
-        }));
+    if out.is_structured() {
+        return print_structured(
+            &json!({
+                "server": api.base(),
+                "me": snap.me,
+                "system": snap.system,
+            }),
+            out.format,
+        );
+    }
+    if out.is_name() {
+        println!("{}", snap.me.org.name);
+        return Ok(());
     }
     let me = snap.me;
     let sys = snap.system;
@@ -28,14 +35,14 @@ pub async fn run(api: &Client, json_out: bool) -> CliResult<()> {
     println!("Server   {} · Rig {}", api.base(), sys.version);
     match (&sys.engine, &sys.engine_version) {
         (Some(engine), Some(version)) => println!("Engine   {engine} {version}"),
-        _ => println!("Engine   not reachable"),
+        _ => println!("Engine   {}", style_status("not reachable")),
     }
     println!(
         "Proxy    {}",
         if sys.proxy_ready {
-            "ready"
+            style_status("ready")
         } else {
-            "not reachable"
+            style_status("not reachable")
         }
     );
     println!(

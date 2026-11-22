@@ -18,6 +18,30 @@ use tokio::sync::mpsc;
 pub struct LogMsg {
     pub stream: &'static str,
     pub line: String,
+    /// Container timestamp when requested from the engine.
+    pub ts: Option<String>,
+}
+
+/// Query options for reading container logs.
+#[derive(Debug, Clone, Copy)]
+pub struct LogOptions {
+    pub tail: u32,
+    pub follow: bool,
+    /// Unix timestamp in seconds; return only logs since this instant.
+    pub since: Option<i64>,
+    /// Ask the engine for per-line timestamps.
+    pub timestamps: bool,
+}
+
+impl Default for LogOptions {
+    fn default() -> Self {
+        Self {
+            tail: 200,
+            follow: true,
+            since: None,
+            timestamps: false,
+        }
+    }
 }
 
 /// Where a long-running engine operation reports progress.
@@ -43,6 +67,7 @@ impl LogSink {
                 .send(LogMsg {
                     stream,
                     line: truncate(line, MAX_LINE),
+                    ts: None,
                 })
                 .await;
         }
@@ -209,8 +234,21 @@ pub trait Runtime: Send + Sync {
     /// Force-remove. Succeeds if the container is already gone.
     async fn remove(&self, id: &str) -> Result<()>;
 
+    /// Container output with full query options.
+    fn logs_with(&self, id: &str, opts: LogOptions) -> LogStream;
+
     /// Container output: the last `tail` lines, then live output if `follow`.
-    fn logs(&self, id: &str, tail: u32, follow: bool) -> LogStream;
+    fn logs(&self, id: &str, tail: u32, follow: bool) -> LogStream {
+        self.logs_with(
+            id,
+            LogOptions {
+                tail,
+                follow,
+                since: None,
+                timestamps: false,
+            },
+        )
+    }
 
     /// Ids of every container carrying `label=value`, running or not.
     async fn list_by_label(&self, label: &str, value: &str) -> Result<Vec<String>>;
