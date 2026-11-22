@@ -1,0 +1,5175 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Rig API",
+    "description": "Self-hosted deployment platform. Authenticate with the session cookie (plus `x-rig-csrf` on writes) or `Authorization: Bearer rig_...`.",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/account/totp": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Whether two-factor sign-in is on for you.",
+        "operationId": "totp_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/totp/disable": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Turn two-factor sign-in off. Needs your password and a current code\n(or a recovery code), and signs out your other sessions.",
+        "operationId": "totp_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpDisable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/totp/enable": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Confirm the new authenticator with a code. Turns two-factor sign-in on,\nsigns out your other sessions and returns ten recovery codes, once.",
+        "operationId": "totp_enable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/totp/recovery-codes": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Replace your recovery codes. The old ones stop working.",
+        "operationId": "totp_regenerate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TotpDisable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/totp/setup": {
+      "post": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Start turning on two-factor sign-in. Returns a secret and its QR code;\nnothing changes until it is confirmed with a code.",
+        "operationId": "totp_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrollment"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/channels": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Alert channels in this organization.",
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AlertChannel"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Add a channel. The signing secret is returned only here.",
+        "operationId": "create_channel",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAlertChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAlertChannel"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/channels/{id}": {
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Remove a channel.",
+        "operationId": "delete_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Rename a channel, change its events, or pause it.",
+        "operationId": "update_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAlertChannelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertChannel"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts/channels/{id}/test": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Send a test alert now and report what happened.",
+        "operationId": "test_channel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertTestResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "list_apps",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Only apps in this project.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/App"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "create_app",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAppRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/App"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "operationId": "get_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/App"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Delete an app, its containers, deployments, variables and domains.",
+        "operationId": "delete_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Change an app's settings. They take effect on the next deployment.",
+        "operationId": "update_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAppRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/App"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/deploy": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Queue a deployment of the app's current source.",
+        "operationId": "deploy_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/deployments": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "operationId": "list_deployments",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Deployment"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/domains": {
+      "get": {
+        "tags": [
+          "domains"
+        ],
+        "operationId": "list_domains",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Domain"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "domains"
+        ],
+        "summary": "Route a hostname to the app. Applied to the proxy at once if the app is running.",
+        "operationId": "add_domain",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Domain"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/domains/{domain_id}": {
+      "delete": {
+        "tags": [
+          "domains"
+        ],
+        "operationId": "delete_domain",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "domain_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/env": {
+      "get": {
+        "tags": [
+          "env"
+        ],
+        "summary": "An app's variables. Secret values are never included; reveal them one at\na time.",
+        "operationId": "list_env",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EnvVar"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "env"
+        ],
+        "summary": "Create or replace one variable. Takes effect on the next deployment.",
+        "operationId": "set_env",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnvVarRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvVar"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/env/{key}": {
+      "delete": {
+        "tags": [
+          "env"
+        ],
+        "operationId": "delete_env",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/env/{key}/reveal": {
+      "post": {
+        "tags": [
+          "env"
+        ],
+        "summary": "Read one secret's value. Every reveal is written to the audit log.",
+        "operationId": "reveal_env",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevealedEnvVar"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/logs": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "The running container's output as server-sent events: the last 200 lines,\nthen live output. Each `log` event's data is a `LogLine`.",
+        "operationId": "app_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/metrics": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "CPU and memory use of an app's container over time.",
+        "operationId": "app_metrics",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "description": "How far back to look. Defaults to one hour.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MetricRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricSeries"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/stop": {
+      "post": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Stop an app's containers and take it off the proxy.",
+        "operationId": "stop_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/App"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/webhook": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "The app's push-to-deploy webhook. Reading the secret is audited.",
+        "operationId": "get_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppWebhook"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/webhook/rotate": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Replace the webhook secret. Hooks signed with the old one stop working.",
+        "operationId": "rotate_webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppWebhook"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "The most recent audit log entries for the organization.",
+        "operationId": "list_audit",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditEntry"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign in with email and password. Sets the session cookie.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "End the current session.",
+        "operationId": "logout",
+        "responses": {
+          "204": {},
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The signed-in user, their organization and role.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change your own password. Signs out your other sessions.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/backups/{id}": {
+      "delete": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Delete a backup and its file.",
+        "operationId": "delete_backup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/backups/{id}/download": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Download a backup file. It holds the database's data, so this is audited.",
+        "operationId": "download_backup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/backups/{id}/restore": {
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Restore a backup into its database, replacing the current data.",
+        "operationId": "restore_backup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "List databases.",
+        "operationId": "list_databases",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "Only databases in this project.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Database"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Create a database and start it. Poll the database until it is `running`.",
+        "operationId": "create_database",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDatabaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Database"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/engines": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Engines and versions Rig can run.",
+        "operationId": "list_engines",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatabaseEngineInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Get one database.",
+        "operationId": "get_database",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Database"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Delete a database and all of its data.",
+        "operationId": "delete_database",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}/backups": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Backups of a database, newest first.",
+        "operationId": "list_backups",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Backup"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Take a backup now. The dump runs in the background; poll the list.",
+        "operationId": "create_backup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Backup"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}/metrics": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "CPU and memory use of a database's container over time.",
+        "operationId": "database_metrics",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "description": "How far back to look. Defaults to one hour.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MetricRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricSeries"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}/reveal": {
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Reveal the password and connection URL. Recorded in the audit log.",
+        "operationId": "reveal_database",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseCredentials"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}/start": {
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Start a stopped or failed database on its existing data.",
+        "operationId": "start_database",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Database"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/databases/{id}/stop": {
+      "post": {
+        "tags": [
+          "databases"
+        ],
+        "summary": "Stop a running database. Its data is kept.",
+        "operationId": "stop_database",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Database"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "operationId": "get_deployment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/logs": {
+      "get": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "A deployment's build and deploy output as server-sent events.",
+        "description": "Sends a `log` event per line (data is a `LogLine`), then one `end` event\ncarrying the final status once the deployment finishes. Reconnecting with\n`Last-Event-ID` or `?after=` resumes without repeats.",
+        "operationId": "deployment_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Send only lines after this sequence number.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/rollback": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Deploy the image of an earlier deployment again.",
+        "operationId": "rollback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/github": {
+      "get": {
+        "tags": [
+          "github"
+        ],
+        "summary": "The GitHub App connected to this organization, if any.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Forget the GitHub App. The App itself stays on GitHub until you delete it there.",
+        "operationId": "disconnect",
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/github/manifest": {
+      "post": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Start creating a GitHub App. The browser posts `manifest` to `post_url`;\nGitHub then redirects back to `/settings/github/callback`.",
+        "operationId": "manifest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubManifestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubManifest"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/github/manifest/complete": {
+      "post": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Finish creating the GitHub App with the code GitHub redirected back with.",
+        "operationId": "complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GithubManifestComplete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/github/repos": {
+      "get": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Repositories the GitHub App is installed on.",
+        "operationId": "repos",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GithubRepo"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/github/repos/{owner}/{repo}/branches": {
+      "get": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Branches of one repository the GitHub App is installed on, default first.",
+        "operationId": "branches",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GithubBranch"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hooks/apps/{id}": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Deploy an app from a Git host or CI webhook.",
+        "operationId": "app_hook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Any payload. Signed with the app's webhook secret.",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hooks/github/{org_id}": {
+      "post": {
+        "tags": [
+          "github"
+        ],
+        "summary": "Push events from the organization's GitHub App.",
+        "operationId": "push_hook",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "A GitHub webhook delivery.",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubPushResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubPushResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members": {
+      "get": {
+        "tags": [
+          "members"
+        ],
+        "summary": "Everyone in this organization.",
+        "operationId": "list_members",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Member"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "members"
+        ],
+        "summary": "Add a person. Returns a temporary password to hand to them, once.",
+        "operationId": "add_member",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMemberRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberWithPassword"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/{user_id}": {
+      "delete": {
+        "tags": [
+          "members"
+        ],
+        "summary": "Remove a member. Their sessions and API tokens stop working at once.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "members"
+        ],
+        "summary": "Change a member's role.",
+        "operationId": "update_member",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Member"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/{user_id}/reset-password": {
+      "post": {
+        "tags": [
+          "members"
+        ],
+        "summary": "Give a member a new temporary password and sign them out everywhere.",
+        "operationId": "reset_password",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberWithPassword"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Every project in the organization, with how many apps each holds.",
+        "operationId": "list_projects",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "operationId": "create_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}": {
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Delete a project, its apps and their containers. Its databases are moved\nto another project or deleted, as the caller chooses.",
+        "operationId": "delete_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "databases",
+            "in": "query",
+            "description": "Required when the project has databases: move them to `target`, or\ndelete them with their data and backups.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "What happens to a project's databases when the project is deleted.",
+              "enum": [
+                "move",
+                "delete"
+              ]
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "The project that receives the databases when `databases=move`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Rename a project or change its description.",
+        "operationId": "update_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/setup": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Whether the instance still needs its first owner account.",
+        "operationId": "setup_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create the first owner and organization using the one-time setup token.",
+        "operationId": "complete_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Health of the server Rig runs on: engine, proxy and resource usage.",
+        "operationId": "system_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/dashboard-access": {
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Limit who may open the dashboard and API to the local network or the\ntailnet. Deploy webhooks stay reachable. Refused if it would lock out the\naddress you are using now. On the server,\n`rig-server dashboard-access public` undoes it.",
+        "operationId": "set_dashboard_access",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardAccessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/dashboard-domain": {
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Serve the dashboard on a domain of its own (with a certificate unless\n`tls_mode` is `off`), or send `host: null` to serve it on the machine's\naddresses over plain HTTP again. Point the name's DNS at this server\nfirst: the old address stops serving the dashboard. On the server,\n`rig-server dashboard-domain --clear` undoes it.",
+        "operationId": "set_dashboard_domain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "CPU and memory use of the server over time.",
+        "operationId": "host_metrics",
+        "parameters": [
+          {
+            "name": "range",
+            "in": "query",
+            "description": "How far back to look. Defaults to one hour.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MetricRange"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricSeries"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/network": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Where this machine can be reached (LAN addresses, Tailscale name) and who\nmay open the dashboard.",
+        "operationId": "network_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tokens": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Your API tokens in this organization.",
+        "operationId": "list_tokens",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiToken"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Create an API token for the CLI or MCP. The secret is returned once.",
+        "operationId": "create_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApiTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiToken"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Revoke one of your API tokens.",
+        "operationId": "delete_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Access": {
+        "type": "string",
+        "description": "Who may reach a domain or the dashboard, judged by the connecting\naddress.",
+        "enum": [
+          "public",
+          "lan",
+          "tailscale"
+        ]
+      },
+      "AddDomainRequest": {
+        "type": "object",
+        "required": [
+          "host",
+          "tls_mode"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/Access"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          }
+        }
+      },
+      "AddMemberRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "AlertChannel": {
+        "type": "object",
+        "description": "A URL Rig posts alerts to. The URL itself is never returned, only its host.",
+        "required": [
+          "id",
+          "name",
+          "url_host",
+          "events",
+          "enabled",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the most recent delivery failed; empty after a success."
+          },
+          "last_sent_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "url_host": {
+            "type": "string"
+          }
+        }
+      },
+      "AlertEvent": {
+        "type": "string",
+        "description": "Something Rig can alert about.",
+        "enum": [
+          "deploy_failed",
+          "app_crashed",
+          "app_down",
+          "disk_low",
+          "backup_failed"
+        ]
+      },
+      "AlertTestResult": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiToken": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "role",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "First characters of the token, for recognising it in a list."
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "App": {
+        "type": "object",
+        "required": [
+          "id",
+          "project_id",
+          "project_name",
+          "name",
+          "slug",
+          "source_kind",
+          "dockerfile_path",
+          "port",
+          "status",
+          "domains",
+          "volumes",
+          "auto_deploy",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "auto_deploy": {
+            "type": "boolean",
+            "description": "Git apps: deploy on every push to the branch (GitHub App webhook or polling)."
+          },
+          "cpu_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "CPU limit in thousandths of a core.",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "current_deployment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dockerfile_path": {
+            "type": "string"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "health_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "HTTP path that must answer before traffic is switched. TCP check when unset."
+          },
+          "host_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Loopback port of the live container, for reaching the app without a domain.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_crash": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AppCrash",
+                "description": "The latest crash the watcher saw on the live container, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Port the app listens on inside its container.",
+            "minimum": 0
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/SourceKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AppStatus"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paths inside the container backed by persistent volumes. Apps with\nvolumes deploy stop-then-start so two containers never share one."
+          }
+        }
+      },
+      "AppCrash": {
+        "type": "object",
+        "required": [
+          "at",
+          "reason",
+          "restarts"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "restarts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Restarts of the live container so far.",
+            "minimum": 0
+          }
+        }
+      },
+      "AppStatus": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "deploying",
+          "running",
+          "stopped",
+          "failed"
+        ]
+      },
+      "AppWebhook": {
+        "type": "object",
+        "description": "Where to send push-to-deploy webhooks for an app, and the secret that signs them.",
+        "required": [
+          "path",
+          "secret"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path on this server; prefix it with the dashboard's address."
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "AuditEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "actor",
+          "action",
+          "created_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Backup": {
+        "type": "object",
+        "description": "A dump of one managed database, kept on the server's disk.",
+        "required": [
+          "id",
+          "database_id",
+          "status",
+          "restorable",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "database_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the dump failed."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "restorable": {
+            "type": "boolean",
+            "description": "Whether this backup can be restored in place. Redis dumps cannot yet."
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BackupStatus"
+          }
+        }
+      },
+      "BackupStatus": {
+        "type": "string",
+        "enum": [
+          "running",
+          "ok",
+          "failed"
+        ]
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateAlertChannelRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "url",
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateApiTokenRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "role"
+        ],
+        "properties": {
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days until expiry. Omit for a token that does not expire.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "CreateAppRequest": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "name",
+          "source_kind",
+          "port"
+        ],
+        "properties": {
+          "cpu_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "dockerfile_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SetEnvVarRequest"
+            },
+            "description": "Environment variables set before the first deploy."
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `git` sources. `https://` or `ssh://` URL."
+          },
+          "health_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for `image` sources, e.g. `nginx:alpine`."
+          },
+          "memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/components/schemas/SourceKind"
+          },
+          "volumes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Absolute paths inside the container to keep across deploys."
+          }
+        }
+      },
+      "CreateDatabaseRequest": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "name",
+          "engine"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/DatabaseEngine"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One of the engine's offered versions. Defaults to the newest."
+          }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CreatedAlertChannel": {
+        "type": "object",
+        "description": "A new channel, with the secret that signs its requests. Shown once.",
+        "required": [
+          "channel",
+          "signing_secret"
+        ],
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/AlertChannel"
+          },
+          "signing_secret": {
+            "type": "string"
+          }
+        }
+      },
+      "CreatedApiToken": {
+        "type": "object",
+        "required": [
+          "token",
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The full secret. Shown once and never retrievable again."
+          },
+          "token": {
+            "$ref": "#/components/schemas/ApiToken"
+          }
+        }
+      },
+      "DashboardAccessRequest": {
+        "type": "object",
+        "required": [
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/Access"
+          }
+        }
+      },
+      "DashboardDomain": {
+        "type": "object",
+        "required": [
+          "host",
+          "tls_mode"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          }
+        }
+      },
+      "DashboardDomainRequest": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The hostname, or null to serve the dashboard on the machine's\naddresses over plain HTTP again."
+          },
+          "tls_mode": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TlsMode",
+                "description": "`auto` (public certificate), `internal` or `tailscale`. Defaults to `auto`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "Database": {
+        "type": "object",
+        "description": "A managed database. Its password is only returned by the reveal endpoint.",
+        "required": [
+          "id",
+          "project_id",
+          "project_name",
+          "name",
+          "engine",
+          "version",
+          "status",
+          "host",
+          "port",
+          "username",
+          "db_name",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "db_name": {
+            "type": "string"
+          },
+          "engine": {
+            "$ref": "#/components/schemas/DatabaseEngine"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last start failed."
+          },
+          "host": {
+            "type": "string",
+            "description": "Hostname apps in the same project use to reach it."
+          },
+          "host_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Loopback port on the server while running, for tunnels and admin tools.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Port on that hostname.",
+            "minimum": 0
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "project_name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DatabaseStatus"
+          },
+          "username": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "DatabaseCredentials": {
+        "type": "object",
+        "description": "Credentials for a database, as returned by the audited reveal endpoint.",
+        "required": [
+          "password",
+          "url"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "Connection URL for apps in the same project."
+          }
+        }
+      },
+      "DatabaseEngine": {
+        "type": "string",
+        "enum": [
+          "postgres",
+          "mysql",
+          "mariadb",
+          "redis",
+          "mongodb"
+        ]
+      },
+      "DatabaseEngineInfo": {
+        "type": "object",
+        "description": "What the dashboard offers when creating a database.",
+        "required": [
+          "engine",
+          "label",
+          "versions",
+          "port"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/DatabaseEngine"
+          },
+          "label": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "DatabaseStatus": {
+        "type": "string",
+        "enum": [
+          "creating",
+          "running",
+          "stopped",
+          "failed"
+        ]
+      },
+      "Deployment": {
+        "type": "object",
+        "required": [
+          "id",
+          "app_id",
+          "status",
+          "trigger",
+          "created_at"
+        ],
+        "properties": {
+          "app_id": {
+            "type": "string"
+          },
+          "commit_msg": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit_sha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "image_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/DeploymentStatus"
+          },
+          "trigger": {
+            "type": "string",
+            "description": "`manual`, `webhook`, `rollback` or `api`."
+          }
+        }
+      },
+      "DeploymentStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "building",
+          "deploying",
+          "running",
+          "superseded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "Domain": {
+        "type": "object",
+        "required": [
+          "id",
+          "host",
+          "tls_mode",
+          "access",
+          "created_at"
+        ],
+        "properties": {
+          "access": {
+            "$ref": "#/components/schemas/Access"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A listener port of its own, for names that several apps share (a\nmachine has one Tailscale name). None serves on the standard ports.",
+            "minimum": 0
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          }
+        }
+      },
+      "EnvVar": {
+        "type": "object",
+        "required": [
+          "key",
+          "is_secret",
+          "updated_at"
+        ],
+        "properties": {
+          "is_secret": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` for secrets; use the reveal endpoint to read one."
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine-readable code, e.g. `unauthorized`, `validation`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable message, safe to show in the UI."
+          }
+        }
+      },
+      "GithubAppInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "slug",
+          "html_url",
+          "owner",
+          "install_url",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "html_url": {
+            "type": "string"
+          },
+          "install_url": {
+            "type": "string",
+            "description": "Install the App on repositories here."
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string",
+            "description": "The account or organization that owns the App."
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "GithubBranch": {
+        "type": "object",
+        "description": "A branch of a repository the GitHub App can read.",
+        "required": [
+          "name",
+          "default",
+          "protected"
+        ],
+        "properties": {
+          "default": {
+            "type": "boolean",
+            "description": "Whether this is the repository's default branch."
+          },
+          "name": {
+            "type": "string"
+          },
+          "protected": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GithubManifest": {
+        "type": "object",
+        "description": "POST `manifest` as a form field to `post_url` from the browser.",
+        "required": [
+          "post_url",
+          "manifest"
+        ],
+        "properties": {
+          "manifest": {
+            "type": "string",
+            "description": "The App manifest, as JSON text."
+          },
+          "post_url": {
+            "type": "string"
+          }
+        }
+      },
+      "GithubManifestComplete": {
+        "type": "object",
+        "description": "What GitHub sends back to the redirect URL after the App is created.",
+        "required": [
+          "code",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "GithubManifestRequest": {
+        "type": "object",
+        "description": "Start creating a GitHub App through GitHub's manifest flow.",
+        "properties": {
+          "organization": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Create the App under this GitHub organization instead of your account."
+          }
+        }
+      },
+      "GithubPushResult": {
+        "type": "object",
+        "description": "Outcome of a GitHub App push delivery.",
+        "required": [
+          "deployment_ids"
+        ],
+        "properties": {
+          "deployment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Deployments queued, one per matching auto-deploy app."
+          },
+          "skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing was deployed, when nothing was."
+          }
+        }
+      },
+      "GithubRepo": {
+        "type": "object",
+        "description": "A repository the GitHub App is installed on.",
+        "required": [
+          "full_name",
+          "clone_url",
+          "default_branch",
+          "private"
+        ],
+        "properties": {
+          "clone_url": {
+            "type": "string"
+          },
+          "default_branch": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "private": {
+            "type": "boolean"
+          }
+        }
+      },
+      "GithubStatus": {
+        "type": "object",
+        "description": "The organization's GitHub App, when one is connected.",
+        "required": [
+          "poll_interval",
+          "webhook_url"
+        ],
+        "properties": {
+          "app": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubAppInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "poll_interval": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds between branch polls for auto-deploy apps; 0 when polling is off.",
+            "minimum": 0
+          },
+          "webhook_url": {
+            "type": "string",
+            "description": "Where GitHub sends push events for this organization."
+          }
+        }
+      },
+      "LogLine": {
+        "type": "object",
+        "required": [
+          "seq",
+          "ts",
+          "stream",
+          "line"
+        ],
+        "properties": {
+          "line": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stream": {
+            "type": "string",
+            "description": "`build`, `deploy`, `stdout` or `stderr`."
+          },
+          "ts": {
+            "type": "string"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The authenticator code or a recovery code, when the account has a\nsecond factor. A login without one answers 401 `second_factor_required`."
+          },
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "Me": {
+        "type": "object",
+        "description": "The signed-in principal. `csrf_token` must be echoed in `x-rig-csrf`\non every state-changing request made with the session cookie.",
+        "required": [
+          "user",
+          "org",
+          "role",
+          "csrf_token"
+        ],
+        "properties": {
+          "csrf_token": {
+            "type": "string"
+          },
+          "org": {
+            "$ref": "#/components/schemas/Organization"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "Member": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "name",
+          "email",
+          "role",
+          "joined_at"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "joined_at": {
+            "type": "string"
+          },
+          "last_login_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "MemberWithPassword": {
+        "type": "object",
+        "description": "A member together with a temporary password, shown once.",
+        "required": [
+          "member",
+          "temporary_password"
+        ],
+        "properties": {
+          "member": {
+            "$ref": "#/components/schemas/Member"
+          },
+          "temporary_password": {
+            "type": "string",
+            "description": "Hand this to the person; they should change it after signing in."
+          }
+        }
+      },
+      "MetricPoint": {
+        "type": "object",
+        "required": [
+          "ts",
+          "cpu_percent",
+          "memory_bytes"
+        ],
+        "properties": {
+          "cpu_percent": {
+            "type": "number",
+            "format": "double",
+            "description": "Average CPU use. For the host, percent of all cores; for a container,\npercent of one core (so it can exceed 100)."
+          },
+          "memory_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "net_rx_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Average network throughput in bytes per second. Missing until two\nsamples exist to measure between."
+          },
+          "net_tx_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "ts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start of the interval, in Unix seconds."
+          }
+        }
+      },
+      "MetricRange": {
+        "type": "string",
+        "description": "How far back a metric series reaches.",
+        "enum": [
+          "1h",
+          "6h",
+          "24h"
+        ]
+      },
+      "MetricSeries": {
+        "type": "object",
+        "required": [
+          "range",
+          "step_seconds",
+          "memory_total",
+          "points"
+        ],
+        "properties": {
+          "memory_total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Host memory, or the container's limit. Zero when unlimited or unknown.",
+            "minimum": 0
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MetricPoint"
+            },
+            "description": "Oldest first. Intervals without samples are absent."
+          },
+          "range": {
+            "$ref": "#/components/schemas/MetricRange"
+          },
+          "step_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds each point covers.",
+            "minimum": 0
+          }
+        }
+      },
+      "NetworkInfo": {
+        "type": "object",
+        "description": "Where this machine can be reached, to help pick a domain.",
+        "required": [
+          "lan_addresses",
+          "dashboard_access"
+        ],
+        "properties": {
+          "dashboard_access": {
+            "$ref": "#/components/schemas/Access",
+            "description": "Who may open the dashboard."
+          },
+          "dashboard_domain": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DashboardDomain",
+                "description": "The hostname the dashboard is served on. Without one, the proxy\nserves the dashboard on plain HTTP at any address of this machine."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lan_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Private addresses of this machine's interfaces."
+          },
+          "tailscale": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TailscaleInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "your_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address this request came from, as Rig sees it."
+          }
+        }
+      },
+      "Organization": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "PasswordConfirm": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "description",
+          "app_count",
+          "created_at"
+        ],
+        "properties": {
+          "app_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "RecoveryCodes": {
+        "type": "object",
+        "description": "Shown once; only hashes are kept.",
+        "required": [
+          "codes"
+        ],
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RevealedEnvVar": {
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "description": "Organization role. Ordered: a higher role includes every lower one.",
+        "enum": [
+          "viewer",
+          "developer",
+          "admin",
+          "owner"
+        ]
+      },
+      "SetEnvVarRequest": {
+        "type": "object",
+        "required": [
+          "key",
+          "value",
+          "is_secret"
+        ],
+        "properties": {
+          "is_secret": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "SetupRequest": {
+        "type": "object",
+        "required": [
+          "token",
+          "name",
+          "email",
+          "password",
+          "org_name"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "One-time token printed by the server on first start."
+          }
+        }
+      },
+      "SetupStatus": {
+        "type": "object",
+        "required": [
+          "setup_complete",
+          "version"
+        ],
+        "properties": {
+          "setup_complete": {
+            "type": "boolean",
+            "description": "False until the first owner account has been created."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "SourceKind": {
+        "type": "string",
+        "description": "Where an app's image comes from.",
+        "enum": [
+          "image",
+          "git"
+        ]
+      },
+      "SystemInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "proxy_ready",
+          "cpu_percent",
+          "memory_used",
+          "memory_total",
+          "disk_used",
+          "disk_total",
+          "apps_running",
+          "apps_total"
+        ],
+        "properties": {
+          "apps_running": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "apps_total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "cpu_percent": {
+            "type": "number",
+            "format": "float"
+          },
+          "disk_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "disk_used": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "engine": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`docker` or `podman`, when the engine answers."
+          },
+          "engine_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memory_total": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_used": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "proxy_ready": {
+            "type": "boolean",
+            "description": "False when the proxy's admin endpoint cannot be reached; apps still\nrun and stay reachable on their loopback ports."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "TailscaleInfo": {
+        "type": "object",
+        "required": [
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "dns_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The machine's MagicDNS name, e.g. `box.tail1234.ts.net`."
+          }
+        }
+      },
+      "TlsMode": {
+        "type": "string",
+        "description": "How a domain is served.",
+        "enum": [
+          "auto",
+          "internal",
+          "off",
+          "tailscale"
+        ]
+      },
+      "TotpCode": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      },
+      "TotpDisable": {
+        "type": "object",
+        "required": [
+          "password",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "TotpEnrollment": {
+        "type": "object",
+        "description": "A new secret to add to an authenticator app. It only takes effect once\nconfirmed with a code.",
+        "required": [
+          "secret",
+          "otpauth_uri",
+          "qr_svg"
+        ],
+        "properties": {
+          "otpauth_uri": {
+            "type": "string"
+          },
+          "qr_svg": {
+            "type": "string",
+            "description": "The URI as an SVG QR code."
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "TotpStatus": {
+        "type": "object",
+        "description": "Whether the signed-in user has a second factor.",
+        "required": [
+          "enabled",
+          "recovery_codes_left"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "enabled_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recovery_codes_left": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UpdateAlertChannelRequest": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateAppRequest": {
+        "type": "object",
+        "description": "Every field is optional; only the ones present are changed. Changes take\neffect on the next deployment.",
+        "properties": {
+          "auto_deploy": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Git apps only: deploy on every push to the branch."
+          },
+          "cpu_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "0 removes the limit.",
+            "minimum": 0
+          },
+          "dockerfile_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "git_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "health_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An empty string switches back to the TCP check."
+          },
+          "image": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "0 removes the limit.",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "UpdateMemberRequest": {
+        "type": "object",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "UpdateProjectRequest": {
+        "type": "object",
+        "description": "Rename a project or change its description. Omitted fields are kept.\nThe slug stays as it was, so nothing addressing the project breaks.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "name"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "WebhookResult": {
+        "type": "object",
+        "description": "Outcome of a push-to-deploy webhook.",
+        "properties": {
+          "deployment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The queued deployment, when one was started."
+          },
+          "skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why nothing was deployed, for pings and pushes to other branches."
+          }
+        }
+      }
+    }
+  }
+}

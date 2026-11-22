@@ -1,0 +1,43 @@
+[Unit]
+Description=Rig self-hosted deploy platform
+Documentation=file:///usr/local/share/doc/rig/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=rig
+Group=rig
+SupplementaryGroups=docker
+EnvironmentFile=/etc/rig/rig.env
+ExecStart=/usr/local/bin/rig-server serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+# Rig keeps everything it writes under its data directory.
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rig
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
