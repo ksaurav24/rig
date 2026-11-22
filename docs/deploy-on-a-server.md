@@ -13,53 +13,73 @@ first app. It takes about five minutes.
   through its proxy.
 - Optional: a domain whose DNS you control, for HTTPS.
 
-## 1. Build the bundle (on your machine)
+## 1. Install on your server (recommended)
+
+Run the interactive installer directly from GitHub Releases:
+
+```sh
+curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
+```
+
+Or pass flags directly (for scripted installs or to skip prompts):
+
+```sh
+curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh \
+  | sudo bash -s -- --podman --domain rig.example.com --tls auto --access public
+```
+
+### Or build a bundle yourself (from source)
 
 ```sh
 scripts/package.sh
-# -> dist/rig-0.1.0-x86_64-linux.tar.gz
-```
-
-The binaries are built inside Debian 12, so they run on every distribution
-listed above.
-
-## 2. Install (on the VM)
-
-```sh
+# -> dist/rig-0.1.0-x86_64-linux.tar.gz and dist/install.sh
 scp dist/rig-0.1.0-x86_64-linux.tar.gz you@your-vm:
 ssh you@your-vm
 tar xzf rig-0.1.0-x86_64-linux.tar.gz && cd rig-0.1.0-x86_64-linux
 sudo ./install.sh
 ```
 
-The installer:
+The interactive wizard clears the terminal and walks you through:
 
-- picks Docker if it is already installed, otherwise rootless Podman (when the
-  distribution ships Podman 4.9+, falling back to Docker on older ones; set
-  `RIG_ENGINE=docker` or `RIG_ENGINE=podman` to choose explicitly);
-- installs the chosen engine and git from the distribution's own packages, if missing;
-- creates a `rig` system user, `/var/lib/rig` (data) and `/etc/rig/rig.env`
-  (settings);
-- starts Caddy as the `rig-caddy` container on ports 80 and 443;
-- installs and starts the `rig` systemd service;
-- prints the address to open and a one-time setup token (valid 30 minutes).
+- **Container engine:** rootless Podman (4.9+) or Docker. Missing packages are installed from your distro automatically, existing Docker installs are detected and pre-selected, older installed Podman (`< 4.9`) is upgraded when your distro ships `4.9+`, and unavailable options stay visible with clear guidance (e.g. `[upgrade needed]` on Debian 12's Podman 4.3).
+- **Mode:** Full (API + web dashboard; `Headless [coming soon]` is listed for visibility).
+- **Dashboard address & HTTPS:** configure HTTPS right during installation so your initial password never crosses the network unencrypted:
+  - **Custom domain + Let's Encrypt (`--domain rig.example.com --tls auto`)** with live DNS verification and retry;
+  - **Tailscale HTTPS (`--tls tailscale`)** when Tailscale is installed and connected (shown as `[not installed]` or `[not connected]` otherwise);
+  - **Self-signed HTTPS (`--tls internal`)** on your server IP or LAN hostname; or
+  - **Plain HTTP (`--tls off`)** with an SSH tunnel tip.
+- **Dashboard access scope:** Public, LAN only, or Tailscale only (`--access public|lan|tailscale`).
 
-Running it again upgrades in place, after copying the database to
-`/var/lib/rig/rig.db.pre-upgrade-<time>`.
+### Installer flags
 
-## 3. Create the owner account
+All choices can also be passed on the command line (or via `RIG_*` environment variables). Partial flags skip those prompts in the wizard; pass `-y` / `--yes` (or run without a TTY) for fully unattended installs.
 
-Open the printed address (`http://<vm-ip>`), paste the setup token and choose
-an email and password. Lost the token or it expired?
+| Flag | Env var | Description |
+| --- | --- | --- |
+| `--podman` / `--docker` | `RIG_ENGINE` | Select rootless Podman or Docker |
+| `--engine <podman\|docker>` | `RIG_ENGINE` | Explicit container engine |
+| `--domain <host>` | `RIG_DOMAIN` | Dashboard domain or IP |
+| `--tls <auto\|internal\|tailscale\|off>` | `RIG_TLS` | Dashboard HTTPS mode |
+| `--access <public\|lan\|tailscale>` | `RIG_ACCESS` | Who may reach the dashboard |
+| `--mode <full\|headless>` / `--headless` | `RIG_MODE` | Install mode (`full`; `headless` coming soon) |
+| `-y`, `--yes`, `--non-interactive` | `RIG_YES=1` | Skip interactive prompts and use flags/defaults |
+| `--version <ver>` | `RIG_VERSION` | Pin GitHub Release version (default: latest) |
+| `--repo <owner/repo>` | `RIG_REPO` | Override GitHub Releases repository |
+| `--uninstall` | — | Stop and remove Rig (keeps `/var/lib/rig` and `/etc/rig`) |
+
+Running `install.sh` again on an existing server upgrades in place after backing up `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<time>`.
+
+## 2. Create the owner account
+
+Open the printed address (`https://rig.example.com` or `https://<vm-ip>`), paste the one-time setup token (valid 30 minutes), and choose an email and password. Lost the token or it expired?
 
 ```sh
 sudo -u rig rig-server --data-dir /var/lib/rig setup-token
 ```
 
-## 4. Put the dashboard on HTTPS (recommended)
+## 3. Change dashboard domain or HTTPS later
 
-Until it has a domain, the dashboard is plain HTTP on the VM's address, so
-your password crosses the network unencrypted. To fix that:
+If you skipped HTTPS during installation (or want to change domains later):
 
 1. Add a DNS **A** record such as `rig.example.com` pointing at the VM.
 2. In the dashboard, open **Settings → Network → Dashboard address**, enter
@@ -78,7 +98,7 @@ It takes effect within a minute, or at once after `sudo systemctl restart rig`.
 No public domain? Pick **Tailscale** (on a VM in your tailnet) or
 **Private CA** instead.
 
-## 5. Deploy an app
+## 4. Deploy an app
 
 1. **Projects → New project**, then **New app**.
 2. Choose a source:
@@ -102,7 +122,10 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 | Settings | `/etc/rig/rig.env`, then restart |
 | Back up | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
 | CLI | `rig login https://rig.example.com`, then paste a token from **Settings → API tokens** |
+| Password reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` (generates a random password, signs out all sessions, and clears login rate limits) |
 | Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` |
+| Clear dashboard domain | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear` |
+| Reset dashboard access | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public` |
 | Uninstall | `sudo ./install.sh --uninstall` (keeps `/var/lib/rig`) |
 
 ## Security notes

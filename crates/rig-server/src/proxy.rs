@@ -415,6 +415,27 @@ mod tests {
         assert!(c["apps"]["http"]["servers"].get("rig_http").is_none());
     }
 
+    #[test]
+    fn dashboard_internal_tls_works_on_bare_ip() {
+        let o = CaddyOptions { dashboard_port: Some(7460), ..opts() };
+        let d = DashboardDomain {
+            host: "203.0.113.10".into(),
+            tls_mode: TlsMode::Internal,
+        };
+        let c = caddy_config(&o, &[], Some(&d));
+        let https = &c["apps"]["http"]["servers"]["rig_https"]["routes"];
+        assert_eq!(https[0]["match"][0]["host"], json!(["203.0.113.10"]));
+        assert_eq!(https[0]["handle"][0]["upstreams"][0]["dial"], "127.0.0.1:7460");
+        assert_eq!(
+            c["apps"]["tls"]["automation"]["policies"][0]["subjects"],
+            json!(["203.0.113.10"])
+        );
+        assert_eq!(
+            c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"],
+            "internal"
+        );
+    }
+
     fn r(host: &str, tls: TlsMode, port: u16) -> Route {
         Route {
             host: host.into(),

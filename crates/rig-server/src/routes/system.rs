@@ -67,7 +67,7 @@ async fn system_info(
 }
 
 /// The machine's MagicDNS name and addresses, if Tailscale runs here.
-async fn tailscale_info() -> Option<TailscaleInfo> {
+pub(crate) async fn tailscale_info() -> Option<TailscaleInfo> {
     let out = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::process::Command::new("tailscale")
@@ -102,7 +102,7 @@ async fn tailscale_info() -> Option<TailscaleInfo> {
     })
 }
 
-fn lan_addresses() -> Vec<String> {
+pub(crate) fn lan_addresses() -> Vec<String> {
     let Ok(nets) = sysinfo::Networks::new_with_refreshed_list() else {
         return Vec::new();
     };
@@ -200,6 +200,11 @@ async fn set_dashboard_domain(
     let host = match req.host.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
         Some(h) => {
             let h = super::apps::validate_host(h)?;
+            if tls == TlsMode::Auto && h.parse::<IpAddr>().is_ok() {
+                return Err(ApiError::validation(
+                    "automatic HTTPS requires a domain name, not an IP address; choose Private CA for an IP",
+                ));
+            }
             let taken: Option<i64> =
                 sqlx::query_scalar("SELECT 1 FROM domains WHERE host = ? AND port IS NULL")
                     .bind(&h)

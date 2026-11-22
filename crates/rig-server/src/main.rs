@@ -17,6 +17,7 @@ mod setup;
 mod state;
 mod totp;
 mod watch;
+mod wizard;
 
 use std::{net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 
@@ -118,6 +119,15 @@ enum Command {
         /// The user's email address.
         email: String,
     },
+    /// Generate a new random password for a user and sign them out everywhere.
+    /// Run it on the server, as the user Rig runs as.
+    ResetPassword {
+        /// The user's email address.
+        email: String,
+    },
+    /// Interactive install wizard invoked by install.sh.
+    #[command(hide = true)]
+    InstallWizard(wizard::WizardArgs),
     /// Set who may open the dashboard: public, lan or tailscale. Use
     /// `public` to get back in after locking yourself out. Takes effect on
     /// the next start.
@@ -150,6 +160,12 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&routes::openapi())?);
         return Ok(());
     }
+    if let Some(Command::InstallWizard(args)) = cli.command {
+        if !wizard::run(args).await? {
+            std::process::exit(130);
+        }
+        return Ok(());
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -168,6 +184,14 @@ async fn main() -> Result<()> {
     if let Some(Command::Reset2fa { email }) = &cli.command {
         return reset_2fa(&db, email).await;
     }
+    if let Some(Command::ResetPassword { email }) = &cli.command {
+        let password = reset_password(&db, email).await?;
+        let normalized = email.trim().to_lowercase();
+        println!(
+            "\n  Password reset for {normalized}.\n  All active sessions have been signed out.\n\n  New password:\n\n      {password}\n\n  Sign in with this password and change it in Account settings.\n"
+        );
+        return Ok(());
+    }
     if let Some(Command::SetupToken) = &cli.command {
         match setup::issue_token_if_needed(&db).await? {
             Some(token) => println!("{token}"),
@@ -183,7 +207,7 @@ async fn main() -> Result<()> {
             None
         } else {
             let h = host.as_deref().unwrap_or_default();
-            Some(routes::apps::validate_host(h).map_err(|e| anyhow::anyhow!("{e}"))?)
+            Some(wizard::validate_wizard_host(h, tls)?)
         };
         proxy::store_dashboard_domain(&db, host.as_deref(), proxy::parse_tls(tls))
             .await?;
@@ -305,7 +329,125 @@ async fn reset_2fa(db: &sqlx::SqlitePool, email: &str) -> Result<()> {
     Ok(())
 }
 
+async fn reset_password(db: &sqlx::SqlitePool, email: &str) -> Result<String> {
+    let email = email.trim().to_lowercase();
+    let password = crypto::random_token(15);
+    let pw_for_hash = password.clone();
+    let hash = tokio::task::spawn_blocking(move || crypto::hash_password(&pw_for_hash))
+        .await
+        .context("hashing password")??;
+
+    let mut tx = db.begin().await?;
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM users WHERE email = ?")
+        .bind(&email)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(id) = id else {
+        anyhow::bail!("no user with the email {email}");
+    };
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(&hash)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM login_attempts WHERE key = ?")
+        .bind(format!("login:email:{email}"))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO audit_log (id, org_id, user_id, actor, action, target, detail)
+         SELECT ?, m.org_id, ?, 'console', 'auth.password_reset', ?, 'reset from the server console'
+         FROM memberships m WHERE m.user_id = ? LIMIT 1",
+    )
+    .bind(state::new_id())
+    .bind(&id)
+    .bind(&email)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(password)
+}
+
 /// A base URL without its trailing slash, so paths can be appended.
 fn trim_slash(url: &url::Url) -> String {
     url.as_str().trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reset_password_updates_hash_clears_sessions_and_audits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let old_hash = crypto::hash_password("original-password-123").unwrap();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, name, password_hash) VALUES ('u1', 'owner@example.com', 'Owner', ?)",
+        )
+        .bind(&old_hash)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO memberships (org_id, user_id, role) VALUES ('org1', 'u1', 'owner')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, org_id, csrf_token, expires_at)
+             VALUES ('tok1', 'u1', 'org1', 'csrf1', '2099-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO login_attempts (key, ts) VALUES ('login:email:owner@example.com', 9999999999)")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let new_pw = reset_password(&db, " Owner@Example.com ").await.unwrap();
+        assert!(new_pw.len() >= 10);
+
+        let stored: String =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = 'u1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(crypto::verify_password(&new_pw, &stored));
+        assert!(!crypto::verify_password("original-password-123", &stored));
+
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'u1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0);
+
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM login_attempts WHERE key = 'login:email:owner@example.com'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 0);
+
+        let audit_action: String =
+            sqlx::query_scalar("SELECT action FROM audit_log WHERE user_id = 'u1'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(audit_action, "auth.password_reset");
+
+        assert!(reset_password(&db, "missing@example.com").await.is_err());
+    }
 }

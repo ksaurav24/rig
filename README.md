@@ -8,13 +8,19 @@ server, with Caddy in front for domains and HTTPS. The full spec is in
 ## Put it on a server
 
 ```sh
+curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
+```
+
+Or pass flags directly (e.g. `--podman`, `--docker`, `--domain rig.example.com`, `--tls auto|tailscale|internal|off`, `--access public|lan|tailscale`, `--yes`), or build a release bundle from source:
+
+```sh
 scripts/package.sh                      # -> dist/rig-<version>-x86_64-linux.tar.gz
 scp dist/rig-*-x86_64-linux.tar.gz you@vm:
 ssh you@vm 'tar xzf rig-*.tar.gz && cd rig-*-linux && sudo ./install.sh'
 ```
 
-Then open the printed address and enter the setup token. The full walkthrough
-(HTTPS for the dashboard, first deploy, backups, upgrades) is in
+Then open the printed HTTPS address and enter the one-time setup token. The full walkthrough
+(CLI flags, HTTPS, password reset, first deploy, backups, upgrades) is in
 [docs/deploy-on-a-server.md](docs/deploy-on-a-server.md).
 
 ## Develop

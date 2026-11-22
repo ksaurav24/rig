@@ -28,6 +28,7 @@ esac
 VM=rig-vm
 IMAGE=rig-vm-base-$VM_ENGINE
 HTTP_PORT=${VM_HTTP_PORT:-18480}
+HTTPS_PORT=${VM_HTTPS_PORT:-18443}
 fails=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); return 1; }
@@ -70,6 +71,7 @@ docker run -d --name "$VM" --hostname rig-vm --privileged --cgroupns=private \
   --tmpfs /run --tmpfs /run/lock \
   -v rig-vm-docker:/var/lib/docker -v rig-vm-rig:/var/lib/rig \
   -p "127.0.0.1:$HTTP_PORT:80" \
+  -p "127.0.0.1:$HTTPS_PORT:443" \
   "$IMAGE" >/dev/null
 wait_for 30 "systemd booted" sh -c "docker exec $VM systemctl is-system-running 2>/dev/null | grep -Eq 'running|degraded'"
 
@@ -78,6 +80,10 @@ docker cp "$BUNDLE" "$VM:/root/rig.tar.gz"
 vm sh -c 'cd /root && tar xzf rig.tar.gz'
 DIR=$(vm sh -c 'ls -d /root/rig-*-x86_64-linux')
 check "no other engine in the VM" "$(vm sh -c 'command -v docker podman' | wc -l)" 0
+check "--help works" "$(vm sh -c "cd $DIR && ./install.sh --help >/dev/null && echo ok")" ok
+check "--headless rejected cleanly" "$(vm sh -c "cd $DIR && ./install.sh --headless 2>&1 | grep -qi 'coming soon' && echo ok")" ok
+check "conflicting engine flags rejected" "$(vm sh -c "cd $DIR && ./install.sh --podman --docker 2>&1 | grep -qi 'conflicting' && echo ok")" ok
+check "--tls auto rejects bare IP" "$(vm sh -c "cd $DIR && ./install.sh --yes --domain 203.0.113.10 --tls auto 2>&1 | grep -qi 'domain name' && echo ok")" ok
 if vm sh -c "cd $DIR && RIG_PUBLIC_ADDRESS=localhost:$HTTP_PORT ./install.sh" > /tmp/rig-vm-install.log 2>&1; then
   pass "install.sh succeeded"
 else
@@ -146,7 +152,19 @@ wait_for 90 "rig back after the reboot" sh -c "docker exec $VM systemctl is-acti
 wait_for 90 "app served after the reboot" sh -c "curl -fsS -H 'host: hello.vm.test' $BASE/ | grep -q 'Welcome to nginx'"
 check "still signed in after the reboot" "$(curl -s -b "$JAR" "$BASE/api/v1/auth/me" | jq -r .user.email)" owner@example.com
 
+echo "== CLI password reset"
+NEW_PW=$(vm runuser -u rig -- rig-server --data-dir /var/lib/rig reset-password owner@example.com | awk '/New password:/ { getline; getline; gsub(/^ +| +$/, ""); print; exit }')
+check "new random password generated" "$([ "${#NEW_PW}" -ge 10 ] && echo yes)" yes
+check "old session invalidated after password reset" "$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" "$BASE/api/v1/auth/me")" 401
+check "old password rejected" "$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "origin: $BASE" -X POST "$BASE/api/v1/auth/login" -d '{"email":"owner@example.com","password":"correct horse battery staple"}')" 401
+code=$(curl -s -o /tmp/rig-vm-login.json -w '%{http_code}' -c "$JAR" -H 'content-type: application/json' \
+  -H "origin: $BASE" -X POST "$BASE/api/v1/auth/login" \
+  -d "{\"email\":\"owner@example.com\",\"password\":\"$NEW_PW\"}")
+check "signed in with new random password" "$code" 200 || cat /tmp/rig-vm-login.json
+CSRF=$(jq -r .csrf_token /tmp/rig-vm-login.json)
+
 echo "== upgrade in place"
+check "upgrade rejects --domain flag" "$(vm sh -c "cd $DIR && ./install.sh --domain other.vm.test 2>&1 | grep -qi 'dashboard-domain' && echo ok")" ok
 if vm sh -c "cd $DIR && ./install.sh" > /tmp/rig-vm-upgrade.log 2>&1; then pass "re-running install.sh upgrades"; else fail "upgrade failed"; tail -20 /tmp/rig-vm-upgrade.log; fi
 check "database backed up" "$(vm sh -c 'ls /var/lib/rig/rig.db.pre-upgrade-* 2>/dev/null | wc -l')" 1
 wait_for 30 "still signed in after upgrade" sh -c "curl -s -b $JAR $BASE/api/v1/auth/me | jq -e '.user.email == \"owner@example.com\"'"
@@ -156,6 +174,29 @@ echo "== uninstall"
 vm sh -c "cd $DIR && ./install.sh --uninstall" >/dev/null 2>&1
 check "service removed" "$(vm systemctl is-active rig 2>/dev/null)" inactive
 check "data kept" "$(vm test -f /var/lib/rig/rig.db && echo yes)" yes
+
+echo "== fresh HTTPS install via CLI flags"
+vm rm -rf /etc/rig /var/lib/rig/rig.db /var/lib/rig/rig.db-wal /var/lib/rig/rig.db-shm /var/lib/rig/master.key
+if vm sh -c "cd $DIR && ./install.sh --$VM_ENGINE --domain rig.vm.test --tls internal --access public --yes" > /tmp/rig-vm-https-install.log 2>&1; then
+  pass "HTTPS flag install succeeded"
+else
+  fail "HTTPS flag install failed"; tail -30 /tmp/rig-vm-https-install.log; exit 1
+fi
+HTTPS_TOKEN=$(grep -A2 'one-time setup token' /tmp/rig-vm-https-install.log | awk 'NF == 1 { print $1; exit }')
+check "HTTPS setup token printed" "$([ -n "$HTTPS_TOKEN" ] && echo yes)" yes
+check "RIG_PUBLIC_URL is https" "$(vm sed -n 's/^RIG_PUBLIC_URL=//p' /etc/rig/rig.env)" "https://rig.vm.test"
+check "RIG_SECURE_COOKIES enabled" "$(vm sed -n 's/^RIG_SECURE_COOKIES=//p' /etc/rig/rig.env)" "true"
+HTTPS_BASE="https://rig.vm.test:$HTTPS_PORT"
+HTTPS_JAR=$(mktemp)
+wait_for 30 "dashboard served over HTTPS (internal CA)" sh -c "curl -kfsS --resolve rig.vm.test:$HTTPS_PORT:127.0.0.1 $HTTPS_BASE/api/v1/setup | jq -e '.setup_complete == false'"
+code=$(curl -ks -o /tmp/rig-vm-https-setup.json -w '%{http_code}' -c "$HTTPS_JAR" \
+  --resolve "rig.vm.test:$HTTPS_PORT:127.0.0.1" \
+  -H 'content-type: application/json' -H "origin: $HTTPS_BASE" \
+  -X POST "$HTTPS_BASE/api/v1/setup" \
+  -d "{\"token\":\"$HTTPS_TOKEN\",\"email\":\"https@example.com\",\"name\":\"HTTPS Owner\",\"password\":\"correct horse battery staple\",\"org_name\":\"TLS VM\"}")
+check "owner created over HTTPS" "$code" 200 || cat /tmp/rig-vm-https-setup.json
+check "session cookie marked Secure over HTTPS" "$(grep -c '#HttpOnly_.*TRUE.*rig_session' "$HTTPS_JAR")" 1
+rm -f "$HTTPS_JAR"
 
 rm -f "$JAR"
 if [ "$fails" -eq 0 ]; then echo "all VM checks passed"; else echo "$fails VM check(s) failed"; exit 1; fi

@@ -8,7 +8,7 @@ pub mod hooks;
 mod members;
 mod metrics;
 mod projects;
-mod system;
+pub mod system;
 mod terminal;
 
 use axum::{

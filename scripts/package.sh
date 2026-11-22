@@ -42,6 +42,9 @@ strip "$out/rig-server" "$out/rig" 2>/dev/null || true
 cp packaging/install.sh packaging/rig.service "$out/"
 cp docs/deploy-on-a-server.md "$out/README.md"
 chmod 0755 "$out/install.sh"
+cp packaging/install.sh dist/install.sh
+chmod 0755 dist/install.sh
 tar -C dist -czf "dist/$name.tar.gz" "$name"
 (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 echo "==> dist/$name.tar.gz ($(du -h "dist/$name.tar.gz" | cut -f1))"
+echo "==> dist/install.sh"
