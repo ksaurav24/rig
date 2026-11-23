@@ -13,6 +13,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU8, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -272,7 +273,7 @@ pub fn allows_with_blocked<S: AsRef<str>>(access: Access, ip: IpAddr, blocked: &
 #[derive(Clone, Default)]
 pub struct DashboardAccess {
     mode: Arc<AtomicU8>,
-    blocked_bridges: Arc<RwLock<Vec<String>>>,
+    blocked_bridges: Arc<RwLock<(Vec<String>, Option<Instant>)>>,
 }
 
 impl DashboardAccess {
@@ -297,14 +298,25 @@ impl DashboardAccess {
         self.blocked_bridges
             .read()
             .unwrap_or_else(|p| p.into_inner())
+            .0
             .clone()
+    }
+
+    /// Returns cached bridge CIDRs when refreshed within `max_age`.
+    pub fn fresh_blocked_bridges(&self, max_age: Duration) -> Option<Vec<String>> {
+        let guard = self
+            .blocked_bridges
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        let updated = guard.1?;
+        (updated.elapsed() < max_age).then(|| guard.0.clone())
     }
 
     pub fn set_blocked_bridges(&self, cidrs: Vec<String>) {
         *self
             .blocked_bridges
             .write()
-            .unwrap_or_else(|p| p.into_inner()) = cidrs;
+            .unwrap_or_else(|p| p.into_inner()) = (cidrs, Some(Instant::now()));
     }
 }
 

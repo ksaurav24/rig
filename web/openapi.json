@@ -105,6 +105,78 @@
         }
       }
     },
+    "/api/v1/account/sessions": {
+      "get": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Active browser sessions for your account.",
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/account/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "account"
+        ],
+        "summary": "Revoke one of your browser sessions by its short id (cannot revoke the current session; use logout).",
+        "operationId": "revoke_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/account/totp": {
       "get": {
         "tags": [
@@ -130,7 +202,7 @@
         "tags": [
           "account"
         ],
-        "summary": "Turn two-factor sign-in off. Needs your password and a current code\n(or a recovery code), and signs out your other sessions.",
+        "summary": "Turn two-factor sign-in off. Needs your password and a current code\n(or a recovery code), rotates the current session and signs out other sessions.",
         "operationId": "totp_disable",
         "requestBody": {
           "content": {
@@ -170,7 +242,7 @@
         "tags": [
           "account"
         ],
-        "summary": "Confirm the new authenticator with a code. Turns two-factor sign-in on,\nsigns out your other sessions and returns ten recovery codes, once.",
+        "summary": "Confirm the new authenticator with a code. Turns two-factor sign-in on,\nrotates the current session, signs out other sessions and returns ten recovery codes, once.",
         "operationId": "totp_enable",
         "requestBody": {
           "content": {
@@ -248,6 +320,15 @@
                 }
               }
             }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -257,7 +338,7 @@
         "tags": [
           "account"
         ],
-        "summary": "Start turning on two-factor sign-in. Returns a secret and its QR code;\nnothing changes until it is confirmed with a code.",
+        "summary": "Start turning on two-factor sign-in. Returns a secret and its QR code;\nnothing changes until it is confirmed with a code within 15 minutes.",
         "operationId": "totp_setup",
         "requestBody": {
           "content": {
@@ -289,6 +370,15 @@
             }
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
             "content": {
               "application/json": {
                 "schema": {
@@ -564,6 +654,55 @@
         }
       }
     },
+    "/api/v1/apps/resolve": {
+      "get": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Resolve an app by id, name, slug, or `project/app`.",
+        "operationId": "resolve_app",
+        "parameters": [
+          {
+            "name": "ref",
+            "in": "query",
+            "description": "App id, name, slug, or `project/app`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/App"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/apps/{id}": {
       "get": {
         "tags": [
@@ -755,6 +894,26 @@
             "name": "id",
             "in": "path",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of deployments to return (1–200, default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Return only deployments created before this deployment id.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -974,7 +1133,7 @@
         "tags": [
           "env"
         ],
-        "summary": "Create or replace one variable. Takes effect on the next deployment.",
+        "summary": "Create or replace one variable, or atomically update a batch (`{\"vars\": [...]}`).\nTakes effect on the next deployment.",
         "operationId": "set_env",
         "parameters": [
           {
@@ -1002,6 +1161,67 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/EnvVar"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/env/bulk": {
+      "put": {
+        "tags": [
+          "env"
+        ],
+        "summary": "Atomically create or replace multiple variables in one transaction.",
+        "operationId": "set_env_bulk",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkSetEnvRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EnvVar"
+                  }
                 }
               }
             }
@@ -1117,13 +1337,60 @@
         "tags": [
           "apps"
         ],
-        "summary": "The running container's output as server-sent events: the last 200 lines,\nthen live output. Each `log` event's data is a `LogLine`.",
+        "summary": "The running container's output as server-sent events: the last `tail` lines,\nthen live output when `follow=true`. Each `log` event's data is a `LogLine`.",
         "operationId": "app_logs",
         "parameters": [
           {
             "name": "id",
             "in": "path",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "description": "Number of trailing lines to replay (1–10000, default 200).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "follow",
+            "in": "query",
+            "description": "Keep streaming live lines after the initial replay (default true).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only return lines since this time (RFC 3339, Unix seconds, or relative like `10m`, `2h`, `30s`, `1d`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timestamps",
+            "in": "query",
+            "description": "Request original container timestamps on each line.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "grep",
+            "in": "query",
+            "description": "Case-insensitive substring filter applied to each log line.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -1149,6 +1416,15 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1197,6 +1473,102 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/restart": {
+      "post": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Restart an app with a zero-downtime swap reusing its current image.",
+        "operationId": "restart_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/apps/{id}/start": {
+      "post": {
+        "tags": [
+          "apps"
+        ],
+        "summary": "Start a stopped or failed app, reusing its most recent built image when available.",
+        "operationId": "start_app",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1469,7 +1841,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Change your own password. Signs out your other sessions.",
+        "summary": "Change your own password. Rotates your current session and signs out your other sessions.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -2081,6 +2453,54 @@
         }
       }
     },
+    "/api/v1/deployments/{id}/cancel": {
+      "post": {
+        "tags": [
+          "deployments"
+        ],
+        "summary": "Cancel a queued or in-progress deployment.",
+        "operationId": "cancel_deployment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/deployments/{id}/logs": {
       "get": {
         "tags": [
@@ -2106,6 +2526,17 @@
             "schema": {
               "type": "integer",
               "format": "int64"
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "description": "When `after` is omitted, replay only the last `tail` lines (1–10000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
             }
           }
         ],
@@ -2609,7 +3040,7 @@
         "tags": [
           "members"
         ],
-        "summary": "Add a person. Returns a temporary password to hand to them, once.",
+        "summary": "Add a person. Returns a temporary password (valid 7 days, must be changed on first sign-in) once.",
         "operationId": "add_member",
         "requestBody": {
           "content": {
@@ -2627,6 +3058,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MemberWithPassword"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -2753,7 +3193,7 @@
         "tags": [
           "members"
         ],
-        "summary": "Give a member a new temporary password and sign them out everywhere.",
+        "summary": "Give a member a new temporary password, sign them out everywhere, and revoke their API tokens.",
         "operationId": "reset_password",
         "parameters": [
           {
@@ -3374,7 +3814,7 @@
         "tags": [
           "tokens"
         ],
-        "summary": "Create an API token for the CLI or MCP. The secret is returned once.",
+        "summary": "Create an API token for the CLI or MCP. The secret is returned once.\nRequires an interactive browser session so a leaked API token cannot\nself-mint persistent backdoor tokens.",
         "operationId": "create_token",
         "requestBody": {
           "content": {
@@ -3396,6 +3836,15 @@
               }
             }
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
             "content": {
               "application/json": {
@@ -3413,7 +3862,7 @@
         "tags": [
           "tokens"
         ],
-        "summary": "Revoke one of your API tokens.",
+        "summary": "Revoke one of your API tokens. An API token may only revoke itself\n(`rig logout --revoke`); revoking other tokens requires a browser session.",
         "operationId": "delete_token",
         "parameters": [
           {
@@ -3427,6 +3876,15 @@
         ],
         "responses": {
           "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3900,6 +4358,25 @@
           "ok",
           "failed"
         ]
+      },
+      "BulkSetEnvRequest": {
+        "type": "object",
+        "description": "Atomically create or update multiple environment variables in one transaction.",
+        "required": [
+          "vars"
+        ],
+        "properties": {
+          "replace": {
+            "type": "boolean",
+            "description": "When true, remove existing variables that are not in `vars`."
+          },
+          "vars": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SetEnvVarRequest"
+            }
+          }
+        }
       },
       "ChangePasswordRequest": {
         "type": "object",
@@ -4468,6 +4945,13 @@
           "message"
         ],
         "properties": {
+          "challenge_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short-lived single-use challenge token returned when `code == \"second_factor_required\"`."
+          },
           "code": {
             "type": "string",
             "description": "Stable machine-readable code, e.g. `unauthorized`, `validation`."
@@ -4682,11 +5166,14 @@
       },
       "LoginRequest": {
         "type": "object",
-        "required": [
-          "email",
-          "password"
-        ],
         "properties": {
+          "challenge_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Single-use challenge token from step 1 of two-factor sign-in."
+          },
           "code": {
             "type": [
               "string",
@@ -4714,6 +5201,10 @@
         "properties": {
           "csrf_token": {
             "type": "string"
+          },
+          "must_change_password": {
+            "type": "boolean",
+            "description": "True when the account has a temporary password that must be changed before continuing."
           },
           "org": {
             "$ref": "#/components/schemas/Organization"
@@ -5070,6 +5561,49 @@
           "owner"
         ]
       },
+      "SessionInfo": {
+        "type": "object",
+        "description": "An active browser session for the signed-in user.",
+        "required": [
+          "id",
+          "created_at",
+          "expires_at",
+          "current"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "Short identifier (prefix of the hashed session token) for revoking a specific session."
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_active_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SetEnvVarRequest": {
         "type": "object",
         "required": [
@@ -5120,8 +5654,7 @@
       "SetupStatus": {
         "type": "object",
         "required": [
-          "setup_complete",
-          "version"
+          "setup_complete"
         ],
         "properties": {
           "branding": {
@@ -5140,7 +5673,10 @@
             "description": "False until the first owner account has been created."
           },
           "version": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

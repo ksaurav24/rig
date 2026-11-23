@@ -128,21 +128,22 @@ pub async fn collect_deployment_logs(
     let mut outcome = DeploymentOutcome::default();
     let mut total_seen: usize = 0;
 
-    let stream = api.deployment_logs_stream(deployment_id, |ev| match ev.event.as_str() {
-        "log" => {
-            let line = serde_json::from_str::<LogLine>(&ev.data)
-                .map(|l| l.line)
-                .unwrap_or(ev.data);
-            if lines.len() == tail {
-                lines.pop_front();
+    let stream =
+        api.deployment_logs_stream_with_tail(deployment_id, Some(tail), |ev| match ev.event.as_str() {
+            "log" => {
+                let line = serde_json::from_str::<LogLine>(&ev.data)
+                    .map(|l| l.line)
+                    .unwrap_or(ev.data);
+                if lines.len() == tail {
+                    lines.pop_front();
+                }
+                lines.push_back(line);
+                total_seen += 1;
+                on_progress(total_seen);
             }
-            lines.push_back(line);
-            total_seen += 1;
-            on_progress(total_seen);
-        }
-        "end" => outcome = parse_end_event(&ev.data),
-        _ => {}
-    });
+            "end" => outcome = parse_end_event(&ev.data),
+            _ => {}
+        });
 
     if let Ok(result) = tokio::time::timeout(limit, stream).await {
         result?;

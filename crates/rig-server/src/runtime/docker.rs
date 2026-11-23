@@ -1,6 +1,6 @@
 //! [`Runtime`] over the Docker Engine API, which Podman also serves.
 
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -47,6 +47,9 @@ pub struct DockerRuntime {
     long: Docker,
     /// Engine socket path, handed to the `docker buildx` CLI for plan builds.
     socket: String,
+    /// Cached engine name (`docker` or `podman`) for internal behavior checks
+    /// so deploys avoid repeated `GET /version` RPCs.
+    cached_engine_name: Arc<tokio::sync::OnceCell<String>>,
 }
 
 impl DockerRuntime {
@@ -67,7 +70,16 @@ impl DockerRuntime {
             api,
             long,
             socket: path,
+            cached_engine_name: Arc::new(tokio::sync::OnceCell::new()),
         })
+    }
+
+    async fn is_podman(&self) -> Result<bool> {
+        let name = self
+            .cached_engine_name
+            .get_or_try_init(|| async { self.info().await.map(|i| i.name) })
+            .await?;
+        Ok(name == "podman")
     }
 }
 
@@ -319,8 +331,10 @@ impl Runtime for DockerRuntime {
             .iter()
             .flatten()
             .any(|c| c.name.to_lowercase().contains("podman"));
+        let name = if podman { "podman" } else { "docker" };
+        let _ = self.cached_engine_name.set(name.to_string());
         Ok(EngineInfo {
-            name: if podman { "podman" } else { "docker" }.into(),
+            name: name.into(),
             version: v.version.unwrap_or_default(),
         })
     }
@@ -374,7 +388,8 @@ impl Runtime for DockerRuntime {
 
     async fn build(&self, spec: BuildSpec, log: &LogSink) -> Result<()> {
         let context = spec.context.clone();
-        let tarball = tokio::task::spawn_blocking(move || pack_context(&context))
+        let dockerfile = spec.dockerfile.clone();
+        let tarball = tokio::task::spawn_blocking(move || pack_context(&context, &dockerfile))
             .await
             .context("packing build context")??;
         let file = tokio::fs::File::from_std(tarball);
@@ -404,7 +419,7 @@ impl Runtime for DockerRuntime {
 
     async fn build_plan(&self, spec: PlanSpec, log: &LogSink) -> Result<()> {
         let work = async {
-            if self.info().await?.name == "podman" {
+            if self.is_podman().await? {
                 self.build_plan_buildkit(&spec, log).await
             } else {
                 self.build_plan_buildx(&spec, log).await
@@ -429,8 +444,8 @@ impl Runtime for DockerRuntime {
         // podman-restart.service only brings back `always` containers (on
         // Podman, the two policies behave the same otherwise). Rig removes
         // every container it no longer wants, so `always` revives nothing stale.
-        let restart = match self.info().await {
-            Ok(i) if i.name == "podman" => RestartPolicyNameEnum::ALWAYS,
+        let restart = match self.is_podman().await {
+            Ok(true) => RestartPolicyNameEnum::ALWAYS,
             _ => RestartPolicyNameEnum::UNLESS_STOPPED,
         };
         // Pin an explicit loopback port below the kernel's ephemeral outbound
@@ -677,11 +692,12 @@ impl Runtime for DockerRuntime {
     }
 
     async fn usage(&self, id: &str) -> Result<Option<Usage>> {
-        // Not streaming and not one-shot: the engine waits one cycle and
-        // fills in the previous CPU reading, which the percentage needs.
+        // One-shot stats return immediately (~13 ms vs ~1,012 ms for two-shot);
+        // `metrics::collect` computes accurate 30-second CPU utilization deltas
+        // from the cumulative CPU counters across ticks.
         let options = StatsOptionsBuilder::default()
             .stream(false)
-            .one_shot(false)
+            .one_shot(true)
             .build();
         let mut stats = self.api.stats(id, Some(options));
         match stats.next().await {
@@ -933,16 +949,23 @@ fn usage_from(stats: &ContainerStatsResponse) -> Option<Usage> {
     let used = memory.usage?;
     let total =
         |c: &bollard::models::ContainerCpuStats| c.cpu_usage.as_ref().and_then(|u| u.total_usage);
+    let cpu_total_ns = total(cpu);
+    let cpu_system_ns = cpu.system_cpu_usage;
+    let online_cpus = cpu.online_cpus.filter(|n| *n > 0).or_else(|| {
+        cpu.cpu_usage
+            .as_ref()
+            .and_then(|u| u.percpu_usage.as_ref())
+            .and_then(|v| u32::try_from(v.len()).ok())
+            .filter(|n| *n > 0)
+    });
 
     let cpu_percent = stats
         .precpu_stats
         .as_ref()
         .and_then(|before| {
-            let spent = total(cpu)?.checked_sub(total(before)?)?;
-            let elapsed = cpu
-                .system_cpu_usage?
-                .checked_sub(before.system_cpu_usage?)?;
-            let cores = f64::from(cpu.online_cpus.filter(|n| *n > 0)?);
+            let spent = cpu_total_ns?.checked_sub(total(before)?)?;
+            let elapsed = cpu_system_ns?.checked_sub(before.system_cpu_usage?)?;
+            let cores = f64::from(online_cpus?);
             (elapsed > 0).then(|| spent as f64 / elapsed as f64 * cores * 100.0)
         })
         .unwrap_or(0.0);
@@ -972,6 +995,9 @@ fn usage_from(stats: &ContainerStatsResponse) -> Option<Usage> {
             });
     Some(Usage {
         cpu_percent,
+        cpu_total_ns,
+        cpu_system_ns,
+        online_cpus,
         memory_bytes: used.saturating_sub(cache),
         memory_limit: limit,
         net_rx,
@@ -979,29 +1005,208 @@ fn usage_from(stats: &ContainerStatsResponse) -> Option<Usage> {
     })
 }
 
-/// Tar a build context into an unnamed temp file.
+struct DockerIgnoreRule {
+    negated: bool,
+    segments: Vec<String>,
+}
+
+struct DockerIgnore {
+    rules: Vec<DockerIgnoreRule>,
+    has_negations: bool,
+}
+
+impl DockerIgnore {
+    fn load(dir: &Path) -> Self {
+        let path = dir.join(".dockerignore");
+        let is_regular = std::fs::symlink_metadata(&path)
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+        if !is_regular {
+            return Self {
+                rules: Vec::new(),
+                has_negations: false,
+            };
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self {
+                rules: Vec::new(),
+                has_negations: false,
+            };
+        };
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Self {
+        let mut rules = Vec::new();
+        let mut has_negations = false;
+        for raw_line in text.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (negated, pat) = match line.strip_prefix('!') {
+                Some(rest) => (true, rest.trim()),
+                None => (false, line),
+            };
+            let cleaned = pat.trim_matches('/');
+            let segments: Vec<String> = cleaned
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != ".")
+                .map(str::to_owned)
+                .collect();
+            if segments.is_empty() {
+                continue;
+            }
+            if negated {
+                has_negations = true;
+            }
+            rules.push(DockerIgnoreRule { negated, segments });
+        }
+        Self {
+            rules,
+            has_negations,
+        }
+    }
+
+    fn is_ignored(&self, rel_path: &str) -> bool {
+        if self.rules.is_empty() {
+            return false;
+        }
+        let path_segs: Vec<&str> = rel_path
+            .split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .collect();
+        if path_segs.is_empty() {
+            return false;
+        }
+        let mut ignored = false;
+        for rule in &self.rules {
+            if matches_rule(&rule.segments, &path_segs) {
+                ignored = !rule.negated;
+            }
+        }
+        ignored
+    }
+}
+
+fn matches_rule(pattern: &[String], path: &[&str]) -> bool {
+    // A rule matches the path itself OR any ancestor prefix (e.g. `node_modules`
+    // excludes `node_modules/foo/bar`).
+    for len in 1..=path.len() {
+        if match_segments(pattern, &path[..len]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn match_segments(pattern: &[String], path: &[&str]) -> bool {
+    match (pattern.first(), path.first()) {
+        (None, None) => true,
+        (Some(p), _) if p == "**" => {
+            let rest = &pattern[1..];
+            if match_segments(rest, path) {
+                return true;
+            }
+            !path.is_empty() && match_segments(pattern, &path[1..])
+        }
+        (Some(p), Some(seg)) => {
+            glob_match(p.as_bytes(), seg.as_bytes()) && match_segments(&pattern[1..], &path[1..])
+        }
+        _ => false,
+    }
+}
+
+fn glob_match(pat: &[u8], text: &[u8]) -> bool {
+    let (mut p, mut t) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (None, 0usize);
+    while t < text.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star_p = Some(p);
+            p += 1;
+            star_t = t;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+fn normalize_rel(path: &str) -> String {
+    path.split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Tar a build context into an unnamed temp file, honouring `.dockerignore`.
 ///
 /// Symlinks are stored as links, never followed: a repository must not be
 /// able to pull files from outside its checkout into the build.
-fn pack_context(dir: &Path) -> Result<std::fs::File> {
+fn pack_context(dir: &Path, dockerfile: &str) -> Result<std::fs::File> {
     use std::io::{Seek, SeekFrom};
 
+    let ignore = DockerIgnore::load(dir);
+    let keep_dockerfile = normalize_rel(dockerfile);
     let file = tempfile::tempfile().context("creating temp file for build context")?;
     let mut tar = tar::Builder::new(file);
     tar.follow_symlinks(false);
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == ".git" {
-            continue;
+
+    fn walk(
+        root: &Path,
+        current: &Path,
+        rel_prefix: &str,
+        ignore: &DockerIgnore,
+        keep_dockerfile: &str,
+        tar: &mut tar::Builder<std::fs::File>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(current)
+            .with_context(|| format!("reading {}", current.display()))?
+        {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if current == root && name_str == ".git" {
+                continue;
+            }
+            let rel = if rel_prefix.is_empty() {
+                name_str.into_owned()
+            } else {
+                format!("{rel_prefix}/{name_str}")
+            };
+            let ft = entry.file_type()?;
+            let must_keep = rel == ".dockerignore"
+                || rel == keep_dockerfile
+                || (ft.is_dir() && keep_dockerfile.starts_with(&format!("{rel}/")));
+            let ignored = !must_keep && ignore.is_ignored(&rel);
+            if ft.is_dir() {
+                // Skip descending into ignored directories unless a negation rule
+                // could re-include a descendant (or the Dockerfile lives inside).
+                if ignored && !ignore.has_negations {
+                    continue;
+                }
+                if !ignored {
+                    tar.append_dir(&rel, entry.path())?;
+                }
+                walk(root, &entry.path(), &rel, ignore, keep_dockerfile, tar)?;
+            } else if !ignored {
+                tar.append_path_with_name(entry.path(), &rel)?;
+            }
         }
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            tar.append_dir_all(&name, &path)?;
-        } else {
-            tar.append_path_with_name(&path, &name)?;
-        }
+        Ok(())
     }
+
+    walk(dir, dir, "", &ignore, &keep_dockerfile, &mut tar)?;
     let mut file = tar.into_inner().context("finishing build context")?;
     file.seek(SeekFrom::Start(0))?;
     Ok(file)
@@ -1033,7 +1238,7 @@ mod tests {
         std::fs::write(dir.path().join("src/main.txt"), "hi").unwrap();
         std::os::unix::fs::symlink("/etc/passwd", dir.path().join("leak")).unwrap();
 
-        let mut file = pack_context(dir.path()).unwrap();
+        let mut file = pack_context(dir.path(), "Dockerfile").unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
         let mut archive = tar::Archive::new(bytes.as_slice());
@@ -1051,6 +1256,40 @@ mod tests {
         assert!(names.iter().any(|n| n == "src/main.txt"));
         assert!(names.iter().any(|n| n == "leak"));
         assert!(!names.iter().any(|n| n.starts_with(".git")));
+    }
+
+    #[test]
+    fn context_honours_dockerignore_and_always_keeps_dockerfile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        std::fs::write(
+            dir.path().join(".dockerignore"),
+            "# comment\nnode_modules\n*.log\n!keep.log\n**/*.tmp\nDockerfile\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "big").unwrap();
+        std::fs::write(dir.path().join("debug.log"), "skip").unwrap();
+        std::fs::write(dir.path().join("keep.log"), "keep").unwrap();
+        std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        std::fs::write(dir.path().join("src/nested/cache.tmp"), "skip").unwrap();
+        std::fs::write(dir.path().join("src/nested/app.rs"), "fn main() {}").unwrap();
+
+        let mut file = pack_context(dir.path(), "Dockerfile").unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == "Dockerfile"));
+        assert!(names.iter().any(|n| n == "keep.log"));
+        assert!(names.iter().any(|n| n == "src/nested/app.rs"));
+        assert!(!names.iter().any(|n| n.contains("node_modules")));
+        assert!(!names.iter().any(|n| n == "debug.log"));
+        assert!(!names.iter().any(|n| n.ends_with(".tmp")));
     }
 
     #[test]

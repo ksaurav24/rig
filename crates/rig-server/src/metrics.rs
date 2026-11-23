@@ -6,24 +6,30 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
-    sync::{Mutex, OnceLock},
-    time::Duration,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
-use futures_util::future::join_all;
+use futures_util::stream::{self, StreamExt};
 use rig_api::{MetricPoint, MetricRange, MetricSeries};
 use sysinfo::{Disks, Networks, System};
 
-use crate::state::AppState;
+use crate::state::{AppState, SystemSnapshot};
 
 pub const SAMPLE_EVERY: Duration = Duration::from_secs(30);
+/// Cadence for the live `/api/v1/system` snapshot cache.
+pub const SYSTEM_POLL_EVERY: Duration = Duration::from_secs(10);
+/// Maximum age before an on-demand `/api/v1/system` call triggers a refresh
+/// (primarily useful in tests or before the first background tick finishes).
+pub const SYSTEM_CACHE_TTL: Duration = Duration::from_secs(15);
 const RETENTION_SECS: i64 = 24 * 60 * 60;
 /// Prune once an hour's worth of samples has been written.
 const PRUNE_EVERY_SAMPLES: u64 = 120;
 /// A container whose stats do not come back in time is skipped for this round.
 const USAGE_TIMEOUT: Duration = Duration::from_secs(8);
+const STATS_CONCURRENCY: usize = 8;
 
 pub const HOST: &str = "host";
 
@@ -35,6 +41,7 @@ pub fn database_scope(id: &str) -> String {
     format!("db:{id}")
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct HostUsage {
     pub cpu_percent: f32,
     pub memory_used: u64,
@@ -57,27 +64,12 @@ fn is_virtual_interface(name: &str) -> bool {
         .any(|p| name.starts_with(p))
 }
 
-/// Sample the host. CPU usage is measured between calls, so one `System` is
-/// kept for the life of the process and the first reading is zero.
-pub fn sample_host(data_dir: &Path) -> anyhow::Result<HostUsage> {
-    static SYS: OnceLock<Mutex<System>> = OnceLock::new();
-    let sys = match SYS.get() {
-        Some(sys) => sys,
-        None => {
-            let fresh = System::new().map_err(|e| anyhow::anyhow!("reading host usage: {e}"))?;
-            SYS.get_or_init(|| Mutex::new(fresh))
-        }
-    };
-    let mut sys = sys.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    sys.refresh_cpu_usage();
-    sys.refresh_memory();
-
-    // The disk that holds Rig's data: the mount point that is the longest
-    // prefix of the data directory.
+/// Read `(disk_used, disk_total)` for the filesystem holding `data_dir` without
+/// touching CPU or network samplers.
+pub fn sample_disk(data_dir: &Path) -> (u64, u64) {
     let data_dir = data_dir
         .canonicalize()
         .unwrap_or_else(|_| data_dir.to_path_buf());
-    // Disk figures are best-effort: without them the rest is still useful.
     let disks = Disks::new_with_refreshed_list().ok();
     let disk = disks.as_ref().and_then(|disks| {
         disks
@@ -85,23 +77,44 @@ pub fn sample_host(data_dir: &Path) -> anyhow::Result<HostUsage> {
             .filter(|d| data_dir.starts_with(d.mount_point()))
             .max_by_key(|d| d.mount_point().as_os_str().len())
     });
-    let (disk_used, disk_total) = disk
-        .map(|d| {
-            (
-                d.total_space().saturating_sub(d.available_space()),
-                d.total_space(),
-            )
-        })
-        .unwrap_or((0, 0));
+    disk.map(|d| {
+        (
+            d.total_space().saturating_sub(d.available_space()),
+            d.total_space(),
+        )
+    })
+    .unwrap_or((0, 0))
+}
 
-    // Network figures are best-effort too.
-    static NETS: OnceLock<Mutex<Option<Networks>>> = OnceLock::new();
-    let (net_rx, net_tx) = {
-        let mut nets = NETS
-            .get_or_init(|| Mutex::new(Networks::new().ok()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        nets.as_mut().map_or((0, 0), |nets| {
+/// Stateful host sampler owning its own `sysinfo::System` and `Networks`
+/// instances so its CPU delta interval is never reset by other callers.
+struct HostSampler {
+    sys: System,
+    nets: Option<Networks>,
+    data_dir: PathBuf,
+}
+
+impl HostSampler {
+    fn new(data_dir: &Path, include_nets: bool) -> Result<Self> {
+        let mut sys = System::new().map_err(|e| anyhow::anyhow!("reading host usage: {e}"))?;
+        // Take an initial baseline so the next sample reflects the true interval.
+        sys.refresh_cpu_usage();
+        let nets = include_nets.then(|| Networks::new().ok()).flatten();
+        let data_dir = data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| data_dir.to_path_buf());
+        Ok(Self {
+            sys,
+            nets,
+            data_dir,
+        })
+    }
+
+    fn sample(&mut self) -> HostUsage {
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        let (disk_used, disk_total) = sample_disk(&self.data_dir);
+        let (net_rx, net_tx) = self.nets.as_mut().map_or((0, 0), |nets| {
             nets.refresh(true);
             nets.iter()
                 .filter(|(name, _)| !is_virtual_interface(&name.to_string_lossy()))
@@ -111,18 +124,117 @@ pub fn sample_host(data_dir: &Path) -> anyhow::Result<HostUsage> {
                         tx.saturating_add(n.total_transmitted()),
                     )
                 })
-        })
-    };
+        });
+        HostUsage {
+            net_rx,
+            net_tx,
+            cpu_percent: self.sys.global_cpu_usage(),
+            memory_used: self.sys.used_memory(),
+            memory_total: self.sys.total_memory(),
+            disk_used,
+            disk_total,
+        }
+    }
+}
 
-    Ok(HostUsage {
-        net_rx,
-        net_tx,
-        cpu_percent: sys.global_cpu_usage(),
-        memory_used: sys.used_memory(),
-        memory_total: sys.total_memory(),
-        disk_used,
-        disk_total,
-    })
+/// Refreshes the cached `/api/v1/system` snapshot once, using `host_sampler`
+/// when provided (background loop) or a fresh one-shot sampler on demand.
+async fn refresh_system_snapshot(
+    state: &AppState,
+    host_sampler: Option<Arc<Mutex<HostSampler>>>,
+) -> Result<SystemSnapshot> {
+    let data_dir = state.config.data_dir.clone();
+    let usage = tokio::task::spawn_blocking(move || -> Result<HostUsage> {
+        if let Some(sampler) = host_sampler {
+            let mut guard = sampler.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(guard.sample())
+        } else {
+            let mut s = HostSampler::new(&data_dir, false)?;
+            Ok(s.sample())
+        }
+    });
+    let engine = tokio::time::timeout(Duration::from_secs(3), state.runtime.info());
+    let (usage, engine, proxy_ready) = tokio::join!(usage, engine, state.proxy.ready());
+    let usage = usage.map_err(|e| anyhow::anyhow!("sampling host usage: {e}"))??;
+    let engine = engine.ok().and_then(Result::ok);
+    let snap = SystemSnapshot {
+        engine,
+        proxy_ready,
+        cpu_percent: usage.cpu_percent,
+        memory_used: usage.memory_used,
+        memory_total: usage.memory_total,
+        disk_used: usage.disk_used,
+        disk_total: usage.disk_total,
+        sampled_at: Instant::now(),
+    };
+    *state
+        .caches
+        .system
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = Some(snap.clone());
+    Ok(snap)
+}
+
+/// Reads the cached `/api/v1/system` snapshot, performing a single-flight
+/// refresh only when the cache is empty or older than [`SYSTEM_CACHE_TTL`].
+pub async fn cached_system_snapshot(state: &AppState) -> Result<SystemSnapshot> {
+    if let Some(snap) = state
+        .caches
+        .system
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        && snap.sampled_at.elapsed() < SYSTEM_CACHE_TTL
+    {
+        return Ok(snap.clone());
+    }
+    let _guard = state.caches.system_refresh.lock().await;
+    if let Some(snap) = state
+        .caches
+        .system
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        && snap.sampled_at.elapsed() < SYSTEM_CACHE_TTL
+    {
+        return Ok(snap.clone());
+    }
+    refresh_system_snapshot(state, None).await
+}
+
+/// Keeps the `/api/v1/system` snapshot warm in the background using its own
+/// dedicated `sysinfo::System` instance so it never perturbs the 30s metrics
+/// sampler's CPU delta window.
+pub async fn system_poller(state: AppState) {
+    let data_dir = state.config.data_dir.clone();
+    let host_sampler = match tokio::task::spawn_blocking(move || HostSampler::new(&data_dir, false))
+        .await
+    {
+        Ok(Ok(s)) => Some(Arc::new(Mutex::new(s))),
+        Ok(Err(e)) => {
+            tracing::warn!("initialising system snapshot sampler: {e:#}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("initialising system snapshot sampler: {e}");
+            None
+        }
+    };
+    // Prime immediately so the very first `/api/v1/system` request hits cache.
+    if let Err(e) = refresh_system_snapshot(&state, host_sampler.clone()).await {
+        tracing::debug!("priming system snapshot: {e:#}");
+    }
+    let mut tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + SYSTEM_POLL_EVERY,
+        SYSTEM_POLL_EVERY,
+    );
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        if let Err(e) = refresh_system_snapshot(&state, host_sampler.clone()).await {
+            tracing::debug!("refreshing system snapshot: {e:#}");
+        }
+    }
 }
 
 fn now() -> i64 {
@@ -131,9 +243,21 @@ fn now() -> i64 {
 
 /// Samples the host and every running container until the process exits.
 pub async fn sampler(state: AppState) {
-    // CPU use is measured between two readings, so take one to measure from.
+    // Dedicated HostSampler so CPU usage always spans the true 30-second window.
     let data_dir = state.config.data_dir.clone();
-    let _ = tokio::task::spawn_blocking(move || sample_host(&data_dir)).await;
+    let host_sampler = match tokio::task::spawn_blocking(move || HostSampler::new(&data_dir, true))
+        .await
+    {
+        Ok(Ok(s)) => Some(Arc::new(Mutex::new(s))),
+        Ok(Err(e)) => {
+            tracing::warn!("initialising metrics host sampler: {e:#}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("initialising metrics host sampler: {e}");
+            None
+        }
+    };
 
     let mut tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(2),
@@ -144,7 +268,7 @@ pub async fn sampler(state: AppState) {
     let mut counters = Counters::new();
     loop {
         tick.tick().await;
-        if let Err(e) = collect(&state, &mut counters).await {
+        if let Err(e) = collect(&state, host_sampler.as_ref(), &mut counters).await {
             tracing::warn!("collecting metrics: {e:#}");
         }
         samples += 1;
@@ -159,8 +283,17 @@ pub async fn sampler(state: AppState) {
     }
 }
 
-/// Last network counters seen per scope: (unix seconds, received, sent).
-type Counters = HashMap<String, (i64, u64, u64)>;
+/// Last cumulative network and CPU counters seen per scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Counter {
+    ts: i64,
+    rx: u64,
+    tx: u64,
+    cpu_total_ns: Option<u64>,
+    cpu_system_ns: Option<u64>,
+}
+
+type Counters = HashMap<String, Counter>;
 
 /// Bytes per second since the previous reading of the same counters. `None`
 /// for the first reading and when a counter went backwards (a restart).
@@ -181,7 +314,43 @@ fn throughput(
     (rate(rx - rx0), rate(tx - tx0))
 }
 
-async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
+/// Computes percent-of-one-core CPU utilization from two one-shot cumulative
+/// container stats readings, falling back to `fallback` on the first sample
+/// or counter reset (container restart).
+fn cpu_percent_delta(
+    previous: Option<Counter>,
+    cur_total_ns: Option<u64>,
+    cur_system_ns: Option<u64>,
+    online_cpus: Option<u32>,
+    fallback: f64,
+) -> f64 {
+    let Some(prev) = previous else {
+        return fallback;
+    };
+    let (Some(prev_total), Some(prev_sys), Some(total), Some(sys), Some(cpus)) = (
+        prev.cpu_total_ns,
+        prev.cpu_system_ns,
+        cur_total_ns,
+        cur_system_ns,
+        online_cpus.filter(|&c| c > 0),
+    ) else {
+        return fallback;
+    };
+    let (Some(spent), Some(elapsed)) = (total.checked_sub(prev_total), sys.checked_sub(prev_sys))
+    else {
+        return fallback;
+    };
+    if elapsed == 0 {
+        return fallback;
+    }
+    spent as f64 / elapsed as f64 * f64::from(cpus) * 100.0
+}
+
+async fn collect(
+    state: &AppState,
+    host_sampler: Option<&Arc<Mutex<HostSampler>>>,
+    counters: &mut Counters,
+) -> Result<()> {
     let ts = now();
     let containers: Vec<(String, String)> = sqlx::query_as(
         "SELECT 'app:' || a.id, d.container_id FROM apps a
@@ -194,17 +363,42 @@ async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
     .fetch_all(&state.db)
     .await?;
 
+    let sampler_clone = host_sampler.cloned();
     let data_dir = state.config.data_dir.clone();
-    let host = tokio::task::spawn_blocking(move || sample_host(&data_dir));
-    let usages = join_all(containers.iter().map(|(_, container)| {
-        let runtime = state.runtime.clone();
-        async move { tokio::time::timeout(USAGE_TIMEOUT, runtime.usage(container)).await }
-    }));
+    let host = tokio::task::spawn_blocking(move || -> Result<HostUsage> {
+        if let Some(sampler) = sampler_clone {
+            let mut guard = sampler.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(guard.sample())
+        } else {
+            let mut s = HostSampler::new(&data_dir, true)?;
+            Ok(s.sample())
+        }
+    });
+    let container_targets: Vec<(usize, String)> = containers
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, container))| (idx, container.clone()))
+        .collect();
+    let usages = stream::iter(container_targets)
+        .map(|(idx, container)| {
+            let runtime = state.runtime.clone();
+            async move {
+                (
+                    idx,
+                    tokio::time::timeout(USAGE_TIMEOUT, runtime.usage(&container)).await,
+                )
+            }
+        })
+        .buffer_unordered(STATS_CONCURRENCY)
+        .collect::<Vec<_>>();
     let (host, usages) = tokio::join!(host, usages);
 
     struct Row<'a> {
         scope: &'a str,
         cpu: f64,
+        cpu_total_ns: Option<u64>,
+        cpu_system_ns: Option<u64>,
+        online_cpus: Option<u32>,
         memory: u64,
         total: u64,
         rx: u64,
@@ -232,6 +426,9 @@ async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
             rows.push(Row {
                 scope: HOST,
                 cpu: f64::from(h.cpu_percent),
+                cpu_total_ns: None,
+                cpu_system_ns: None,
+                online_cpus: None,
                 memory: h.memory_used,
                 total: h.memory_total,
                 rx: h.net_rx,
@@ -241,9 +438,10 @@ async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
         Ok(Err(e)) => tracing::warn!("sampling the host: {e:#}"),
         Err(e) => tracing::warn!("sampling the host: {e}"),
     }
-    for ((scope, _), usage) in containers.iter().zip(usages) {
+    for (idx, usage) in usages {
         // Timeouts, engine errors and containers that just stopped leave a gap.
         if let Ok(Ok(Some(u))) = usage {
+            let (scope, _) = &containers[idx];
             // The engine reports the host's memory as the limit of a container
             // that has none. Store that as "no limit" rather than a fake one.
             let limit = if u.memory_limit >= host_memory {
@@ -254,6 +452,9 @@ async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
             rows.push(Row {
                 scope,
                 cpu: u.cpu_percent,
+                cpu_total_ns: u.cpu_total_ns,
+                cpu_system_ns: u.cpu_system_ns,
+                online_cpus: u.online_cpus,
                 memory: u.memory_bytes,
                 total: limit,
                 rx: u.net_rx,
@@ -264,25 +465,40 @@ async fn collect(state: &AppState, counters: &mut Counters) -> Result<()> {
 
     // Scopes that left (stopped apps, deleted databases) are forgotten.
     let mut next = Counters::with_capacity(rows.len());
-    let rows: Vec<(Row, Option<f64>, Option<f64>)> = rows
+    let rows: Vec<(Row, f64, Option<f64>, Option<f64>)> = rows
         .into_iter()
         .map(|r| {
-            let (rx, tx) = throughput(counters.get(r.scope).copied(), ts, r.rx, r.tx);
-            next.insert(r.scope.to_owned(), (ts, r.rx, r.tx));
-            (r, rx, tx)
+            let prev = counters.get(r.scope).copied();
+            let (rx, tx) = throughput(prev.map(|c| (c.ts, c.rx, c.tx)), ts, r.rx, r.tx);
+            let cpu = if r.scope == HOST {
+                r.cpu
+            } else {
+                cpu_percent_delta(prev, r.cpu_total_ns, r.cpu_system_ns, r.online_cpus, r.cpu)
+            };
+            next.insert(
+                r.scope.to_owned(),
+                Counter {
+                    ts,
+                    rx: r.rx,
+                    tx: r.tx,
+                    cpu_total_ns: r.cpu_total_ns,
+                    cpu_system_ns: r.cpu_system_ns,
+                },
+            );
+            (r, cpu, rx, tx)
         })
         .collect();
     *counters = next;
 
     let mut tx = state.db.begin().await?;
-    for (r, rx, sent) in rows {
+    for (r, cpu, rx, sent) in rows {
         sqlx::query(
             "INSERT OR REPLACE INTO metrics (ts, scope, cpu_pct, mem_bytes, mem_total, net_rx, net_tx)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(ts)
         .bind(r.scope)
-        .bind(r.cpu)
+        .bind(cpu)
         .bind(i64::try_from(r.memory).unwrap_or(i64::MAX))
         .bind(i64::try_from(r.total).unwrap_or(i64::MAX))
         .bind(rx)
@@ -361,6 +577,36 @@ mod tests {
             throughput(Some((30, 0, 0)), 30, 1, 1),
             (None, None),
             "no time passed"
+        );
+    }
+
+    #[test]
+    fn cpu_delta_computes_one_shot_percent_and_survives_restarts() {
+        // First sample falls back to engine-reported cpu_percent (0.0 for one-shot).
+        assert_eq!(
+            cpu_percent_delta(None, Some(1_000), Some(10_000), Some(4), 0.0),
+            0.0
+        );
+        let prev = Counter {
+            ts: 100,
+            rx: 0,
+            tx: 0,
+            cpu_total_ns: Some(1_000_000),
+            cpu_system_ns: Some(10_000_000),
+        };
+        // 25% of 4 cores = 100% of one core.
+        let pct = cpu_percent_delta(
+            Some(prev),
+            Some(3_500_000),
+            Some(20_000_000),
+            Some(4),
+            0.0,
+        );
+        assert!((pct - 100.0).abs() < 1e-6, "got {pct}");
+        // Counter reset after container restart falls back cleanly without underflow.
+        assert_eq!(
+            cpu_percent_delta(Some(prev), Some(500_000), Some(20_000_000), Some(4), 0.0),
+            0.0
         );
     }
 

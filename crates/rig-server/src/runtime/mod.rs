@@ -179,8 +179,14 @@ pub struct Shell {
 /// A container's resource use at one moment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Usage {
-    /// Percent of one core.
+    /// Percent of one core, when already computed by the engine.
     pub cpu_percent: f64,
+    /// Cumulative container CPU usage in nanoseconds (from cgroup `total_usage`).
+    pub cpu_total_ns: Option<u64>,
+    /// Cumulative host system CPU usage in nanoseconds (`system_cpu_usage`).
+    pub cpu_system_ns: Option<u64>,
+    /// Online CPU count reported by the engine.
+    pub online_cpus: Option<u32>,
     pub memory_bytes: u64,
     /// Zero when the container has no limit of its own.
     pub memory_limit: u64,

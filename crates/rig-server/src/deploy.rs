@@ -10,15 +10,16 @@ use std::{
     collections::HashMap,
     path::{Component, Path},
     process::Stdio,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    sync::{Notify, mpsc, watch},
+    sync::{Notify, Semaphore, mpsc, watch},
 };
 
 use crate::{
@@ -38,27 +39,34 @@ const CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long the old container gets to finish in-flight requests.
 const STOP_GRACE_SECS: u32 = 10;
+/// Maximum concurrent deployments across different apps. Source builds still
+/// run one at a time via `build_lock` to protect RAM on small VPSes.
+const MAX_CONCURRENT_DEPLOYS: usize = 4;
+/// Number of most recent finished deployments per app whose raw build logs are kept.
+const RETAIN_LOG_DEPLOYMENTS_PER_APP: i64 = 30;
 
-/// Wakes the worker and the log followers.
+/// Wakes the worker and per-deployment log followers.
 pub struct Deployer {
     queued: Notify,
-    /// Bumped whenever log lines or a deployment status are written.
-    activity: watch::Sender<u64>,
+    /// Per-deployment watch channels bumped whenever log lines or status change.
+    activity: std::sync::Mutex<HashMap<String, watch::Sender<u64>>>,
     http: reqwest::Client,
     /// Active deployment cancellation handles keyed by deployment id.
     cancels: std::sync::Mutex<HashMap<String, watch::Sender<bool>>>,
     /// Signalled when the server is shutting down so in-flight swaps can clean
     /// up and restore any paused stateful containers before process exit.
     shutdown: watch::Sender<bool>,
-    /// Held while the worker is executing a deployment (`run`).
-    busy: tokio::sync::Mutex<()>,
+    /// Permits for concurrent deployments across different apps.
+    slots: Arc<Semaphore>,
+    /// Single-permit lock protecting heavy Git/Railpack source builds.
+    build_lock: Arc<Semaphore>,
 }
 
 impl Deployer {
     pub fn new() -> Result<Self> {
         Ok(Self {
             queued: Notify::new(),
-            activity: watch::channel(0).0,
+            activity: std::sync::Mutex::new(HashMap::new()),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .redirect(reqwest::redirect::Policy::none())
@@ -66,7 +74,8 @@ impl Deployer {
                 .context("building health check client")?,
             cancels: std::sync::Mutex::new(HashMap::new()),
             shutdown: watch::channel(false).0,
-            busy: tokio::sync::Mutex::new(()),
+            slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DEPLOYS)),
+            build_lock: Arc::new(Semaphore::new(1)),
         })
     }
 
@@ -75,7 +84,11 @@ impl Deployer {
     pub async fn shutdown(&self) {
         let _ = self.shutdown.send(true);
         self.queued.notify_waiters();
-        let _ = tokio::time::timeout(Duration::from_secs(15), self.busy.lock()).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(15),
+            self.slots.acquire_many(MAX_CONCURRENT_DEPLOYS as u32),
+        )
+        .await;
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -86,13 +99,23 @@ impl Deployer {
         self.shutdown.subscribe()
     }
 
-    /// A receiver that changes whenever deployment state or logs change.
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
-        self.activity.subscribe()
+    /// A receiver that changes whenever `deployment_id`'s state or logs change.
+    pub fn subscribe_deployment(&self, deployment_id: &str) -> watch::Receiver<u64> {
+        let mut map = self.activity.lock().unwrap_or_else(|p| p.into_inner());
+        map.retain(|_, tx| tx.receiver_count() > 0);
+        map.entry(deployment_id.to_string())
+            .or_insert_with(|| watch::channel(0).0)
+            .subscribe()
     }
 
-    pub fn touch(&self) {
-        self.activity.send_modify(|n| *n = n.wrapping_add(1));
+    pub fn touch_deployment(&self, deployment_id: &str) {
+        let mut map = self.activity.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tx) = map.get(deployment_id) {
+            tx.send_modify(|n| *n = n.wrapping_add(1));
+            if tx.receiver_count() == 0 {
+                map.remove(deployment_id);
+            }
+        }
     }
 
     fn register_cancel(&self, deployment_id: &str) -> watch::Receiver<bool> {
@@ -151,7 +174,7 @@ pub async fn enqueue(state: &AppState, d: NewDeployment<'_>) -> Result<String, s
     .execute(&state.db)
     .await?;
     state.deploys.queued.notify_one();
-    state.deploys.touch();
+    state.deploys.touch_deployment(&id);
     Ok(id)
 }
 
@@ -234,6 +257,11 @@ pub async fn recover(state: &AppState) {
 }
 
 /// Run the deployment worker until the process exits.
+///
+/// Up to [`MAX_CONCURRENT_DEPLOYS`] deployments across different apps may run
+/// simultaneously (e.g. rollbacks and prebuilt image deploys proceed without
+/// waiting behind another app's source build), while Git/Railpack builds
+/// remain serialized by `build_lock` to protect RAM on small VPSes.
 pub async fn worker(state: AppState) {
     recover(&state).await;
     if let Err(e) = proxy::sync(&state).await {
@@ -245,20 +273,60 @@ pub async fn worker(state: AppState) {
         if state.deploys.is_shutting_down() {
             break;
         }
+        let permit = tokio::select! {
+            p = state.deploys.slots.clone().acquire_owned() => match p {
+                Ok(p) => p,
+                Err(_) => break,
+            },
+            _ = shutdown_rx.wait_for(|&s| s) => break,
+        };
+        if state.deploys.is_shutting_down() {
+            drop(permit);
+            break;
+        }
         let next = sqlx::query_scalar::<_, String>(
             "SELECT id FROM deployments WHERE status = 'queued' ORDER BY created_at, id LIMIT 1",
         )
         .fetch_optional(&state.db)
         .await;
         match next {
-            Ok(Some(id)) => run(&state, &id).await,
+            Ok(Some(id)) => {
+                // Atomically claim the queued row so the loop can immediately
+                // look for another app's queued deployment without double-spawning.
+                let claimed = sqlx::query(
+                    "UPDATE deployments SET status = 'building', started_at = COALESCE(started_at, ?)
+                      WHERE id = ? AND status = 'queued'",
+                )
+                .bind(now())
+                .bind(&id)
+                .execute(&state.db)
+                .await;
+                match claimed {
+                    Ok(res) if res.rows_affected() == 1 => {
+                        state.deploys.touch_deployment(&id);
+                        let st = state.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            run(&st, &id).await;
+                        });
+                    }
+                    Ok(_) => drop(permit),
+                    Err(e) => {
+                        drop(permit);
+                        tracing::error!(error = %e, "claiming queued deployment");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
             Ok(None) => {
+                drop(permit);
                 tokio::select! {
                     _ = state.deploys.queued.notified() => {}
                     _ = shutdown_rx.wait_for(|&s| s) => break,
                 }
             }
             Err(e) => {
+                drop(permit);
                 tracing::error!(error = %e, "reading the deployment queue");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -329,7 +397,6 @@ async fn load_app(state: &AppState, deployment_id: &str) -> Result<(AppRow, Pres
 }
 
 async fn run(state: &AppState, deployment_id: &str) {
-    let _guard = state.deploys.busy.lock().await;
     if state.deploys.is_shutting_down() {
         return;
     }
@@ -439,7 +506,42 @@ async fn run(state: &AppState, deployment_id: &str) {
 
     drop(log);
     let _ = writer.await;
-    state.deploys.touch();
+    prune_old_deployment_logs(&state.db, deployment_id).await;
+    state.deploys.touch_deployment(deployment_id);
+}
+
+/// Keeps raw build/deploy log lines bounded to the most recent
+/// [`RETAIN_LOG_DEPLOYMENTS_PER_APP`] finished deployments per app while
+/// preserving all deployment metadata rows.
+async fn prune_old_deployment_logs(db: &sqlx::SqlitePool, deployment_id: &str) {
+    let app_id: Option<String> =
+        sqlx::query_scalar("SELECT app_id FROM deployments WHERE id = ?")
+            .bind(deployment_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    let Some(app_id) = app_id else {
+        return;
+    };
+    if let Err(e) = sqlx::query(
+        "DELETE FROM deployment_logs
+          WHERE deployment_id IN (
+            SELECT id FROM deployments
+             WHERE app_id = ?1
+               AND status NOT IN ('queued', 'building', 'deploying')
+               AND id != COALESCE((SELECT current_deployment_id FROM apps WHERE id = ?1), '')
+             ORDER BY created_at DESC, id DESC
+             LIMIT -1 OFFSET ?2
+          )",
+    )
+    .bind(&app_id)
+    .bind(RETAIN_LOG_DEPLOYMENTS_PER_APP)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(error = %e, app = %app_id, "pruning old deployment logs");
+    }
 }
 
 async fn set_status(state: &AppState, deployment_id: &str, status: &str) -> Result<()> {
@@ -451,7 +553,7 @@ async fn set_status(state: &AppState, deployment_id: &str, status: &str) -> Resu
     .bind(deployment_id)
     .execute(&state.db)
     .await?;
-    state.deploys.touch();
+    state.deploys.touch_deployment(deployment_id);
     Ok(())
 }
 
@@ -471,15 +573,23 @@ pub fn short_of_disk(total: u64, used: u64) -> Option<u64> {
 
 /// Fail early, with a useful message, when the data disk is nearly full.
 pub async fn ensure_disk_space(state: &AppState) -> Result<()> {
+    ensure_disk_space_with_engine(state, None).await
+}
+
+async fn ensure_disk_space_with_engine(state: &AppState, engine_name: Option<&str>) -> Result<()> {
     let dir = state.config.data_dir.clone();
-    let usage = tokio::task::spawn_blocking(move || crate::metrics::sample_host(&dir)).await??;
-    if let Some(free) = short_of_disk(usage.disk_total, usage.disk_used) {
-        let engine = state
-            .runtime
-            .info()
-            .await
-            .map(|e| e.name)
-            .unwrap_or_else(|_| "docker".into());
+    let (disk_used, disk_total) =
+        tokio::task::spawn_blocking(move || crate::metrics::sample_disk(&dir)).await?;
+    if let Some(free) = short_of_disk(disk_total, disk_used) {
+        let engine = match engine_name {
+            Some(name) => name.to_owned(),
+            None => state
+                .runtime
+                .info()
+                .await
+                .map(|e| e.name)
+                .unwrap_or_else(|_| "docker".into()),
+        };
         bail!(
             "only {} MB free on the disk that holds {}. Remove old backups, or run \
              `{engine} system prune` if the engine stores its images on the same disk, \
@@ -510,7 +620,7 @@ async fn pipeline(state: &AppState, deployment_id: &str, log: &LogSink) -> Resul
         format!("Using {} {}", engine.name, engine.version),
     )
     .await;
-    ensure_disk_space(state).await?;
+    ensure_disk_space_with_engine(state, Some(&engine.name)).await?;
 
     // ---- image
     // A rollback runs the exact image it ran before, if the engine still has it.
@@ -533,6 +643,18 @@ async fn pipeline(state: &AppState, deployment_id: &str, log: &LogSink) -> Resul
             image
         }
         (None, "git") => {
+            let _build_permit = match state.deploys.build_lock.try_acquire() {
+                Ok(p) => p,
+                Err(_) => {
+                    log.line("build", "Waiting for another build to finish").await;
+                    state
+                        .deploys
+                        .build_lock
+                        .acquire()
+                        .await
+                        .context("build queue closed")?
+                }
+            };
             let tag = format!("rig/{}:{short}", app.slug);
             build_from_git(state, deployment_id, &app, &tag, log).await?;
             tag
@@ -790,6 +912,7 @@ async fn wait_healthy(
     app: &AppRow,
     log: &LogSink,
 ) -> Result<()> {
+    const BACKOFF_MS: &[u64] = &[100, 150, 250, 500, 700];
     let what = match &app.health_path {
         Some(path) => format!("GET {path} on port {}", app.port),
         None => format!("port {}", app.port),
@@ -800,6 +923,7 @@ async fn wait_healthy(
     // listens, so one success is not enough: the container must also still
     // be running on the next look.
     let mut passes = 0;
+    let mut attempt: usize = 0;
     loop {
         match state.runtime.state(&started.id).await? {
             ContainerState::Exited(code) => bail!(
@@ -833,7 +957,9 @@ async fn wait_healthy(
                 app.port
             );
         }
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        let delay_ms = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
 
@@ -856,7 +982,7 @@ pub async fn tcp_ready(host_port: u16) -> bool {
         return false;
     };
     let mut byte = [0u8; 1];
-    match tokio::time::timeout(Duration::from_millis(300), stream.read(&mut byte)).await {
+    match tokio::time::timeout(Duration::from_millis(150), stream.read(&mut byte)).await {
         Err(_) => true,
         Ok(Ok(n)) => n > 0,
         Ok(Err(_)) => false,
@@ -1213,7 +1339,8 @@ pub fn validate_relative_path(path: &str) -> Result<(), &'static str> {
 
 // ----------------------------------------------------------------------- logs
 
-/// Persist log lines in batches so a chatty build costs few transactions.
+/// Persist log lines in batched multi-row inserts so a chatty build costs few
+/// transactions and minimal statement overhead.
 async fn write_logs(state: AppState, deployment_id: String, mut rx: mpsc::Receiver<LogMsg>) {
     let mut seq: i64 = 0;
     let mut batch = Vec::with_capacity(128);
@@ -1228,18 +1355,19 @@ async fn write_logs(state: AppState, deployment_id: String, mut rx: mpsc::Receiv
         let ts = now();
         let result: Result<(), sqlx::Error> = async {
             let mut tx = state.db.begin().await?;
-            for m in &batch {
-                seq += 1;
-                sqlx::query(
-                    "INSERT INTO deployment_logs (deployment_id, seq, ts, stream, line) VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(&deployment_id)
-                .bind(seq)
-                .bind(&ts)
-                .bind(m.stream)
-                .bind(&m.line)
-                .execute(&mut *tx)
-                .await?;
+            for chunk in batch.chunks(100) {
+                let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+                    "INSERT INTO deployment_logs (deployment_id, seq, ts, stream, line) ",
+                );
+                qb.push_values(chunk, |mut b, m| {
+                    seq += 1;
+                    b.push_bind(&deployment_id)
+                        .push_bind(seq)
+                        .push_bind(&ts)
+                        .push_bind(m.stream)
+                        .push_bind(&m.line);
+                });
+                qb.build().execute(&mut *tx).await?;
             }
             tx.commit().await
         }
@@ -1248,7 +1376,7 @@ async fn write_logs(state: AppState, deployment_id: String, mut rx: mpsc::Receiv
             tracing::error!(error = %e, "writing deployment logs");
         }
         batch.clear();
-        state.deploys.touch();
+        state.deploys.touch_deployment(&deployment_id);
     }
 }
 
@@ -1485,6 +1613,7 @@ mod tests {
             proxy: Arc::new(NoopProxy),
             deploys: Arc::new(Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
+            caches: Arc::new(crate::state::RuntimeCaches::default()),
         };
 
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
@@ -1534,5 +1663,69 @@ mod tests {
         .unwrap();
         assert_eq!(dep_status, "failed");
         assert_eq!(port, 24567);
+    }
+
+    #[tokio::test]
+    async fn prune_old_deployment_logs_keeps_latest_30_and_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'Alpha', 'alpha', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, current_deployment_id, webhook_secret, created_at, updated_at)
+             VALUES ('app1', 'org1', 'p1', 'Web', 'web', 'image', 'nginx:alpine', 'Dockerfile', 80, 'running', 'dep-001', 'sec', '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        for i in 1..=35 {
+            let id = format!("dep-{i:03}");
+            let ts = format!("2026-11-22T00:{i:02}:00.000Z");
+            let status = if i == 1 { "running" } else { "superseded" };
+            sqlx::query(
+                "INSERT INTO deployments (id, org_id, app_id, status, trigger, created_at) VALUES (?, 'org1', 'app1', ?, 'manual', ?)",
+            )
+            .bind(&id)
+            .bind(status)
+            .bind(&ts)
+            .execute(&db)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO deployment_logs (deployment_id, seq, ts, stream, line) VALUES (?, 1, ?, 'build', 'line')",
+            )
+            .bind(&id)
+            .bind(&ts)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        prune_old_deployment_logs(&db, "dep-035").await;
+
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_logs")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(kept, 31);
+        let current_kept: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM deployment_logs WHERE deployment_id = 'dep-001'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(current_kept, 1);
+        let dep_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployments")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(dep_count, 35);
     }
 }

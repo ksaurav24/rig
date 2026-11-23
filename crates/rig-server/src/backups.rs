@@ -10,7 +10,7 @@ use rig_api::DatabaseEngine;
 use sqlx::Row;
 use tokio::{
     fs,
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 
 use crate::{
@@ -147,8 +147,7 @@ async fn target(state: &AppState, database_id: &str) -> Result<Target> {
     let engine: String = r.get("engine");
     Ok(Target {
         container_id,
-        engine: serde_json::from_value(serde_json::Value::String(engine))
-            .context("unknown engine")?,
+        engine: DatabaseEngine::parse(&engine).context("unknown engine")?,
         username: r.get("username"),
         password: state.vault.decrypt(&r.get::<String, _>("password_enc"))?,
         db_name: r.get("db_name"),
@@ -225,16 +224,20 @@ pub async fn run(state: AppState, backup_id: String, database_id: String) {
 async fn write_encrypted_stream(
     vault: &Vault,
     mut reader: impl AsyncRead + Unpin,
-    mut dest: fs::File,
+    dest: fs::File,
 ) -> Result<u64> {
+    let mut dest = BufWriter::with_capacity(256 * 1024, dest);
     let mut base = [0u8; 16];
     rand::fill(&mut base[..]);
-    dest.write_all(BACKUP_MAGIC).await?;
-    dest.write_all(&base).await?;
+    let mut header = [0u8; 24];
+    header[..8].copy_from_slice(BACKUP_MAGIC);
+    header[8..].copy_from_slice(&base);
+    dest.write_all(&header).await?;
 
     let mut total: u64 = 0;
     let mut chunk_index: u64 = 0;
     let mut buf = vec![0u8; BACKUP_CHUNK_SIZE];
+    let mut frame = Vec::with_capacity(5 + BACKUP_CHUNK_SIZE + 16);
     loop {
         let mut filled = 0;
         while filled < buf.len() {
@@ -247,9 +250,11 @@ async fn write_encrypted_stream(
         let is_final = filled < buf.len();
         let ct = vault.encrypt_chunk(&base, chunk_index, is_final, &buf[..filled])?;
         let ct_len = u32::try_from(ct.len()).context("backup chunk too large")?;
-        dest.write_all(&ct_len.to_le_bytes()).await?;
-        dest.write_all(&[u8::from(is_final)]).await?;
-        dest.write_all(&ct).await?;
+        frame.clear();
+        frame.extend_from_slice(&ct_len.to_le_bytes());
+        frame.push(u8::from(is_final));
+        frame.extend_from_slice(&ct);
+        dest.write_all(&frame).await?;
         total = total.saturating_add(filled as u64);
         chunk_index += 1;
         if is_final {
@@ -257,7 +262,7 @@ async fn write_encrypted_stream(
         }
     }
     dest.flush().await?;
-    dest.sync_all().await?;
+    dest.into_inner().sync_all().await?;
     Ok(total)
 }
 
@@ -267,7 +272,8 @@ pub async fn open_decrypted(
     vault: Vault,
     path: &Path,
 ) -> Result<tokio::io::DuplexStream> {
-    let mut file = fs::File::open(path).await.context("opening the backup")?;
+    let file = fs::File::open(path).await.context("opening the backup")?;
+    let mut file = BufReader::with_capacity(256 * 1024, file);
     let mut header = [0u8; 8];
     let n = file.read(&mut header).await.context("reading backup header")?;
     let (mut writer, reader) = tokio::io::duplex(BACKUP_CHUNK_SIZE * 2);
@@ -278,23 +284,25 @@ pub async fn open_decrypted(
             .context("reading backup stream nonce")?;
         tokio::spawn(async move {
             let mut chunk_index: u64 = 0;
+            let mut ct = Vec::with_capacity(BACKUP_CHUNK_SIZE + 16);
             loop {
-                let mut len_buf = [0u8; 4];
-                if file.read_exact(&mut len_buf).await.is_err() {
+                let mut frame_hdr = [0u8; 5];
+                if file.read_exact(&mut frame_hdr).await.is_err() {
                     // Truncated stream: drop writer early (incomplete)
                     return;
                 }
-                let ct_len = u32::from_le_bytes(len_buf) as usize;
+                let ct_len = u32::from_le_bytes([
+                    frame_hdr[0],
+                    frame_hdr[1],
+                    frame_hdr[2],
+                    frame_hdr[3],
+                ]) as usize;
                 // Cap per-chunk ciphertext size (64 KiB + 16-byte Poly1305 tag).
                 if ct_len > BACKUP_CHUNK_SIZE + 64 {
                     return;
                 }
-                let mut flag = [0u8; 1];
-                if file.read_exact(&mut flag).await.is_err() {
-                    return;
-                }
-                let is_final = flag[0] != 0;
-                let mut ct = vec![0u8; ct_len];
+                let is_final = frame_hdr[4] != 0;
+                ct.resize(ct_len, 0);
                 if file.read_exact(&mut ct).await.is_err() {
                     return;
                 }

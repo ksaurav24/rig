@@ -39,7 +39,10 @@ function isNavActive(pathname: string, to: string): boolean {
 export function AppSidebar({ me }: { me: Schemas['Me'] }) {
   const { pathname } = useLocation()
   const { prefs, togglePinnedProject } = usePreferences()
-  const projects = useQuery(projectsQuery)
+  const projects = useQuery({
+    ...projectsQuery,
+    enabled: prefs.pinnedProjects.length > 0,
+  })
   const groups = sidebarNavFor(me.role)
 
   const pinned = useMemo(() => {

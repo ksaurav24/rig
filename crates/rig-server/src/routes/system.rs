@@ -1,6 +1,7 @@
-use std::time::Duration;
-
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json,
@@ -14,12 +15,15 @@ use rig_api::{
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    access, proxy,
+    access,
     auth::{Auth, Owner, Viewer, real_ip},
     error::{ApiError, ApiResult},
-    metrics::sample_host,
-    state::AppState,
+    metrics::cached_system_snapshot,
+    proxy,
+    state::{AppState, NetworkSnapshot},
 };
+
+const NETWORK_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -36,31 +40,25 @@ async fn system_info(
     State(state): State<AppState>,
     auth: Auth<Viewer>,
 ) -> ApiResult<Json<SystemInfo>> {
-    let data_dir = state.config.data_dir.clone();
-    let usage = tokio::task::spawn_blocking(move || sample_host(&data_dir));
-    let engine = tokio::time::timeout(Duration::from_secs(3), state.runtime.info());
     let counts = sqlx::query_as::<_, (i64, i64)>(
         "SELECT COUNT(*), COALESCE(SUM(status = 'running'), 0) FROM apps WHERE org_id = ?",
     )
     .bind(&auth.org_id)
     .fetch_one(&state.db);
-
-    let (usage, engine, proxy_ready, counts) =
-        tokio::join!(usage, engine, state.proxy.ready(), counts);
-    let usage = usage.map_err(|e| anyhow::anyhow!("sampling host usage: {e}"))??;
-    let engine = engine.ok().and_then(Result::ok);
+    let (snap, counts) = tokio::join!(cached_system_snapshot(&state), counts);
+    let snap = snap?;
     let (apps_total, apps_running) = counts?;
 
     Ok(Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION").into(),
-        engine: engine.as_ref().map(|e| e.name.clone()),
-        engine_version: engine.map(|e| e.version),
-        proxy_ready,
-        cpu_percent: usage.cpu_percent,
-        memory_used: usage.memory_used,
-        memory_total: usage.memory_total,
-        disk_used: usage.disk_used,
-        disk_total: usage.disk_total,
+        engine: snap.engine.as_ref().map(|e| e.name.clone()),
+        engine_version: snap.engine.map(|e| e.version),
+        proxy_ready: snap.proxy_ready,
+        cpu_percent: snap.cpu_percent,
+        memory_used: snap.memory_used,
+        memory_total: snap.memory_total,
+        disk_used: snap.disk_used,
+        disk_total: snap.disk_total,
         apps_running: u32::try_from(apps_running).unwrap_or(0),
         apps_total: u32::try_from(apps_total).unwrap_or(0),
     }))
@@ -133,12 +131,49 @@ async fn network_info(
     Ok(Json(network(&state, real_ip(&headers, addr.ip())).await))
 }
 
-async fn network(state: &AppState, you: IpAddr) -> NetworkInfo {
+async fn cached_network_probe(state: &AppState) -> (Vec<String>, Option<TailscaleInfo>) {
+    if let Some(snap) = state
+        .caches
+        .network
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        && snap.sampled_at.elapsed() < NETWORK_CACHE_TTL
+    {
+        return (snap.lan_addresses.clone(), snap.tailscale.clone());
+    }
+    let _guard = state.caches.network_refresh.lock().await;
+    if let Some(snap) = state
+        .caches
+        .network
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        && snap.sampled_at.elapsed() < NETWORK_CACHE_TTL
+    {
+        return (snap.lan_addresses.clone(), snap.tailscale.clone());
+    }
     let lan = tokio::task::spawn_blocking(lan_addresses);
-    let (lan, tailscale, dashboard_domain) =
-        tokio::join!(lan, tailscale_info(), proxy::dashboard_domain(&state.db));
+    let (lan, tailscale) = tokio::join!(lan, tailscale_info());
+    let lan_addresses = lan.unwrap_or_default();
+    let snap = NetworkSnapshot {
+        lan_addresses: lan_addresses.clone(),
+        tailscale: tailscale.clone(),
+        sampled_at: Instant::now(),
+    };
+    *state
+        .caches
+        .network
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = Some(snap);
+    (lan_addresses, tailscale)
+}
+
+async fn network(state: &AppState, you: IpAddr) -> NetworkInfo {
+    let ((lan_addresses, tailscale), dashboard_domain) =
+        tokio::join!(cached_network_probe(state), proxy::dashboard_domain(&state.db));
     NetworkInfo {
-        lan_addresses: lan.unwrap_or_default(),
+        lan_addresses,
         tailscale,
         dashboard_access: state.access.get(),
         your_address: Some(you.to_string()),

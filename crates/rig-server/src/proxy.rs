@@ -378,10 +378,16 @@ pub async fn sync(state: &AppState) -> Result<()> {
     let dashboard = dashboard_domain(&state.db)
         .await
         .context("reading the dashboard domain")?;
-    let blocked = tokio::task::spawn_blocking(access::container_bridge_cidrs)
-        .await
-        .unwrap_or_default();
-    state.access.set_blocked_bridges(blocked.clone());
+    let blocked = match state.access.fresh_blocked_bridges(Duration::from_secs(30)) {
+        Some(cached) => cached,
+        None => {
+            let fresh = tokio::task::spawn_blocking(access::container_bridge_cidrs)
+                .await
+                .unwrap_or_default();
+            state.access.set_blocked_bridges(fresh.clone());
+            fresh
+        }
+    };
     state.proxy.apply(&routes, dashboard.as_ref(), &blocked).await
 }
 

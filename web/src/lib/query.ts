@@ -46,6 +46,9 @@ export const queryClient = new QueryClient({
   }),
   queryCache: new QueryCache({
     onError(error, query) {
+      // Initial `me` bootstrap is handled directly by `_app.tsx` `beforeLoad`
+      // so `/setup` and `/login` redirects never race.
+      if (query.queryKey[0] === 'me' && query.state.data === undefined) return
       if (handleAuth(error)) return
       // Only interrupt for background refetch failures; a first load that
       // fails renders its own error state in place.

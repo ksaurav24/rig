@@ -1,12 +1,52 @@
-use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
+use rig_api::TailscaleInfo;
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
-use crate::{crypto::Vault, deploy::Deployer, proxy::Proxy, runtime::Runtime};
+use crate::{
+    crypto::Vault,
+    deploy::Deployer,
+    proxy::Proxy,
+    runtime::{EngineInfo, Runtime},
+};
+
+#[derive(Debug, Clone)]
+pub struct SystemSnapshot {
+    pub engine: Option<EngineInfo>,
+    pub proxy_ready: bool,
+    pub cpu_percent: f32,
+    pub memory_used: u64,
+    pub memory_total: u64,
+    pub disk_used: u64,
+    pub disk_total: u64,
+    pub sampled_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkSnapshot {
+    pub lan_addresses: Vec<String>,
+    pub tailscale: Option<TailscaleInfo>,
+    pub sampled_at: Instant,
+}
+
+/// Process-local in-memory caches for expensive host, engine, proxy, and
+/// network probes so frequent dashboard polling never blocks on live I/O.
+#[derive(Default)]
+pub struct RuntimeCaches {
+    pub system: RwLock<Option<SystemSnapshot>>,
+    pub system_refresh: tokio::sync::Mutex<()>,
+    pub network: RwLock<Option<NetworkSnapshot>>,
+    pub network_refresh: tokio::sync::Mutex<()>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -37,6 +77,7 @@ pub struct AppState {
     pub deploys: Arc<Deployer>,
     /// Who may open the dashboard; see `access::guard`.
     pub access: crate::access::DashboardAccess,
+    pub caches: Arc<RuntimeCaches>,
 }
 
 pub async fn open_db(url: &str) -> Result<SqlitePool> {
@@ -45,7 +86,9 @@ pub async fn open_db(url: &str) -> Result<SqlitePool> {
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("cache_size", "-16000")
+        .pragma("mmap_size", "67108864");
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)

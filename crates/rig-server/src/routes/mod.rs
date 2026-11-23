@@ -15,13 +15,14 @@ mod terminal;
 use std::net::SocketAddr;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{ConnectInfo, Request, State},
     http::{HeaderValue, header},
     middleware::Next,
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::get,
 };
+use bytes::Bytes;
 use tower_http::{
     compression::CompressionLayer, limit::RequestBodyLimitLayer,
     set_header::SetResponseHeaderLayer, trace::TraceLayer,
@@ -104,27 +105,45 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 
 pub fn app(state: AppState) -> Router {
     let (mut router, spec) = api().split_for_parts();
-    let spec_json = spec.clone();
+    let spec_bytes = Bytes::from(
+        serde_json::to_vec(&spec).expect("serializing OpenAPI spec"),
+    );
     router = router.route(
         "/api/openapi.json",
         get(move |_auth: Auth<Viewer>| {
-            let spec_json = spec_json.clone();
-            async move { Json(spec_json) }
+            let spec_bytes = spec_bytes.clone();
+            async move {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    )],
+                    spec_bytes,
+                )
+            }
         }),
     );
     if state.config.enable_api_docs {
-        let html = Scalar::new(spec).custom_html(SCALAR_HTML).to_html();
+        let html = Bytes::from(Scalar::new(spec).custom_html(SCALAR_HTML).to_html());
         router = router.route(
             "/api/docs",
             get(move |_auth: Auth<Viewer>| {
                 let html = html.clone();
                 async move {
-                    let mut res = Html(html).into_response();
-                    res.headers_mut().insert(
-                        header::CONTENT_SECURITY_POLICY,
-                        HeaderValue::from_static(DOCS_CSP),
-                    );
-                    res
+                    (
+                        [
+                            (
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static("text/html; charset=utf-8"),
+                            ),
+                            (
+                                header::CONTENT_SECURITY_POLICY,
+                                HeaderValue::from_static(DOCS_CSP),
+                            ),
+                        ],
+                        html,
+                    )
+                        .into_response()
                 }
             }),
         );

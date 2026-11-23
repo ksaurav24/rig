@@ -88,7 +88,7 @@ curl -fsSL -X POST "https://rig.example.com/api/v1/hooks/apps/$APP_ID" \
 
 If your Rig server runs on a home network (`Access::Lan`) or Tailscale tailnet (`Access::Tailscale`) where GitHub cannot deliver inbound HTTP webhooks, Rig's background poller (`github::poller`) handles auto-deploy automatically:
 
-- Every **`RIG_POLL_INTERVAL` seconds** (default `120` seconds; set `0` in `/etc/rig/rig.env` to disable), Rig checks each `git` app that has `auto_deploy = true` and has already been deployed at least once.
+- Every **`RIG_POLL_INTERVAL` seconds** (default `120` seconds; set `0` in `/etc/rig/rig.env` to disable), Rig checks each `git` app that has `auto_deploy = true` and has already been deployed at least once (polling up to `4` repositories concurrently).
 - Before cloning or polling, Rig resolves the remote host and blocks loopback or private/RFC1918 IP addresses by default (pass `--allow-private-git` / `RIG_ALLOW_PRIVATE_GIT=true` for self-hosted LAN Git servers), restricts Git transports to `https` and `ssh`, and disables HTTP redirects and symlinks.
 - Rig runs `git ls-remote <git_url> refs/heads/<branch>` (with a 30-second timeout and any applicable GitHub App installation token).
 - When the remote commit SHA differs from the app's latest deployment `commit_sha`, Rig queues a new deployment with `trigger = "webhook"` and logs `git.poll` in the audit log.

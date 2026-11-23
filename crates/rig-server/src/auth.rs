@@ -162,16 +162,17 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 async fn from_api_token(state: &AppState, token: &str) -> ApiResult<Auth<Viewer>> {
     let hash = crypto::hash_token(token);
+    let current_now = now();
     let row = sqlx::query(
-        "SELECT t.id, t.user_id, t.org_id, t.role AS token_role, m.role AS member_role,
-                u.email, u.must_change_password
+        "SELECT t.id, t.user_id, t.org_id, t.role AS token_role, t.last_used_at,
+                m.role AS member_role, u.email, u.must_change_password
          FROM api_tokens t
          JOIN users u ON u.id = t.user_id AND u.disabled = 0
          JOIN memberships m ON m.org_id = t.org_id AND m.user_id = t.user_id
          WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
     )
     .bind(&hash)
-    .bind(now())
+    .bind(&current_now)
     .fetch_optional(&state.db)
     .await?
     .ok_or(ApiError::Unauthorized)?;
@@ -183,15 +184,18 @@ async fn from_api_token(state: &AppState, token: &str) -> ApiResult<Auth<Viewer>
 
     // Coarse last-used tracking: at most one write per token per minute.
     let cutoff = ts(chrono::Utc::now() - chrono::Duration::minutes(1));
-    sqlx::query(
-        "UPDATE api_tokens SET last_used_at = ?
-         WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
-    )
-    .bind(now())
-    .bind(&id)
-    .bind(cutoff)
-    .execute(&state.db)
-    .await?;
+    let last_used: Option<String> = row.get("last_used_at");
+    if last_used.as_deref().is_none_or(|t| t < cutoff.as_str()) {
+        let _ = sqlx::query(
+            "UPDATE api_tokens SET last_used_at = ?
+             WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
+        )
+        .bind(&current_now)
+        .bind(&id)
+        .bind(&cutoff)
+        .execute(&state.db)
+        .await;
+    }
 
     Ok(Auth {
         user_id: row.get("user_id"),

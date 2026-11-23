@@ -354,6 +354,14 @@ impl SourceKind {
             SourceKind::Git => "git",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "image" => SourceKind::Image,
+            "git" => SourceKind::Git,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +374,19 @@ pub enum AppStatus {
     Running,
     Stopped,
     Failed,
+}
+
+impl AppStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "idle" => AppStatus::Idle,
+            "deploying" => AppStatus::Deploying,
+            "running" => AppStatus::Running,
+            "stopped" => AppStatus::Stopped,
+            "failed" => AppStatus::Failed,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -479,6 +500,19 @@ impl DeploymentStatus {
     pub fn is_finished(self) -> bool {
         !matches!(self, Self::Queued | Self::Building | Self::Deploying)
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "queued" => DeploymentStatus::Queued,
+            "building" => DeploymentStatus::Building,
+            "deploying" => DeploymentStatus::Deploying,
+            "running" => DeploymentStatus::Running,
+            "superseded" => DeploymentStatus::Superseded,
+            "failed" => DeploymentStatus::Failed,
+            "cancelled" => DeploymentStatus::Cancelled,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,6 +615,16 @@ impl TlsMode {
             TlsMode::Tailscale => "tailscale",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "auto" => TlsMode::Auto,
+            "internal" => TlsMode::Internal,
+            "off" => TlsMode::Off,
+            "tailscale" => TlsMode::Tailscale,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,6 +675,15 @@ impl Access {
             Access::Tailscale => "tailscale",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "public" => Access::Public,
+            "lan" => Access::Lan,
+            "tailscale" => Access::Tailscale,
+            _ => return None,
+        })
+    }
 }
 
 /// Where this machine can be reached, to help pick a domain.
@@ -666,7 +719,7 @@ pub struct DashboardDomainRequest {
     pub tls_mode: Option<TlsMode>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct TailscaleInfo {
     /// The machine's MagicDNS name, e.g. `box.tail1234.ts.net`.
@@ -724,6 +777,17 @@ impl DatabaseEngine {
             DatabaseEngine::Mongodb => "mongodb",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "postgres" => DatabaseEngine::Postgres,
+            "mysql" => DatabaseEngine::Mysql,
+            "mariadb" => DatabaseEngine::Mariadb,
+            "redis" => DatabaseEngine::Redis,
+            "mongodb" => DatabaseEngine::Mongodb,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -736,6 +800,18 @@ pub enum DatabaseStatus {
     /// The container is gone; the data volume is kept.
     Stopped,
     Failed,
+}
+
+impl DatabaseStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "creating" => DatabaseStatus::Creating,
+            "running" => DatabaseStatus::Running,
+            "stopped" => DatabaseStatus::Stopped,
+            "failed" => DatabaseStatus::Failed,
+            _ => return None,
+        })
+    }
 }
 
 /// A managed database. Its password is only returned by the reveal endpoint.
@@ -800,6 +876,17 @@ pub enum BackupStatus {
     Running,
     Ok,
     Failed,
+}
+
+impl BackupStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "running" => BackupStatus::Running,
+            "ok" => BackupStatus::Ok,
+            "failed" => BackupStatus::Failed,
+            _ => return None,
+        })
+    }
 }
 
 /// A dump of one managed database, kept on the server's disk.

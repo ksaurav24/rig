@@ -112,7 +112,7 @@ Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <
 </Endpoint>
 
 <Endpoint method="GET" path="/api/v1/media/{id}" role="Public">
-  Serves uploaded media bytes with `nosniff`. Public logos (`is_public = 1`) are cached immutably without auth; user avatars (`is_public = 0`) require `Auth<Viewer>` in the same organization (returning uniform `404 Not Found` otherwise) and set `Cache-Control: private, max-age=3600`. Legacy SVGs continue to serve with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`.
+  Serves uploaded media bytes with `nosniff` and `ETag` / `If-None-Match` conditional `304 Not Modified` support (checked before reading the BLOB from SQLite). Public logos (`is_public = 1`) are cached immutably without auth; user avatars (`is_public = 0`) require `Auth<Viewer>` in the same organization (returning uniform `404 Not Found` otherwise) and set `Cache-Control: private, max-age=3600`. Legacy SVGs continue to serve with `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`.
 </Endpoint>
 
 <Endpoint method="GET" path="/api/v1/members" role="Admin">
@@ -140,11 +140,11 @@ Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <
 ## System & Network
 
 <Endpoint method="GET" path="/api/v1/system" role="Viewer">
-  Returns host resource usage, container engine version, Caddy proxy status, and app counts (`SystemInfo`).
+  Returns host resource usage, container engine version, Caddy proxy status (served from a background-refreshed snapshot), and live SQLite app counts (`SystemInfo`).
 </Endpoint>
 
 <Endpoint method="GET" path="/api/v1/system/network" role="Viewer">
-  Returns private LAN IPv4 addresses, Tailscale MagicDNS and IP info, current `dashboard_access`, caller's seen IP (`your_address`), and configured `dashboard_domain` (`NetworkInfo`).
+  Returns private LAN IPv4 addresses and Tailscale MagicDNS/IP info (cached for 30 seconds), alongside live `dashboard_access`, caller's seen IP (`your_address`), and configured `dashboard_domain` (`NetworkInfo`).
 </Endpoint>
 
 <Endpoint method="PUT" path="/api/v1/system/dashboard-access" role="Owner">
@@ -264,7 +264,7 @@ Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <
 </Endpoint>
 
 <Endpoint method="SSE" path="/api/v1/deployments/{id}/logs" role="Viewer">
-  Streams build and deploy logs over Server-Sent Events (`event: log` with `id: <seq>` and `LogLine` JSON, followed by `event: end` with `DeploymentEndEvent: { status, domains }`), re-verifying the caller's session or API token every 30 seconds. Supports stream resumption via `?after=<seq>` or the `Last-Event-ID` header.
+  Streams build and deploy logs over Server-Sent Events (`event: log` with `id: <seq>` and `LogLine` JSON, followed by `event: end` with `DeploymentEndEvent: { status, domains }`), re-verifying the caller's session or API token every 30 seconds. Supports tailing the latest lines via `?tail=<1-5000>` and stream resumption via `?after=<seq>` or the `Last-Event-ID` header.
 </Endpoint>
 
 ---
@@ -308,7 +308,7 @@ Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <
 </Endpoint>
 
 <Endpoint method="GET" path="/api/v1/databases" role="Viewer">
-  Lists all managed databases in the organization (`Database[]`).
+  Lists managed databases in the organization (`Database[]`). Optional query parameter: `?project_id=<uuid>`.
 </Endpoint>
 
 <Endpoint method="POST" path="/api/v1/databases" role="Developer">

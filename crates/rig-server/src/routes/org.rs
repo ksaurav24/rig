@@ -5,7 +5,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -319,36 +319,60 @@ async fn delete_org_logo(
 async fn get_media(
     State(state): State<AppState>,
     auth: Result<Auth<Viewer>, ApiError>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    let row = sqlx::query("SELECT org_id, content_type, data, is_public FROM media WHERE id = ?")
+    let meta = sqlx::query("SELECT org_id, content_type, is_public FROM media WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
         .await?
         .ok_or(ApiError::NotFound("media"))?;
 
-    let is_public: i64 = row.get("is_public");
+    let is_public: i64 = meta.get("is_public");
     if is_public == 0 {
         // Uniform 404 whether unauthenticated or cross-org to avoid an existence oracle.
         let Ok(auth) = auth else {
             return Err(ApiError::NotFound("media"));
         };
-        let org_id: String = row.get("org_id");
+        let org_id: String = meta.get("org_id");
         if org_id != auth.org_id {
             return Err(ApiError::NotFound("media"));
         }
     }
 
-    let content_type: String = row.get("content_type");
-    let data: Vec<u8> = row.get("data");
+    let content_type: String = meta.get("content_type");
+    let etag = format!("\"{id}\"");
     let cache_control = if is_public != 0 {
         "public, max-age=31536000, immutable"
     } else {
         "private, max-age=31536000, immutable"
     };
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|tag| tag.trim() == etag));
+    if fresh {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            )
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()));
+    }
+
+    let data: Vec<u8> = sqlx::query_scalar("SELECT data FROM media WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound("media"))?;
     let mut res = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, &content_type)
+        .header(header::ETAG, &etag)
         .header(header::CACHE_CONTROL, cache_control)
         .header(
             header::X_CONTENT_TYPE_OPTIONS,

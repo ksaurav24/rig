@@ -645,6 +645,7 @@ mod tests {
             proxy: Arc::new(NoopProxy),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
+            caches: Arc::new(crate::state::RuntimeCaches::default()),
         };
 
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")

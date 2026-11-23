@@ -15,5 +15,22 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[profile.release.package.argon2]
+opt-level = 3
+[profile.release.package.chacha20]
+opt-level = 3
+[profile.release.package.poly1305]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
+[profile.release.package.brotli]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.serde_json]
+opt-level = 3
+[profile.release.package.libsqlite3-sys]
+opt-level = 3
+
 [profile.dev.package."*"]
 opt-level = 1

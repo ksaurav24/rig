@@ -6,6 +6,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
+use futures_util::stream::{self, StreamExt};
 use sqlx::Row;
 
 use crate::{
@@ -87,19 +88,32 @@ async fn check(state: &AppState, down: &mut HashSet<String>) -> Result<()> {
     )
     .fetch_all(&state.db)
     .await?;
+
+    let checked_apps: Vec<_> = stream::iter(rows)
+        .map(|r| {
+            let runtime = state.runtime.clone();
+            async move {
+                let container: String = r.get("container_id");
+                let health = runtime.health(&container).await;
+                (r, container, health)
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
     let mut still_down = HashSet::new();
     let mut proxy_needs_sync = false;
-    for r in rows {
+    for (r, container, health) in checked_apps {
         let id: String = r.get("id");
         let deployment_id: String = r.get("deployment_id");
-        let container: String = r.get("container_id");
         let stored_port: Option<i64> = r.get("host_port");
         let seen: i64 = r.get("restart_count");
         let memory = r
             .get::<Option<i64>, _>("memory_mb")
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(crate::deploy::DEFAULT_APP_MEMORY_MB);
-        let health = match state.runtime.health(&container).await {
+        let health = match health {
             Ok(h) => h,
             // The engine is unreachable; that is not the app's fault.
             Err(e) => {
@@ -209,11 +223,22 @@ async fn check(state: &AppState, down: &mut HashSet<String>) -> Result<()> {
     )
     .fetch_all(&state.db)
     .await?;
-    for r in db_rows {
+    let checked_dbs: Vec<_> = stream::iter(db_rows)
+        .map(|r| {
+            let runtime = state.runtime.clone();
+            async move {
+                let container: String = r.get("container_id");
+                let health = runtime.health(&container).await;
+                (r, health)
+            }
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    for (r, health) in checked_dbs {
         let id: String = r.get("id");
-        let container: String = r.get("container_id");
         let stored_port: Option<i64> = r.get("host_port");
-        if let Ok(Some(h)) = state.runtime.health(&container).await
+        if let Ok(Some(h)) = health
             && h.state == ContainerState::Running
             && let Some(live_port) = h.host_port
             && stored_port != Some(i64::from(live_port))
@@ -435,6 +460,7 @@ mod tests {
             proxy: Arc::new(RecordingProxy(applied_routes.clone())),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
+            caches: Arc::new(crate::state::RuntimeCaches::default()),
         };
 
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")

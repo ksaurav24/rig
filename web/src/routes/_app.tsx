@@ -46,11 +46,14 @@ function readSidebarCookie(): boolean {
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context, location }) => {
-    const status = await context.queryClient.ensureQueryData(setupStatusQuery)
-    if (!status.setup_complete) throw redirect({ to: '/setup' })
-    try {
-      await context.queryClient.ensureQueryData(meQuery)
-    } catch (e) {
+    const [setupRes, meRes] = await Promise.allSettled([
+      context.queryClient.ensureQueryData(setupStatusQuery),
+      context.queryClient.ensureQueryData(meQuery),
+    ])
+    if (setupRes.status === 'rejected') throw setupRes.reason
+    if (!setupRes.value.setup_complete) throw redirect({ to: '/setup' })
+    if (meRes.status === 'rejected') {
+      const e = meRes.reason
       if (e instanceof ApiError && e.status === 401) {
         throw redirect({ to: '/login', search: location.pathname === '/' ? {} : { next: location.pathname } })
       }

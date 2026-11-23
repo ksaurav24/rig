@@ -593,6 +593,8 @@ pub async fn poller(state: AppState) {
 type PollRow = (String, String, String, Option<String>, Option<String>);
 
 async fn poll_once(state: &AppState) -> Result<()> {
+    use futures_util::stream::{self, StreamExt};
+
     let apps: Vec<PollRow> = sqlx::query_as(
         "SELECT a.id, a.org_id, a.git_url, a.git_branch,
                 (SELECT commit_sha FROM deployments d WHERE d.app_id = a.id
@@ -603,26 +605,29 @@ async fn poll_once(state: &AppState) -> Result<()> {
     )
     .fetch_all(&state.db)
     .await?;
-    for (app_id, org_id, url, branch, last) in apps {
-        let head = match remote_head(state, &org_id, &url, branch.as_deref()).await {
-            Ok(Some(h)) => h,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::debug!("checking {url} failed: {e:#}");
-                continue;
+    stream::iter(apps)
+        .for_each_concurrent(4, |(app_id, org_id, url, branch, last)| async move {
+            let head = match remote_head(state, &org_id, &url, branch.as_deref()).await {
+                Ok(Some(h)) => h,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!("checking {url} failed: {e:#}");
+                    return;
+                }
+            };
+            if last
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case(&head))
+            {
+                return;
             }
-        };
-        if last
-            .as_deref()
-            .is_some_and(|l| l.eq_ignore_ascii_case(&head))
-        {
-            continue;
-        }
-        match deploy_commit(state, &org_id, &app_id, Some(&head), "poll").await? {
-            Ok(id) => tracing::info!("new commit {head} on {url}; queued deployment {id}"),
-            Err(why) => tracing::debug!("not deploying {url}: {why}"),
-        }
-    }
+            match deploy_commit(state, &org_id, &app_id, Some(&head), "poll").await {
+                Ok(Ok(id)) => tracing::info!("new commit {head} on {url}; queued deployment {id}"),
+                Ok(Err(why)) => tracing::debug!("not deploying {url}: {why}"),
+                Err(e) => tracing::warn!("queueing polled commit for {url}: {e:#}"),
+            }
+        })
+        .await;
     Ok(())
 }
 

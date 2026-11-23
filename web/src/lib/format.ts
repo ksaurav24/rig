@@ -16,6 +16,17 @@ function hour12Option(hourCycle: HourCycleMode): boolean | undefined {
   return undefined
 }
 
+const dtfCache = new Map<string, Intl.DateTimeFormat>()
+
+function getCachedDateTimeFormat(key: string, create: () => Intl.DateTimeFormat): Intl.DateTimeFormat {
+  let formatter = dtfCache.get(key)
+  if (!formatter) {
+    formatter = create()
+    dtfCache.set(key, formatter)
+  }
+  return formatter
+}
+
 function formatDateTime(
   date: Date,
   opts: {
@@ -25,12 +36,15 @@ function formatDateTime(
     hourCycle: HourCycleMode
   },
 ): string {
-  const h12 = hour12Option(opts.hourCycle)
-  const formatter = new Intl.DateTimeFormat(undefined, {
-    ...(opts.dateStyle ? { dateStyle: opts.dateStyle } : {}),
-    ...(opts.timeStyle ? { timeStyle: opts.timeStyle } : {}),
-    ...(opts.timeZone === 'utc' ? { timeZone: 'UTC' } : {}),
-    ...(h12 !== undefined ? { hour12: h12 } : {}),
+  const key = `dt|${opts.dateStyle ?? ''}|${opts.timeStyle ?? ''}|${opts.timeZone}|${opts.hourCycle}`
+  const formatter = getCachedDateTimeFormat(key, () => {
+    const h12 = hour12Option(opts.hourCycle)
+    return new Intl.DateTimeFormat(undefined, {
+      ...(opts.dateStyle ? { dateStyle: opts.dateStyle } : {}),
+      ...(opts.timeStyle ? { timeStyle: opts.timeStyle } : {}),
+      ...(opts.timeZone === 'utc' ? { timeZone: 'UTC' } : {}),
+      ...(h12 !== undefined ? { hour12: h12 } : {}),
+    })
   })
   const text = formatter.format(date)
   return opts.timeZone === 'utc' ? `${text} UTC` : text
@@ -72,16 +86,24 @@ export function fullDate(iso: string | null | undefined): string {
 }
 
 /** Compact HH:MM:SS timestamp for log streams, respecting timezone and 12h/24h preferences. */
-export function logTime(iso: string): string {
-  const prefs = getTimePreferences()
-  const h12 = hour12Option(prefs.hourCycle)
-  return new Intl.DateTimeFormat(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: h12 ?? false,
-    ...(prefs.timeZone === 'utc' ? { timeZone: 'UTC' } : {}),
-  }).format(new Date(iso))
+export function logTime(
+  iso: string,
+  timeZone?: TimeZoneMode,
+  hourCycle?: HourCycleMode,
+): string {
+  const prefs = timeZone !== undefined && hourCycle !== undefined ? { timeZone, hourCycle } : getTimePreferences()
+  const key = `log|${prefs.timeZone}|${prefs.hourCycle}`
+  const formatter = getCachedDateTimeFormat(key, () => {
+    const h12 = hour12Option(prefs.hourCycle)
+    return new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: h12 ?? false,
+      ...(prefs.timeZone === 'utc' ? { timeZone: 'UTC' } : {}),
+    })
+  })
+  return formatter.format(new Date(iso))
 }
 
 export function bytes(n: number): string {

@@ -1,7 +1,7 @@
 //! Apps and everything that hangs off one: deployments, logs, environment
 //! variables and domains.
 
-use std::{collections::HashMap, convert::Infallible, time::Duration};
+use std::{convert::Infallible, time::Duration};
 
 use axum::{
     Json,
@@ -14,11 +14,11 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt};
 use rig_api::{
-    AddDomainRequest, App, AppWebhook, BulkSetEnvRequest, CreateAppRequest, Deployment,
-    DeploymentEndEvent, Domain, EnvVar, ErrorBody, LogLine, RevealedEnvVar, SetEnvVarRequest,
-    SourceKind, TlsMode, UpdateAppRequest,
+    Access, AddDomainRequest, App, AppStatus, AppWebhook, BulkSetEnvRequest, CreateAppRequest,
+    Deployment, DeploymentEndEvent, DeploymentStatus, Domain, EnvVar, ErrorBody, LogLine,
+    RevealedEnvVar, SetEnvVarRequest, SourceKind, TlsMode, UpdateAppRequest,
 };
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
 use sqlx::Row;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -64,10 +64,8 @@ pub fn router() -> OpenApiRouter<AppState> {
 
 const MAX_ENV_VALUE: usize = 32 * 1024;
 
-/// Read a lowercase enum stored as text.
-fn parse_enum<T: DeserializeOwned>(value: String) -> ApiResult<T> {
-    serde_json::from_value(serde_json::Value::String(value))
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("unexpected stored value: {e}")))
+fn stored_enum<T>(parsed: Option<T>, kind: &str, raw: &str) -> ApiResult<T> {
+    parsed.ok_or_else(|| ApiError::Internal(anyhow::anyhow!("unexpected stored {kind}: {raw:?}")))
 }
 
 fn validate_image(image: &str) -> ApiResult<String> {
@@ -250,6 +248,8 @@ macro_rules! app_select {
         a.health_path, a.status, a.current_deployment_id, a.created_at, a.updated_at,
         a.restart_count, a.last_crash_at, a.last_crash_reason, a.auto_deploy,
         d.host_port,
+        (SELECT group_concat(h.host, char(10)) FROM
+           (SELECT host FROM domains WHERE app_id = a.id ORDER BY host) h) AS domains,
         (SELECT group_concat(v.mount_path, char(10)) FROM
            (SELECT mount_path FROM app_volumes WHERE app_id = a.id ORDER BY mount_path) v) AS volumes
    FROM apps a
@@ -265,15 +265,18 @@ fn opt_u32(r: &sqlx::sqlite::SqliteRow, col: &str) -> Option<u32> {
         .and_then(|v| u32::try_from(v).ok())
 }
 
-fn app_from_row(r: &sqlx::sqlite::SqliteRow, domains: Vec<String>) -> ApiResult<App> {
-    let status: rig_api::AppStatus = parse_enum(r.get("status"))?;
+fn app_from_row(r: &sqlx::sqlite::SqliteRow) -> ApiResult<App> {
+    let raw_status: &str = r.get("status");
+    let status = stored_enum(AppStatus::parse(raw_status), "app status", raw_status)?;
+    let raw_source: &str = r.get("source_kind");
+    let source_kind = stored_enum(SourceKind::parse(raw_source), "source_kind", raw_source)?;
     Ok(App {
         id: r.get("id"),
         project_id: r.get("project_id"),
         project_name: r.get("project_name"),
         name: r.get("name"),
         slug: r.get("slug"),
-        source_kind: parse_enum(r.get("source_kind"))?,
+        source_kind,
         image: r.get("image"),
         git_url: r.get("git_url"),
         git_branch: r.get("git_branch"),
@@ -282,7 +285,7 @@ fn app_from_row(r: &sqlx::sqlite::SqliteRow, domains: Vec<String>) -> ApiResult<
         memory_mb: opt_u32(r, "memory_mb"),
         cpu_millis: opt_u32(r, "cpu_millis"),
         health_path: r.get("health_path"),
-        host_port: (status == rig_api::AppStatus::Running)
+        host_port: (status == AppStatus::Running)
             .then(|| {
                 r.get::<Option<i64>, _>("host_port")
                     .and_then(|p| u16::try_from(p).ok())
@@ -290,7 +293,10 @@ fn app_from_row(r: &sqlx::sqlite::SqliteRow, domains: Vec<String>) -> ApiResult<
             .flatten(),
         status,
         current_deployment_id: r.get("current_deployment_id"),
-        domains,
+        domains: r
+            .get::<Option<String>, _>("domains")
+            .map(|d| d.lines().map(str::to_owned).collect())
+            .unwrap_or_default(),
         volumes: r
             .get::<Option<String>, _>("volumes")
             .map(|v| v.lines().map(str::to_owned).collect())
@@ -319,11 +325,7 @@ async fn load_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<App> {
         .fetch_optional(&state.db)
         .await?
         .ok_or(ApiError::NotFound("app"))?;
-    let domains = sqlx::query_scalar("SELECT host FROM domains WHERE app_id = ? ORDER BY host")
-        .bind(id)
-        .fetch_all(&state.db)
-        .await?;
-    app_from_row(&row, domains)
+    app_from_row(&row)
 }
 
 /// Fail with 404 unless the app belongs to the caller's organization.
@@ -366,31 +368,30 @@ async fn list_apps(
     auth: Auth<Viewer>,
     Query(q): Query<AppListQuery>,
 ) -> ApiResult<Json<Vec<App>>> {
-    let rows = sqlx::query(app_select!(
-        "WHERE a.org_id = ?1 AND (?2 IS NULL OR a.project_id = ?2)
-          ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE"
-    ))
-    .bind(&auth.org_id)
-    .bind(&q.project_id)
-    .fetch_all(&state.db)
-    .await?;
-    let mut domains: HashMap<String, Vec<String>> = HashMap::new();
-    for r in sqlx::query("SELECT app_id, host FROM domains WHERE org_id = ? ORDER BY host")
-        .bind(&auth.org_id)
-        .fetch_all(&state.db)
-        .await?
-    {
-        domains
-            .entry(r.get("app_id"))
-            .or_default()
-            .push(r.get("host"));
-    }
+    let rows = match q.project_id.as_deref() {
+        Some(project_id) => {
+            sqlx::query(app_select!(
+                "WHERE a.org_id = ?1 AND a.project_id = ?2
+                  ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE"
+            ))
+            .bind(&auth.org_id)
+            .bind(project_id)
+            .fetch_all(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query(app_select!(
+                "WHERE a.org_id = ?1
+                  ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE"
+            ))
+            .bind(&auth.org_id)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
     let apps = rows
         .iter()
-        .map(|r| {
-            let id: String = r.get("id");
-            app_from_row(r, domains.remove(&id).unwrap_or_default())
-        })
+        .map(app_from_row)
         .collect::<ApiResult<Vec<_>>>()?;
     Ok(Json(apps))
 }
@@ -415,34 +416,46 @@ async fn resolve_app(
     if wanted.is_empty() {
         return Err(ApiError::validation("ref cannot be empty"));
     }
-    // Fast path: exact id lookup.
-    if let Ok(app) = load_app(&state, &auth.org_id, wanted).await {
-        return Ok(Json(app));
-    }
     let (project_filter, name_filter) = match wanted.split_once('/') {
         Some((p, n)) => (Some(p.trim()), n.trim()),
-        None => (None, wanted),
+        None => {
+            // Fast path: exact id lookup (skipped when `/` is present, since ids never contain `/`).
+            if let Ok(app) = load_app(&state, &auth.org_id, wanted).await {
+                return Ok(Json(app));
+            }
+            (None, wanted)
+        }
     };
-    let rows = sqlx::query(
-        "SELECT a.id, a.name, p.name AS project_name
-           FROM apps a JOIN projects p ON p.id = a.project_id
-          WHERE a.org_id = ?1
-            AND (a.name = ?2 COLLATE NOCASE OR a.slug = ?2 COLLATE NOCASE)
-            AND (?3 IS NULL OR p.id = ?3 OR p.name = ?3 COLLATE NOCASE OR p.slug = ?3 COLLATE NOCASE)
-          ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE",
-    )
-    .bind(&auth.org_id)
-    .bind(name_filter)
-    .bind(project_filter)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = match project_filter {
+        Some(project) => {
+            sqlx::query(app_select!(
+                "WHERE a.org_id = ?1
+                   AND (a.name = ?2 COLLATE NOCASE OR a.slug = ?2 COLLATE NOCASE)
+                   AND (p.id = ?3 OR p.name = ?3 COLLATE NOCASE OR p.slug = ?3 COLLATE NOCASE)
+                 ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE"
+            ))
+            .bind(&auth.org_id)
+            .bind(name_filter)
+            .bind(project)
+            .fetch_all(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query(app_select!(
+                "WHERE a.org_id = ?1
+                   AND (a.name = ?2 COLLATE NOCASE OR a.slug = ?2 COLLATE NOCASE)
+                 ORDER BY p.name COLLATE NOCASE, a.name COLLATE NOCASE"
+            ))
+            .bind(&auth.org_id)
+            .bind(name_filter)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
 
     match rows.len() {
         0 => Err(ApiError::NotFound("app")),
-        1 => {
-            let id: String = rows[0].get("id");
-            Ok(Json(load_app(&state, &auth.org_id, &id).await?))
-        }
+        1 => Ok(Json(app_from_row(&rows[0])?)),
         _ => {
             let names: Vec<String> = rows
                 .iter()
@@ -807,10 +820,15 @@ async fn delete_app(
 // --------------------------------------------------------------- deployments
 
 fn deployment_from_row(r: &sqlx::sqlite::SqliteRow) -> ApiResult<Deployment> {
+    let raw_status: &str = r.get("status");
     Ok(Deployment {
         id: r.get("id"),
         app_id: r.get("app_id"),
-        status: parse_enum(r.get("status"))?,
+        status: stored_enum(
+            DeploymentStatus::parse(raw_status),
+            "deployment status",
+            raw_status,
+        )?,
         trigger: r.get("trigger"),
         image_ref: r.get("image_ref"),
         commit_sha: r.get("commit_sha"),
@@ -1139,7 +1157,7 @@ async fn cancel_deployment(
     .bind(&dep.app_id)
     .execute(&state.db)
     .await?;
-    state.deploys.touch();
+    state.deploys.touch_deployment(&id);
     auth.audit(&state, "deployment.cancel", Some(&id), Some(&dep.app_id))
         .await?;
     Ok(Json(load_deployment(&state, &auth.org_id, &id).await?))
@@ -1292,6 +1310,8 @@ fn log_event(line: &LogLine) -> Event {
 struct LogQuery {
     /// Send only lines after this sequence number.
     after: Option<i64>,
+    /// When `after` is omitted, replay only the last `tail` lines (1–10000).
+    tail: Option<u32>,
 }
 
 /// A deployment's build and deploy output as server-sent events.
@@ -1311,17 +1331,30 @@ async fn deployment_logs(
     headers: HeaderMap,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     load_deployment(&state, &auth.org_id, &id).await?;
-    let mut after = q
+    let explicit_after = q
         .after
-        .or_else(|| headers.get("last-event-id")?.to_str().ok()?.parse().ok())
-        .unwrap_or(0);
+        .or_else(|| headers.get("last-event-id")?.to_str().ok()?.parse().ok());
+    let mut after = match (explicit_after, q.tail) {
+        (Some(a), _) => a,
+        (None, Some(n)) => {
+            let tail = i64::from(n.clamp(1, 10_000));
+            let max_seq: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(seq), 0) FROM deployment_logs WHERE deployment_id = ?",
+            )
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await?;
+            (max_seq - tail).max(0)
+        }
+        (None, None) => 0,
+    };
 
     let snap = auth.snapshot();
     let (tx, rx) = mpsc::channel(256);
     tokio::spawn(async move {
         // Subscribe before reading so a line written between the read and
         // the wait still wakes this task.
-        let mut activity = state.deploys.subscribe();
+        let mut activity = state.deploys.subscribe_deployment(&id);
         let mut auth_tick = tokio::time::interval(Duration::from_secs(30));
         auth_tick.tick().await;
         loop {
@@ -1772,11 +1805,13 @@ async fn list_domains(
     let domains = rows
         .iter()
         .map(|r| {
+            let raw_tls: &str = r.get("tls_mode");
+            let raw_access: &str = r.get("access");
             Ok(Domain {
                 id: r.get("id"),
                 host: r.get("host"),
-                tls_mode: parse_enum(r.get("tls_mode"))?,
-                access: parse_enum(r.get("access"))?,
+                tls_mode: stored_enum(TlsMode::parse(raw_tls), "tls_mode", raw_tls)?,
+                access: stored_enum(Access::parse(raw_access), "access", raw_access)?,
                 port: r
                     .get::<Option<i64>, _>("port")
                     .and_then(|p| u16::try_from(p).ok()),
@@ -2156,6 +2191,7 @@ mod tests {
             proxy: Arc::new(StubProxy),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
+            caches: Arc::new(crate::state::RuntimeCaches::default()),
         };
 
         // Seed org, user, token, two projects, and apps.
@@ -2592,6 +2628,7 @@ mod tests {
             proxy: Arc::new(StubProxy),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
+            caches: Arc::new(crate::state::RuntimeCaches::default()),
         };
 
         let owner_pw = "owner-super-secret-pw";
@@ -3064,6 +3101,81 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+
+        // Performance fixes verification: deployment_logs ?tail=N and media ETag/304.
+        sqlx::query(
+            "INSERT INTO projects (id, org_id, name, slug, description, created_at)
+             VALUES ('perf-p1', 'org1', 'Perf', 'perf', '', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, webhook_secret, created_at, updated_at)
+             VALUES ('perf-a1', 'org1', 'perf-p1', 'PerfApp', 'perfapp', 'image', 'nginx:alpine', 'Dockerfile', 80, 'running', 'sec', '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (id, org_id, app_id, status, trigger, created_at)
+             VALUES ('perf-d1', 'org1', 'perf-a1', 'running', 'manual', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        for seq in 1..=20i64 {
+            sqlx::query(
+                "INSERT INTO deployment_logs (deployment_id, seq, ts, stream, line)
+                 VALUES ('perf-d1', ?, '2026-11-22T00:00:00Z', 'build', ?)",
+            )
+            .bind(seq)
+            .bind(format!("line-{seq}"))
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+        let tail_sse = http
+            .get(format!("{base}/api/v1/deployments/perf-d1/logs?tail=3"))
+            .bearer_auth(api_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tail_sse.status(), StatusCode::OK);
+        let tail_body = tail_sse.text().await.unwrap();
+        assert!(!tail_body.contains("\"line-17\""));
+        assert!(tail_body.contains("\"line-18\""));
+        assert!(tail_body.contains("\"line-19\""));
+        assert!(tail_body.contains("\"line-20\""));
+
+        sqlx::query(
+            "INSERT INTO media (id, org_id, content_type, data, is_public)
+             VALUES ('med-etag-1', 'org1', 'image/png', X'89504E470D0A1A0A', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let med_res = http
+            .get(format!("{base}/api/v1/media/med-etag-1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(med_res.status(), StatusCode::OK);
+        let med_etag = med_res
+            .headers()
+            .get("etag")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(med_etag, "\"med-etag-1\"");
+        let med_304 = http
+            .get(format!("{base}/api/v1/media/med-etag-1"))
+            .header("if-none-match", &med_etag)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(med_304.status(), StatusCode::NOT_MODIFIED);
 
         // RIG-SEC-03 self-revoke: API token CAN revoke itself (rig logout --revoke).
         assert_eq!(

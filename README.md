@@ -41,4 +41,4 @@ Then open the printed HTTPS address and enter the one-time setup token. The full
 
 Requirements: Rust (stable), Node with pnpm, Docker or Podman (4.9+), `curl` and `jq`.
 Build the dashboard (`cd web && pnpm build`) before `cargo build`, because
-the server embeds `web/dist`.
+the server embeds and pre-compresses `web/dist` at build time.

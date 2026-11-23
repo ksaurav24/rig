@@ -3,7 +3,15 @@ import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 
-export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
+export function CopyButton({
+  value,
+  getValue,
+  label = 'Copy',
+}: {
+  value?: string
+  getValue?: () => string
+  label?: string
+}) {
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -14,7 +22,7 @@ export function CopyButton({ value, label = 'Copy' }: { value: string; label?: s
 
   async function copy() {
     try {
-      await navigator.clipboard.writeText(value)
+      await navigator.clipboard.writeText(getValue ? getValue() : (value ?? ''))
       setCopied(true)
     } catch {
       toast.error('Copying is blocked by the browser. Select the text and copy it manually.')

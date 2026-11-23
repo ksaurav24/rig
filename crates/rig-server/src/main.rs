@@ -260,6 +260,7 @@ async fn main() -> Result<()> {
             })?),
             deploys: Arc::new(deploy::Deployer::new()?),
             access: access::DashboardAccess::default(),
+            caches: Arc::new(state::RuntimeCaches::default()),
             config: Arc::new(Config {
                 data_dir: cli.data_dir,
                 secure_cookies: cli.secure_cookies,
@@ -298,6 +299,7 @@ async fn main() -> Result<()> {
         })?),
         deploys: Arc::new(deploy::Deployer::new()?),
         access: dashboard_access,
+        caches: Arc::new(state::RuntimeCaches::default()),
         config: Arc::new(Config {
             data_dir: cli.data_dir,
             secure_cookies: cli.secure_cookies,
@@ -334,6 +336,7 @@ async fn main() -> Result<()> {
     backups::recover(&state).await?;
     tokio::spawn(deploy::worker(state.clone()));
     tokio::spawn(metrics::sampler(state.clone()));
+    tokio::spawn(metrics::system_poller(state.clone()));
     tokio::spawn(watch::watcher(state.clone()));
     dashboard::init_csp(&state.config.github_web);
     tokio::spawn(github::poller(state.clone()));

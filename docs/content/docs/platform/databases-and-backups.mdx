@@ -64,7 +64,7 @@ Rig runs each engine's native dump and restore tools directly inside the running
 
 ### Backup storage and safety
 
-- **Encrypted storage at rest:** Dump files stream directly to `<data_dir>/backups/<database_id>/<backup_id>.<ext>` (directory mode `0700`, file mode `0600`) encrypted in 64 KiB **XChaCha20-Poly1305** chunks (`RIGBK1\0\0` header, binding each chunk's index and finality into its nonce and AAD). Downloads and in-place restores decrypt transparently on the fly, while remaining backwards-compatible with legacy plaintext dump files.
+- **Encrypted storage at rest:** Dump files stream directly to `<data_dir>/backups/<database_id>/<backup_id>.<ext>` (directory mode `0700`, file mode `0600`) over 256 KiB buffered I/O, encrypted in 64 KiB **XChaCha20-Poly1305** chunks (`RIGBK1\0\0` header, binding each chunk's index and finality into its nonce and AAD). Downloads and in-place restores decrypt transparently on the fly, while remaining backwards-compatible with legacy plaintext dump files.
 - **Concurrency guards:** Only one backup can run per database at a time (enforced by a partial unique index in SQLite on `backups(database_id) WHERE status = 'running'`), and an atomic operation lock (`databases.busy_op`) prevents conflicting start, stop, delete, backup, or restore operations from racing on the same database. Deleting a project also verifies no managed databases are `creating` or busy before removing any application containers.
 - **Empty-dump protection:** If a dump process exits with code `0` but produces a `0`-byte file, Rig deletes the empty file and marks the backup `failed`.
 - **Failure alerts:** If a backup fails, Rig records the error message on the backup row and dispatches a `backup.failed` alert to all subscribed alert channels.

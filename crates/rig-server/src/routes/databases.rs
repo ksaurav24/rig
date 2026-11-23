@@ -6,8 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rig_api::{
-    Backup, BackupStatus, CreateDatabaseRequest, Database, DatabaseCredentials, DatabaseEngineInfo,
-    ErrorBody,
+    Backup, BackupStatus, CreateDatabaseRequest, Database, DatabaseCredentials, DatabaseEngine,
+    DatabaseEngineInfo, DatabaseStatus, ErrorBody,
 };
 use serde::Deserialize;
 use sqlx::{Row, sqlite::SqliteRow};
@@ -50,13 +50,13 @@ macro_rules! select {
     };
 }
 
-fn stored<T: serde::de::DeserializeOwned>(value: String) -> ApiResult<T> {
-    serde_json::from_value(serde_json::Value::String(value))
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("unexpected stored value: {e}")))
-}
-
 fn to_database(r: &SqliteRow) -> ApiResult<Database> {
-    let engine = stored(r.get("engine"))?;
+    let raw_engine: &str = r.get("engine");
+    let engine = DatabaseEngine::parse(raw_engine)
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("unexpected stored engine {raw_engine:?}")))?;
+    let raw_status: &str = r.get("status");
+    let status = DatabaseStatus::parse(raw_status)
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("unexpected stored status {raw_status:?}")))?;
     Ok(Database {
         id: r.get("id"),
         project_id: r.get("project_id"),
@@ -64,7 +64,7 @@ fn to_database(r: &SqliteRow) -> ApiResult<Database> {
         name: r.get("name"),
         engine,
         version: r.get("version"),
-        status: stored(r.get("status"))?,
+        status,
         error: r.get("error"),
         host: r.get("slug"),
         port: engine_spec(engine).port,
@@ -104,13 +104,25 @@ async fn list_databases(
     auth: Auth<Viewer>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<Database>>> {
-    let rows = sqlx::query(select!(
-        "WHERE d.org_id = ?1 AND (?2 IS NULL OR d.project_id = ?2) ORDER BY d.created_at DESC"
-    ))
-    .bind(&auth.org_id)
-    .bind(&q.project_id)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = match q.project_id.as_deref() {
+        Some(project_id) => {
+            sqlx::query(select!(
+                "WHERE d.org_id = ?1 AND d.project_id = ?2 ORDER BY d.created_at DESC"
+            ))
+            .bind(&auth.org_id)
+            .bind(project_id)
+            .fetch_all(&state.db)
+            .await?
+        }
+        None => {
+            sqlx::query(select!(
+                "WHERE d.org_id = ?1 ORDER BY d.created_at DESC"
+            ))
+            .bind(&auth.org_id)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
     rows.iter()
         .map(to_database)
         .collect::<ApiResult<Vec<_>>>()
@@ -393,14 +405,10 @@ macro_rules! select_backups {
 }
 
 fn to_backup(r: &SqliteRow) -> ApiResult<Backup> {
-    let status = match r.get::<&str, _>("status") {
-        "running" => BackupStatus::Running,
-        "ok" => BackupStatus::Ok,
-        _ => BackupStatus::Failed,
-    };
-    let engine: String = r.get("engine");
-    let engine = serde_json::from_value(serde_json::Value::String(engine))
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    let status = BackupStatus::parse(r.get::<&str, _>("status")).unwrap_or(BackupStatus::Failed);
+    let raw_engine: &str = r.get("engine");
+    let engine = DatabaseEngine::parse(raw_engine)
+        .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("unexpected stored engine {raw_engine:?}")))?;
     Ok(Backup {
         id: r.get("id"),
         database_id: r.get("database_id"),

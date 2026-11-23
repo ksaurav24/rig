@@ -13,7 +13,7 @@ Rig generates its OpenAPI 3.1 specification directly from its Rust route handler
   ```sh
   rig-server openapi > openapi.json
   ```
-- **Fetch from a running server (requires <RoleBadge role="Viewer" />):**
+- **Fetch from a running server (requires <RoleBadge role="Viewer" />):** Pre-serialized once at startup for zero-allocation serving:
   ```sh
   curl -fsSL https://rig.example.com/api/openapi.json \
     -H "Authorization: Bearer rig_<token>" > openapi.json
@@ -35,7 +35,7 @@ curl -fsSL https://rig.example.com/api/v1/system \
 ```
 
 - **Role ceiling:** An API token's effective role is `min(token.role, member.role)`.
-- **`last_used_at` tracking:** Rig updates the token's `last_used_at` timestamp asynchronously when used.
+- **`last_used_at` tracking:** Rig updates the token's `last_used_at` timestamp asynchronously (throttled to at most once per minute to avoid SQLite write amplification under high request rates).
 - **Temporary-password lockout:** While `must_change_password` is true on a user account, API token authentication is rejected until the user changes their temporary password via a browser session.
 - **Session-only endpoints:** Sensitive account and control-plane routes (`/api/v1/auth/password`, `/api/v1/account/totp/*`, `/api/v1/account/sessions*`, `POST /api/v1/tokens`, revoking *other* tokens via `DELETE /api/v1/tokens/{id}`, `/api/v1/members/*`, `PUT /api/v1/system/dashboard-access`, `PUT /api/v1/system/dashboard-domain`, `POST /api/v1/github/manifest*`, and `DELETE /api/v1/github`) require an interactive browser session cookie and reject Bearer API tokens with `403 Forbidden`. An API token may still call `DELETE /api/v1/tokens/{own_id}` to revoke itself (`rig logout --revoke`).
 
@@ -105,4 +105,4 @@ Every HTTP response from `rig-server` includes:
 - `Strict-Transport-Security: max-age=31536000; includeSubDomains` (on HTTPS responses)
 - `X-Rig-Version: 0.1.0`
 - Dashboard HTML responses enforce a strict `Content-Security-Policy` (`img-src 'self' data: blob: https:`, disallowing plain `http:` external images).
-- Request bodies are capped at **2 MiB** (`RequestBodyLimitLayer::new(2 * 1024 * 1024)`), and responses support transparent `gzip` compression.
+- Request bodies are capped at **2 MiB** (`RequestBodyLimitLayer::new(2 * 1024 * 1024)`). Embedded dashboard assets are served from pre-compressed `br` and `gzip` buffers with strong `ETag` validation, and API responses support transparent `gzip` compression.

@@ -1,16 +1,53 @@
 import { ArrowDownToLine, Search, WrapText, X } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CopyButton } from '@/components/app/copy-button'
 import { Input } from '@/components/fluid/input'
 import { Tooltip } from '@/components/fluid/tooltip'
 import { Button } from '@/components/ui/button'
 import type { LogLine } from '@/hooks/use-log-stream'
 import { logTime } from '@/lib/format'
-import { usePreferences } from '@/lib/preferences'
+import { usePreferences, type HourCycleMode, type TimeZoneMode } from '@/lib/preferences'
 import { cn } from '@/lib/utils'
 
 /** How close to the bottom still counts as "following". */
 const STICKY_PX = 32
+
+const LogRow = memo(function LogRow({
+  line,
+  wrap,
+  timeZone,
+  hourCycle,
+}: {
+  line: LogLine
+  wrap: boolean
+  timeZone: TimeZoneMode
+  hourCycle: HourCycleMode
+}) {
+  return (
+    <div
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 20px' }}
+      className={cn(
+        'flex gap-3 border-l-2 border-transparent px-3 hover:bg-hover',
+        line.stream === 'stderr' && 'border-l-fail/55 bg-fail/[0.035]',
+        line.stream === 'deploy' && 'border-l-busy/55',
+      )}
+    >
+      <time className="shrink-0 text-muted-foreground/75 select-none">
+        {logTime(line.ts, timeZone, hourCycle)}
+      </time>
+      <span
+        className={cn(
+          'min-w-0',
+          wrap ? 'break-words whitespace-pre-wrap' : 'whitespace-pre',
+          line.stream === 'stderr' && 'text-foreground/95',
+          line.stream === 'deploy' && 'text-busy',
+        )}
+      >
+        {line.line}
+      </span>
+    </div>
+  )
+})
 
 /**
  * A terminal-style log pane. Follows new output while the reader is at the
@@ -68,6 +105,8 @@ export function LogViewer({
     setAtBottom(true)
   }
 
+  const getCopyText = useCallback(() => visible.map((l) => l.line).join('\n'), [visible])
+
   return (
     <div
       className={cn(
@@ -114,7 +153,7 @@ export function LogViewer({
             <WrapText />
           </Button>
         </Tooltip>
-        <CopyButton value={visible.map((l) => l.line).join('\n')} label="Copy all lines" />
+        <CopyButton getValue={getCopyText} label="Copy all lines" />
       </div>
       <div
         ref={pane}
@@ -130,26 +169,13 @@ export function LogViewer({
           </p>
         ) : (
           visible.map((l) => (
-            <div
+            <LogRow
               key={l.seq}
-              className={cn(
-                'flex gap-3 border-l-2 border-transparent px-3 hover:bg-hover',
-                l.stream === 'stderr' && 'border-l-fail/55 bg-fail/[0.035]',
-                l.stream === 'deploy' && 'border-l-busy/55',
-              )}
-            >
-              <time className="shrink-0 text-muted-foreground/75 select-none">{logTime(l.ts)}</time>
-              <span
-                className={cn(
-                  'min-w-0',
-                  wrap ? 'break-words whitespace-pre-wrap' : 'whitespace-pre',
-                  l.stream === 'stderr' && 'text-foreground/95',
-                  l.stream === 'deploy' && 'text-busy',
-                )}
-              >
-                {l.line}
-              </span>
-            </div>
+              line={l}
+              wrap={wrap}
+              timeZone={prefs.timeZone}
+              hourCycle={prefs.hourCycle}
+            />
           ))
         )}
       </div>

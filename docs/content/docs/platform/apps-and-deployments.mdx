@@ -18,7 +18,7 @@ Every application uses one of two `source_kind` values:
 
 For `git` apps, Rig checks whether `dockerfile_path` (default `Dockerfile`) exists inside the cloned repository (verifying via `symlink_metadata` that it is a regular file and not a symlink):
 
-1. **Dockerfile build:** When `Dockerfile` (or your custom `dockerfile_path`, such as `apps/api/Dockerfile`) exists in the checkout, Rig packages the build context (with symlink following disabled for host safety) and builds the image through the container engine's build API.
+1. **Dockerfile build:** When `Dockerfile` (or your custom `dockerfile_path`, such as `apps/api/Dockerfile`) exists in the checkout, Rig packages the build context (respecting `.dockerignore`, skipping `.git`, always preserving the target Dockerfile, and with symlink following disabled for host safety) and builds the image through the container engine's build API.
 2. **Zero-config Railpack build:** When no `Dockerfile` is present at `dockerfile_path`, Rig automatically uses **[Railpack](https://railpack.com) (`v0.43.0`)**:
    - On first use, Rig downloads the official `railpack-v0.43.0` static binary (`x86_64` or `aarch64`) into `<data_dir>/bin/railpack` and verifies its compiled-in SHA-256 checksum (`248a8f60...` on `x86_64`) before executing it.
    - Rig runs `railpack prepare` with a stripped environment (`PATH`, `HOME`, `NO_COLOR=1`) and a 120-second timeout to inspect the source code and emit `railpack-plan.json`.
@@ -53,10 +53,10 @@ Every deployment moves through a deterministic state machine (`DeploymentStatus`
     └───────────────► failed ◄───────────┘       superseded (when replaced)
 ```
 
-1. **Queued (`queued`):** Only one active deployment (`queued`, `building`, or `deploying`) is allowed per app at a time (enforced atomically by a partial unique index in SQLite, returning `409 Conflict` on concurrent requests). The background worker picks queued deployments FIFO and runs one build at a time so concurrent builds never exhaust server memory.
-2. **Building (`building`):** Clones the Git repository (10-minute timeout) or pulls the registry image, and builds the container image. Build output streams live over Server-Sent Events (SSE) and persists in `deployment_logs`.
+1. **Queued (`queued`):** Only one active deployment (`queued`, `building`, or `deploying`) is allowed per app at a time (enforced atomically by a partial unique index in SQLite, returning `409 Conflict` on concurrent requests). The background worker runs up to **4 deployments concurrently** (image pulls, starts, restarts, rollbacks) while serializing Git/Dockerfile/Railpack builds (1 at a time) so concurrent builds never exhaust server memory.
+2. **Building (`building`):** Clones the Git repository (10-minute timeout) or pulls the registry image, and builds the container image. Build output streams live over Server-Sent Events (SSE) and persists in `deployment_logs` in batched writes (automatically pruned to retain logs for the latest 30 finished deployments plus the active deployment per app).
 3. **Deploying (`deploying`):**
-   - **Stateless apps (`volumes` is empty):** Starts the new container alongside the running container, waits up to **90 seconds** (`HEALTH_TIMEOUT`) for two consecutive health checks to pass, updates Caddy's upstream port atomically, marks the previous deployment `superseded`, and stops the old container with a 10-second drain grace period.
+   - **Stateless apps (`volumes` is empty):** Starts the new container alongside the running container, waits up to **90 seconds** (`HEALTH_TIMEOUT`, using adaptive polling starting at 100 ms) for two consecutive health checks to pass, updates Caddy's upstream port atomically, marks the previous deployment `superseded`, and stops the old container with a 10-second drain grace period.
    - **Stateful apps (`volumes` is non-empty):** Stops the old container after the new image is built/pulled, mounts the named volumes onto the new container, verifies health checks, and updates Caddy. If the new container fails health checks, is cancelled, times out, or is interrupted by a `rig-server` restart/upgrade, Rig automatically removes the half-started container and restarts the previous container so the app does not remain down.
 4. **Running (`running`):** The container is live and serving traffic. If the deployment fails at any step for a stateless app, the previous deployment remains `running` and continues serving traffic without interruption.
 
@@ -74,7 +74,7 @@ Every deployment moves through a deterministic state machine (`DeploymentStatus`
 
 Rig separates **deployment logs** (captured during `building` and `deploying` and stored in SQLite) from **runtime container logs** (streamed directly from the running container):
 
-- **Deployment logs (`/api/v1/deployments/{id}/logs`):** Supports resumable SSE via `?after=<seq>` or the `Last-Event-ID` header. Emits `log` events containing `{ seq, ts, stream, line }` and a terminal `end` event containing `{ status, domains }`.
+- **Deployment logs (`/api/v1/deployments/{id}/logs`):** Supports tailing the latest lines via `?tail=<1-5000>` and resumable SSE via `?after=<seq>` or the `Last-Event-ID` header. Emits `log` events containing `{ seq, ts, stream, line }` and a terminal `end` event containing `{ status, domains }`.
 - **Runtime logs (`/api/v1/apps/{id}/logs`):** Streams live container `stdout` and `stderr` over SSE with query parameters for `tail` (1–5000, default 200), `follow` (`true`/`false`), `since` (relative duration like `10m`, `2h`, or RFC 3339 timestamp), `timestamps` (`true`/`false`), and `grep` (case-insensitive substring filter).
 - **Live authorization re-check:** Long-lived SSE log streams re-verify the caller's session or API token and role every 30 seconds, automatically terminating the stream if the user is removed or their credentials are revoked.
 

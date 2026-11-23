@@ -9,9 +9,9 @@ Rig monitors your host server, every running application container, and every ru
 
 The background sampler (`crates/rig-server/src/metrics.rs`) runs every **30 seconds** (`SAMPLE_EVERY = 30s`):
 
-- **Scopes:** Collects one sample for `host`, one for each running app (`app:<id>`), and one for each running database (`db:<id>`), with an 8-second per-container stats timeout (`USAGE_TIMEOUT`).
+- **Scopes:** Collects one sample for `host`, one for each running app (`app:<id>`), and one for each running database (`db:<id>`), querying containers with bounded concurrency (`8` at a time), one-shot stats RPCs (`one_shot(true)`), and an 8-second per-container stats timeout (`USAGE_TIMEOUT`). A separate lightweight `system_poller` refreshes the `GET /api/v1/system` host, engine, and proxy snapshot every **10 seconds**.
 - **Metrics collected:**
-  - `cpu_percent`: For `host`, percentage across all CPU cores (`0–100%`). For a container, percentage of a single core (so a 2-core container can report up to `200%`).
+  - `cpu_percent`: For `host`, percentage across all CPU cores (`0–100%`). For a container, integrated 30-second percentage of a single core computed from cumulative cgroup CPU deltas (so a 2-core container can report up to `200%`).
   - `memory_bytes` and `memory_total`: Resident memory usage and either host total RAM or the container's configured cgroup memory limit (`0` when unlimited).
   - `net_rx_bps` and `net_tx_bps`: Average receive and transmit throughput in bytes per second between consecutive samples. On the host, virtual and bridge interfaces (`lo`, `veth*`, `docker*`, `br-*`, `podman*`, `cni*`, `virbr*`, `vnet*`, `tap*`) are excluded so traffic is never double-counted.
 - **Retention and rollups:** Samples are retained in SQLite for **24 hours** (`RETENTION_SECS = 86400`, pruned automatically every 120 samples). Queries over any time window (`1h`, `6h`, or `24h`) group samples into **120 time buckets** (`step_seconds` of `30s`, `180s`, or `720s`).
@@ -30,7 +30,7 @@ rig top
 
 ## Crash and OOM watcher
 
-Because container engines automatically restart crashed containers under their restart policy, an app in a crash loop can appear `"running"` if you only look at container status. Rig's crash watcher (`crates/rig-server/src/watch.rs`) inspects every running app container every **15 seconds** (`CHECK_EVERY = 15s`):
+Because container engines automatically restart crashed containers under their restart policy, an app in a crash loop can appear `"running"` if you only look at container status. Rig's crash watcher (`crates/rig-server/src/watch.rs`) inspects every running app and database container in parallel (`8` at a time) every **15 seconds** (`CHECK_EVERY = 15s`):
 
 1. **Crash detection (`Verdict::Crashed`):** If the container's `restart_count` increased since the last check, Rig records `last_crash_at`, `restart_count`, and a human-readable `last_crash_reason` on the app, and fires an `app.crashed` alert:
    - If `oom_killed == true`, the reason reports: `"ran out of memory (limit <N> MB). Raise the memory limit in settings"`.

@@ -865,11 +865,25 @@ impl Client {
         deployment_id: &str,
         on_event: impl FnMut(SseEvent),
     ) -> CliResult<()> {
-        self.events_resumable(
-            &format!("/api/v1/deployments/{}/logs", segment(deployment_id)),
-            on_event,
-        )
-        .await
+        self.deployment_logs_stream_with_tail(deployment_id, None, on_event)
+            .await
+    }
+
+    pub async fn deployment_logs_stream_with_tail(
+        &self,
+        deployment_id: &str,
+        tail: Option<usize>,
+        on_event: impl FnMut(SseEvent),
+    ) -> CliResult<()> {
+        let path = match tail {
+            Some(n) if n > 0 => format!(
+                "/api/v1/deployments/{}/logs?tail={}",
+                segment(deployment_id),
+                n.min(10_000)
+            ),
+            _ => format!("/api/v1/deployments/{}/logs", segment(deployment_id)),
+        };
+        self.events_resumable(&path, on_event).await
     }
 
     /// Builds the `ws://` or `wss://` URL for an app's terminal WebSocket.
