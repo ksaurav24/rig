@@ -80,16 +80,20 @@ pub fn judge(
 
 async fn check(state: &AppState, down: &mut HashSet<String>) -> Result<()> {
     let rows = sqlx::query(
-        "SELECT a.id, a.org_id, a.name, a.memory_mb, a.restart_count, d.container_id
+        "SELECT a.id, a.org_id, a.name, a.memory_mb, a.restart_count,
+                d.id AS deployment_id, d.container_id, d.host_port
            FROM apps a JOIN deployments d ON d.id = a.current_deployment_id
           WHERE a.status = 'running' AND d.container_id IS NOT NULL",
     )
     .fetch_all(&state.db)
     .await?;
     let mut still_down = HashSet::new();
+    let mut proxy_needs_sync = false;
     for r in rows {
         let id: String = r.get("id");
+        let deployment_id: String = r.get("deployment_id");
         let container: String = r.get("container_id");
+        let stored_port: Option<i64> = r.get("host_port");
         let seen: i64 = r.get("restart_count");
         let memory = r
             .get::<Option<i64>, _>("memory_mb")
@@ -103,6 +107,18 @@ async fn check(state: &AppState, down: &mut HashSet<String>) -> Result<()> {
                 continue;
             }
         };
+        if let Some(h) = health.as_ref()
+            && h.state == ContainerState::Running
+            && let Some(live_port) = h.host_port
+            && stored_port != Some(i64::from(live_port))
+        {
+            sqlx::query("UPDATE deployments SET host_port = ? WHERE id = ?")
+                .bind(i64::from(live_port))
+                .bind(&deployment_id)
+                .execute(&state.db)
+                .await?;
+            proxy_needs_sync = true;
+        }
         if matches!(
             health.as_ref().map(|h| &h.state),
             Some(ContainerState::Exited(_))
@@ -182,6 +198,33 @@ async fn check(state: &AppState, down: &mut HashSet<String>) -> Result<()> {
         }
     }
     *down = still_down;
+    if proxy_needs_sync
+        && let Err(e) = crate::proxy::sync(state).await
+    {
+        tracing::warn!("updating proxy after a container port change: {e:#}");
+    }
+    let db_rows = sqlx::query(
+        "SELECT id, container_id, host_port FROM databases
+          WHERE status = 'running' AND container_id IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    for r in db_rows {
+        let id: String = r.get("id");
+        let container: String = r.get("container_id");
+        let stored_port: Option<i64> = r.get("host_port");
+        if let Ok(Some(h)) = state.runtime.health(&container).await
+            && h.state == ContainerState::Running
+            && let Some(live_port) = h.host_port
+            && stored_port != Some(i64::from(live_port))
+        {
+            sqlx::query("UPDATE databases SET host_port = ? WHERE id = ?")
+                .bind(i64::from(live_port))
+                .bind(&id)
+                .execute(&state.db)
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -195,6 +238,7 @@ mod tests {
             restart_count: restarts,
             oom_killed: oom,
             exit_code: code,
+            host_port: None,
         }
     }
 
@@ -239,5 +283,212 @@ mod tests {
     #[test]
     fn a_missing_container_fails() {
         assert!(matches!(judge(None, 0, false, 512), Verdict::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn watcher_reconciles_changed_container_ports_and_syncs_proxy() {
+        use std::sync::{Arc, Mutex};
+
+        struct PortShiftRuntime;
+        #[async_trait::async_trait]
+        impl crate::runtime::Runtime for PortShiftRuntime {
+            async fn info(&self) -> anyhow::Result<crate::runtime::EngineInfo> {
+                Ok(crate::runtime::EngineInfo {
+                    name: "docker".into(),
+                    version: "27.0".into(),
+                })
+            }
+            async fn pull(&self, _: &str, _: &crate::runtime::LogSink) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build(
+                &self,
+                _: crate::runtime::BuildSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn build_plan(
+                &self,
+                _: crate::runtime::PlanSpec,
+                _: &crate::runtime::LogSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn run(
+                &self,
+                _: &crate::runtime::ContainerSpec,
+            ) -> anyhow::Result<crate::runtime::Started> {
+                anyhow::bail!("unused")
+            }
+            async fn state(&self, _: &str) -> anyhow::Result<ContainerState> {
+                Ok(ContainerState::Running)
+            }
+            async fn health(&self, id: &str) -> anyhow::Result<Option<Health>> {
+                let port = match id {
+                    "cid-app" => Some(25111),
+                    "cid-db" => Some(25222),
+                    _ => None,
+                };
+                Ok(Some(Health {
+                    state: ContainerState::Running,
+                    restart_count: 0,
+                    oom_killed: false,
+                    exit_code: Some(0),
+                    host_port: port,
+                }))
+            }
+            async fn start(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn stop(&self, _: &str, _: u32) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn logs_with(
+                &self,
+                _: &str,
+                _: crate::runtime::LogOptions,
+            ) -> crate::runtime::LogStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_by_label(&self, _: &str, _: &str) -> anyhow::Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn remove_volume(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove_network(&self, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn shell(
+                &self,
+                _: &str,
+                _: u16,
+                _: u16,
+            ) -> anyhow::Result<crate::runtime::Shell> {
+                anyhow::bail!("unused")
+            }
+            async fn image_id(&self, _: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            async fn usage(&self, _: &str) -> anyhow::Result<Option<crate::runtime::Usage>> {
+                Ok(None)
+            }
+            async fn resize_shell(&self, _: &str, _: u16, _: u16) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn exec(
+                &self,
+                _: &str,
+                _: Vec<String>,
+                _: Vec<String>,
+                _: Option<crate::runtime::ByteReader>,
+                _: crate::runtime::ByteWriter,
+            ) -> anyhow::Result<crate::runtime::ExecOutcome> {
+                anyhow::bail!("unused")
+            }
+        }
+
+        struct RecordingProxy(Arc<Mutex<Vec<crate::proxy::Route>>>);
+        #[async_trait::async_trait]
+        impl crate::proxy::Proxy for RecordingProxy {
+            async fn ready(&self) -> bool {
+                true
+            }
+            async fn apply(
+                &self,
+                routes: &[crate::proxy::Route],
+                _: Option<&rig_api::DashboardDomain>,
+                _: &[String],
+            ) -> anyhow::Result<()> {
+                *self.0.lock().unwrap() = routes.to_vec();
+                Ok(())
+            }
+            fn ports(&self) -> (u16, u16) {
+                (80, 443)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let vault = crate::crypto::Vault::open(dir.path()).unwrap();
+        let applied_routes = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState {
+            db: db.clone(),
+            vault,
+            config: Arc::new(crate::state::Config {
+                data_dir: dir.path().to_path_buf(),
+                secure_cookies: false,
+                github_api: "http://127.0.0.1".into(),
+                github_web: "http://127.0.0.1".into(),
+                poll_interval: 0,
+                allow_private_alerts: false,
+                allow_private_git: false,
+                enable_api_docs: false,
+            }),
+            runtime: Arc::new(PortShiftRuntime),
+            proxy: Arc::new(RecordingProxy(applied_routes.clone())),
+            deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
+            access: crate::access::DashboardAccess::default(),
+        };
+
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'Alpha', 'alpha', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, current_deployment_id, webhook_secret, created_at, updated_at)
+             VALUES ('app1', 'org1', 'p1', 'Web', 'web', 'image', 'nginx:alpine', 'Dockerfile', 80, 'running', 'dep1', 'sec', '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (id, org_id, app_id, status, trigger, container_id, host_port, created_at)
+             VALUES ('dep1', 'org1', 'app1', 'running', 'manual', 'cid-app', 20001, '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO domains (id, org_id, app_id, host, tls_mode, access, created_at)
+             VALUES ('dom1', 'org1', 'app1', 'app.example.com', 'off', 'public', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO databases (id, org_id, project_id, name, slug, engine, version, volume, db_name, username, password_enc, status, container_id, host_port, created_at)
+             VALUES ('db1', 'org1', 'p1', 'Main', 'main', 'postgres', '17', 'rig-db-1', 'main', 'main', 'enc', 'running', 'cid-db', 20002, '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let mut down = HashSet::new();
+        check(&state, &mut down).await.unwrap();
+
+        let (app_port, db_port): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT host_port FROM deployments WHERE id = 'dep1'),
+                    (SELECT host_port FROM databases WHERE id = 'db1')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(app_port, 25111);
+        assert_eq!(db_port, 25222);
+
+        let routes = applied_routes.lock().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].upstream_port, 25111);
     }
 }

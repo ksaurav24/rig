@@ -38,14 +38,14 @@ mongodb://events_db:3e5f...b812@events-db:27017/events_db?authSource=admin
 
 ### Connecting from your laptop (`rig db connect` and SSH tunnels)
 
-Because Caddy is an HTTP/HTTPS proxy and does not expose raw database TCP ports to the public internet, running databases also bind an ephemeral port on the server's loopback interface (`127.0.0.1:<host_port>`).
+Because Caddy is an HTTP/HTTPS proxy and does not expose raw database TCP ports to the public internet, running databases bind an explicitly pinned port on the server's loopback interface (`127.0.0.1:<host_port>` in `20000..=32000`).
 
 - **On the server or over an SSH local forward:** Forward the database's `host_port` (`ssh -L <host_port>:127.0.0.1:<host_port> user@server`) or run `rig db connect <db>` directly when connected to localhost.
 - **Interactive client launcher (`rig db connect <db>`):** Automatically reveals credentials, rewrites `@<slug>:<port>` to `@127.0.0.1:<host_port>`, and launches the appropriate local CLI client (`psql`, `mysql`, `mariadb`, `redis-cli`, or `mongosh`) with the password passed via environment variables (`MYSQL_PWD`, `REDISCLI_AUTH`) or connection URI.
 
 ## Container lifecycle (`creating`, `running`, `stopped`, `failed`)
 
-- **Provisioning (`creating` → `running`):** Pulling the image and initializing the data directory on disk runs asynchronously with a 180-second readiness timeout (`READY_TIMEOUT`). Rig waits for two consecutive TCP readiness checks after the engine's temporary socket-only init phase completes.
+- **Provisioning (`creating` → `running`):** Pulling the image and initializing the data directory on disk runs asynchronously with a 180-second readiness timeout (`READY_TIMEOUT`). Rig waits for two consecutive TCP readiness checks after the engine's temporary socket-only init phase completes. If `rig-server` restarts while a database is in `creating` state, `databases::recover` inspects the container on startup and automatically adopts it as `running` if it finished initializing and is accepting connections.
 - **Stopping (`stopped`):** Stopping a database (`POST /api/v1/databases/{id}/stop` or `rig db stop <db>`) stops (`30s` grace period) and removes the container while **preserving the named data volume**.
 - **Starting (`running`):** Starting a stopped or failed database (`POST /api/v1/databases/{id}/start` or `rig db start <db> --wait`) provisions a fresh container attached to the existing named volume.
 - **Deleting:** Deleting a database (`DELETE /api/v1/databases/{id}` or `rig db rm <db>`) requires the <RoleBadge role="Admin" /> role and permanently destroys the container, the named data volume, and all backup dump files on disk.

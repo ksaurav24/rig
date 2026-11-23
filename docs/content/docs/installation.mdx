@@ -125,8 +125,8 @@ Pass CLI flags via `bash -s --` or set `RIG_*` environment variables to pre-fill
 | `--version <ver>` | `RIG_VERSION` | `latest` | Pin a specific GitHub Release tag (for example `0.1.0` or `v0.1.0`). |
 | `--repo <owner/repo>` | `RIG_REPO` | `ksaurav24/rig` | Override the GitHub Releases repository. |
 | — | `RIG_PUBLIC_ADDRESS` | Detected IP | Override the detected IP/hostname used in setup messages. |
-| — | `RIG_CADDY_IMAGE` | `docker.io/library/caddy:2-alpine` | Override the container image used for `rig-caddy`. |
-| `--uninstall` | — | — | Stop and remove Rig services and binaries while preserving `/var/lib/rig` and `/etc/rig`. |
+| — | `RIG_CADDY_IMAGE` | `docker.io/library/caddy:2.11.9-alpine` | Override the container image used for `rig-caddy`. |
+| `--uninstall` | — | — | Stop and remove Rig services and binaries while keeping running apps, databases, `rig-caddy`, `/var/lib/rig`, and `/etc/rig` intact. |
 | `-h`, `--help` | — | — | Print installer usage and exit. |
 
 ## Build and install from source
@@ -187,11 +187,11 @@ The installer keeps all host changes transparent in `packaging/install.sh`:
 </Files>
 
 - **System user:** Creates a dedicated `rig` system user (`/var/lib/rig` home, `nologin` shell). On Podman, allocates a `65536`-ID subordinate UID/GID range in `/etc/subuid` and `/etc/subgid`, enables `loginctl enable-linger rig`, and starts `podman.socket` under the `rig` user's systemd instance. On Docker, adds `rig` to the `docker` group.
-- **Reverse proxy (`rig-caddy`):** Runs `caddy:2-alpine` with `--network host`, `--restart unless-stopped`, and persistent volumes `rig-caddy-data` and `rig-caddy-config`, listening on ports `80` and `443` with its admin API bound to `127.0.0.1:2019`. `/run/tailscale` is mounted into `rig-caddy` only when `--tls tailscale` or `--access tailscale` is selected.
+- **Reverse proxy (`rig-caddy`):** Runs `caddy:2.11.9-alpine` with `--network host`, `--restart unless-stopped` (`--restart always` on Podman), and persistent volumes `rig-caddy-data` and `rig-caddy-config`, listening on ports `80` and `443` with its admin API bound to `127.0.0.1:2019`. `/run/tailscale` is mounted into `rig-caddy` only when `--tls tailscale` or `--access tailscale` is selected.
 
 ## Upgrading and uninstalling
 
-### Upgrade in place
+### Upgrade in place (zero workload downtime)
 
 Re-run the installer on an existing server to upgrade `rig-server` and `rig`:
 
@@ -199,19 +199,31 @@ Re-run the installer on an existing server to upgrade `rig-server` and `rig`:
 curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh | sudo bash
 ```
 
-When `/etc/rig/rig.env` already exists, the installer skips the interactive wizard, preserves your configured container engine and environment file, copies `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<timestamp>`, swaps the binaries atomically, and restarts `rig.service`. Schema migrations run automatically on startup.
+When `/etc/rig/rig.env` already exists, the installer skips the interactive wizard and performs a zero-downtime upgrade:
+
+1. **Stages binaries and unit files first:** Atomically installs `/usr/local/bin/rig-server`, `/usr/local/bin/rig`, and `/etc/systemd/system/rig.service` while existing workloads keep serving.
+2. **Pre-pulls proxy updates:** If `RIG_CADDY_IMAGE` or the Tailscale socket mount changed, `install.sh` pulls the new image *before* gracefully stopping (`stop -t 10`) and recreating `rig-caddy` with `caddy run --resume`. On normal upgrades where the proxy image is unchanged, `rig-caddy` is not restarted at all.
+3. **Graceful control-plane stop and consistent SQLite backup:** Stops `rig.service` (which cleanly aborts any in-flight deployment swap, restores any paused stateful container, and runs `PRAGMA wal_checkpoint(TRUNCATE)`), copies `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<timestamp>`, and immediately starts the new `rig.service`. Schema migrations and startup recovery run automatically on boot.
 
 <Callout type="warn" title="Changing domain or access mode on an existing server">
   Do not pass `--domain`, `--tls`, or `--access` when running `install.sh` to upgrade an existing server. Use `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain` or `dashboard-access` instead (or update them in **Settings → Network** in the dashboard).
 </Callout>
 
-### Uninstall
+### Uninstall (zero workload downtime)
 
-To stop Rig, remove the `rig-caddy` container, and delete `/usr/local/bin/rig-server`, `/usr/local/bin/rig`, and the systemd unit while keeping your data and secrets in `/var/lib/rig` and `/etc/rig`:
+To uninstall the Rig control plane (`rig.service`, `/usr/local/bin/rig-server`, and `/usr/local/bin/rig`) while keeping all running applications, managed databases, and their HTTPS domains online with zero downtime:
 
 ```sh
 sudo ./install.sh --uninstall
 ```
+
+During `--uninstall`, the installer:
+
+1. Stops `rig.service` and runs `rig-server proxy-detach-dashboard` so `rig-caddy` removes only the Rig dashboard route while continuing to proxy and renew TLS certificates for every running application.
+2. Removes `/etc/systemd/system/rig.service`, `/etc/systemd/system/rig.service.d`, `/usr/local/bin/rig-server`, and `/usr/local/bin/rig`.
+3. Leaves `/var/lib/rig`, `/etc/rig`, `rig-caddy`, and all running app and database containers untouched. Because container loopback ports are explicitly pinned (`127.0.0.1:20000..=32000`) and `rig-caddy` runs with `caddy run --resume`, your applications and databases continue working across container restarts and host reboots even after Rig is uninstalled.
+
+If you later want to tear down the running workloads, proxy, and data directory as well, run the engine commands printed at the end of `install.sh --uninstall`.
 
 ## Next steps
 

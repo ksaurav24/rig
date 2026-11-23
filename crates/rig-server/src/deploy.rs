@@ -47,6 +47,11 @@ pub struct Deployer {
     http: reqwest::Client,
     /// Active deployment cancellation handles keyed by deployment id.
     cancels: std::sync::Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Signalled when the server is shutting down so in-flight swaps can clean
+    /// up and restore any paused stateful containers before process exit.
+    shutdown: watch::Sender<bool>,
+    /// Held while the worker is executing a deployment (`run`).
+    busy: tokio::sync::Mutex<()>,
 }
 
 impl Deployer {
@@ -60,7 +65,25 @@ impl Deployer {
                 .build()
                 .context("building health check client")?,
             cancels: std::sync::Mutex::new(HashMap::new()),
+            shutdown: watch::channel(false).0,
+            busy: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Signal the deployment worker to stop starting new deployments, abort
+    /// any in-flight build/health-check, and restore paused stateful containers.
+    pub async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        self.queued.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(15), self.busy.lock()).await;
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
+    pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
     }
 
     /// A receiver that changes whenever deployment state or logs change.
@@ -137,10 +160,26 @@ pub fn is_active_deploy_conflict(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
-/// Run the deployment worker until the process exits.
-pub async fn worker(state: AppState) {
-    // Work that was in flight when the last process stopped cannot resume:
-    // its build context and log channel are gone.
+/// Recover deployments that were interrupted by a server restart or crash,
+/// removing any half-started containers and resuming any stateful app
+/// containers that were paused for a volume swap.
+pub async fn recover(state: &AppState) {
+    let interrupted_rows = sqlx::query(
+        "SELECT id, app_id FROM deployments WHERE status IN ('building', 'deploying')",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    for r in &interrupted_rows {
+        let dep_id: String = r.get("id");
+        if let Ok(cids) = state.runtime.list_by_label(LABEL_DEPLOYMENT, &dep_id).await {
+            for cid in cids {
+                let _ = state.runtime.remove(&cid).await;
+            }
+        }
+    }
+
     let interrupted = sqlx::query(
         "UPDATE deployments SET status = 'failed', finished_at = ?,
                 error = 'Rig restarted while this deployment was running. Deploy again.'
@@ -159,11 +198,53 @@ pub async fn worker(state: AppState) {
     )
     .execute(&state.db)
     .await;
+
+    // Ensure every running app's live container is actually started (a stateful
+    // app stopped mid-deploy before a hard kill would otherwise stay exited)
+    // and its recorded loopback port matches the engine.
+    let live_apps = sqlx::query(
+        "SELECT a.id AS app_id, d.id AS deployment_id, d.container_id, d.host_port
+           FROM apps a JOIN deployments d ON d.id = a.current_deployment_id
+          WHERE a.status = 'running' AND d.container_id IS NOT NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    for r in live_apps {
+        let dep_id: String = r.get("deployment_id");
+        let cid: String = r.get("container_id");
+        let stored_port: Option<i64> = r.get("host_port");
+        if let Ok(Some(health)) = state.runtime.health(&cid).await {
+            if matches!(health.state, ContainerState::Exited(_) | ContainerState::Other(_)) {
+                let _ = state.runtime.start(&cid).await;
+            }
+            if let Ok(Some(after)) = state.runtime.health(&cid).await
+                && let Some(live_port) = after.host_port
+                && stored_port != Some(i64::from(live_port))
+            {
+                let _ = sqlx::query("UPDATE deployments SET host_port = ? WHERE id = ?")
+                    .bind(i64::from(live_port))
+                    .bind(&dep_id)
+                    .execute(&state.db)
+                    .await;
+            }
+        }
+    }
+}
+
+/// Run the deployment worker until the process exits.
+pub async fn worker(state: AppState) {
+    recover(&state).await;
     if let Err(e) = proxy::sync(&state).await {
         tracing::warn!(error = %format!("{e:#}"), "proxy not updated at startup");
     }
 
+    let mut shutdown_rx = state.deploys.subscribe_shutdown();
     loop {
+        if state.deploys.is_shutting_down() {
+            break;
+        }
         let next = sqlx::query_scalar::<_, String>(
             "SELECT id FROM deployments WHERE status = 'queued' ORDER BY created_at, id LIMIT 1",
         )
@@ -171,7 +252,12 @@ pub async fn worker(state: AppState) {
         .await;
         match next {
             Ok(Some(id)) => run(&state, &id).await,
-            Ok(None) => state.deploys.queued.notified().await,
+            Ok(None) => {
+                tokio::select! {
+                    _ = state.deploys.queued.notified() => {}
+                    _ = shutdown_rx.wait_for(|&s| s) => break,
+                }
+            }
             Err(e) => {
                 tracing::error!(error = %e, "reading the deployment queue");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -243,15 +329,22 @@ async fn load_app(state: &AppState, deployment_id: &str) -> Result<(AppRow, Pres
 }
 
 async fn run(state: &AppState, deployment_id: &str) {
+    let _guard = state.deploys.busy.lock().await;
+    if state.deploys.is_shutting_down() {
+        return;
+    }
     let (tx, rx) = mpsc::channel::<LogMsg>(1024);
     let log = LogSink::new(tx);
     let writer = tokio::spawn(write_logs(state.clone(), deployment_id.to_string(), rx));
     let mut cancel_rx = state.deploys.register_cancel(deployment_id);
+    let mut shutdown_rx = state.deploys.subscribe_shutdown();
 
     let cancelled;
+    let shutting_down;
     let outcome = tokio::select! {
         res = tokio::time::timeout(DEPLOY_TIMEOUT, pipeline(state, deployment_id, &log)) => {
             cancelled = false;
+            shutting_down = false;
             match res {
                 Ok(r) => r,
                 Err(_) => Err(anyhow!(
@@ -261,10 +354,20 @@ async fn run(state: &AppState, deployment_id: &str) {
         }
         _ = cancel_rx.wait_for(|&c| c) => {
             cancelled = true;
+            shutting_down = false;
             Ok(())
+        }
+        _ = shutdown_rx.wait_for(|&s| s) => {
+            cancelled = false;
+            shutting_down = true;
+            Err(anyhow!("Rig restarted while this deployment was running. Deploy again."))
         }
     };
     state.deploys.unregister_cancel(deployment_id);
+
+    if cancelled || shutting_down || outcome.is_err() {
+        cleanup_aborted_deployment(state, deployment_id, &log).await;
+    }
 
     if cancelled {
         log.line("deploy", "Deployment cancelled").await;
@@ -598,6 +701,50 @@ async fn resume(state: &AppState, ids: &[String], log: &LogSink) {
                 .await;
             }
         }
+    }
+}
+
+/// Remove any half-started container from an aborted/failed deployment and
+/// make sure the app's previous live container (if it was paused for a volume
+/// swap) is running again.
+async fn cleanup_aborted_deployment(state: &AppState, deployment_id: &str, log: &LogSink) {
+    let is_live: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM apps WHERE current_deployment_id = ?",
+    )
+    .bind(deployment_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    if is_live.is_some() {
+        return;
+    }
+    if let Ok(ids) = state
+        .runtime
+        .list_by_label(LABEL_DEPLOYMENT, deployment_id)
+        .await
+    {
+        for id in ids {
+            let _ = state.runtime.remove(&id).await;
+        }
+    }
+    let prev_cid: Option<String> = sqlx::query_scalar(
+        "SELECT prev.container_id
+           FROM deployments cur
+           JOIN apps a ON a.id = cur.app_id
+           JOIN deployments prev ON prev.id = a.current_deployment_id
+          WHERE cur.id = ? AND prev.container_id IS NOT NULL",
+    )
+    .bind(deployment_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    if let Some(cid) = prev_cid
+        && let Ok(Some(h)) = state.runtime.health(&cid).await
+        && !matches!(h.state, ContainerState::Running)
+    {
+        resume(state, std::slice::from_ref(&cid), log).await;
     }
 }
 
@@ -1185,5 +1332,207 @@ mod tests {
         for bad in ["", "/Dockerfile", "../Dockerfile", "a/../../b"] {
             assert!(validate_relative_path(bad).is_err(), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn recover_removes_interrupted_container_and_resumes_paused_stateful_app() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct MockState {
+            removed: Vec<String>,
+            started: Vec<String>,
+            prev_running: bool,
+        }
+
+        struct MockRuntime(Arc<Mutex<MockState>>);
+
+        #[async_trait::async_trait]
+        impl crate::runtime::Runtime for MockRuntime {
+            async fn info(&self) -> Result<crate::runtime::EngineInfo> {
+                Ok(crate::runtime::EngineInfo {
+                    name: "docker".into(),
+                    version: "27.0".into(),
+                })
+            }
+            async fn pull(&self, _: &str, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn build(&self, _: BuildSpec, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn build_plan(&self, _: PlanSpec, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn run(&self, _: &ContainerSpec) -> Result<Started> {
+                bail!("unused")
+            }
+            async fn state(&self, id: &str) -> Result<ContainerState> {
+                Ok(self.health(id).await?.map_or(ContainerState::Missing, |h| h.state))
+            }
+            async fn health(&self, id: &str) -> Result<Option<crate::runtime::Health>> {
+                let s = self.0.lock().unwrap();
+                if id == "cid-prev" {
+                    Ok(Some(crate::runtime::Health {
+                        state: if s.prev_running {
+                            ContainerState::Running
+                        } else {
+                            ContainerState::Exited(Some(0))
+                        },
+                        restart_count: 0,
+                        oom_killed: false,
+                        exit_code: Some(0),
+                        host_port: Some(24567),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            async fn start(&self, id: &str) -> Result<()> {
+                let mut s = self.0.lock().unwrap();
+                s.started.push(id.to_string());
+                if id == "cid-prev" {
+                    s.prev_running = true;
+                }
+                Ok(())
+            }
+            async fn stop(&self, _: &str, _: u32) -> Result<()> {
+                Ok(())
+            }
+            async fn remove(&self, id: &str) -> Result<()> {
+                self.0.lock().unwrap().removed.push(id.to_string());
+                Ok(())
+            }
+            fn logs_with(&self, _: &str, _: crate::runtime::LogOptions) -> crate::runtime::LogStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_by_label(&self, label: &str, value: &str) -> Result<Vec<String>> {
+                if label == LABEL_DEPLOYMENT && value == "dep-interrupted" {
+                    Ok(vec!["cid-half-new".into()])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn remove_volume(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn remove_network(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn shell(&self, _: &str, _: u16, _: u16) -> Result<crate::runtime::Shell> {
+                bail!("unused")
+            }
+            async fn image_id(&self, _: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            async fn usage(&self, _: &str) -> Result<Option<crate::runtime::Usage>> {
+                Ok(None)
+            }
+            async fn resize_shell(&self, _: &str, _: u16, _: u16) -> Result<()> {
+                Ok(())
+            }
+            async fn exec(
+                &self,
+                _: &str,
+                _: Vec<String>,
+                _: Vec<String>,
+                _: Option<crate::runtime::ByteReader>,
+                _: crate::runtime::ByteWriter,
+            ) -> Result<crate::runtime::ExecOutcome> {
+                bail!("unused")
+            }
+        }
+
+        struct NoopProxy;
+        #[async_trait::async_trait]
+        impl crate::proxy::Proxy for NoopProxy {
+            async fn ready(&self) -> bool {
+                true
+            }
+            async fn apply(
+                &self,
+                _: &[crate::proxy::Route],
+                _: Option<&rig_api::DashboardDomain>,
+                _: &[String],
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn ports(&self) -> (u16, u16) {
+                (80, 443)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let vault = crate::crypto::Vault::open(dir.path()).unwrap();
+        let mock = Arc::new(Mutex::new(MockState::default()));
+        let state = AppState {
+            db: db.clone(),
+            vault,
+            config: Arc::new(crate::state::Config {
+                data_dir: dir.path().to_path_buf(),
+                secure_cookies: false,
+                github_api: "http://127.0.0.1".into(),
+                github_web: "http://127.0.0.1".into(),
+                poll_interval: 0,
+                allow_private_alerts: false,
+                allow_private_git: false,
+                enable_api_docs: false,
+            }),
+            runtime: Arc::new(MockRuntime(mock.clone())),
+            proxy: Arc::new(NoopProxy),
+            deploys: Arc::new(Deployer::new().unwrap()),
+            access: crate::access::DashboardAccess::default(),
+        };
+
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'Alpha', 'alpha', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO apps (id, org_id, project_id, name, slug, source_kind, image, dockerfile_path, port, status, current_deployment_id, webhook_secret, created_at, updated_at)
+             VALUES ('app1', 'org1', 'p1', 'Web', 'web', 'image', 'nginx:alpine', 'Dockerfile', 80, 'deploying', 'dep-prev', 'sec', '2026-11-22T00:00:00Z', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (id, org_id, app_id, status, trigger, container_id, host_port, created_at)
+             VALUES ('dep-prev', 'org1', 'app1', 'running', 'manual', 'cid-prev', 20001, '2026-11-22T00:00:00Z'),
+                    ('dep-interrupted', 'org1', 'app1', 'deploying', 'manual', NULL, NULL, '2026-11-22T00:01:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        recover(&state).await;
+
+        {
+            let s = mock.lock().unwrap();
+            assert_eq!(s.removed, vec!["cid-half-new".to_string()]);
+            assert_eq!(s.started, vec!["cid-prev".to_string()]);
+            assert!(s.prev_running);
+        }
+        let app_status: String = sqlx::query_scalar("SELECT status FROM apps WHERE id = 'app1'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(app_status, "running");
+
+        let (dep_status, port): (String, i64) = sqlx::query_as(
+            "SELECT (SELECT status FROM deployments WHERE id = 'dep-interrupted'),
+                    (SELECT host_port FROM deployments WHERE id = 'dep-prev')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(dep_status, "failed");
+        assert_eq!(port, 24567);
     }
 }

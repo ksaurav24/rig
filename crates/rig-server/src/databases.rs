@@ -384,16 +384,51 @@ pub async fn destroy_project(state: &AppState, project_id: &str) -> Result<()> {
         .await
 }
 
-/// Databases caught mid-start or mid-operation by a restart will never finish on their own.
+/// Databases caught mid-start or mid-operation by a restart: adopt any
+/// container that already finished starting, or fail the row if it never came up.
 pub async fn recover(state: &AppState) -> Result<()> {
-    sqlx::query(
-        "UPDATE databases
-            SET status = 'failed',
-                error = 'Rig restarted while this database was starting. Start it again.'
-          WHERE status = 'creating'",
-    )
-    .execute(&state.db)
-    .await?;
+    let creating: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM databases WHERE status = 'creating'")
+            .fetch_all(&state.db)
+            .await?;
+    for id in creating {
+        let mut adopted = None;
+        if let Ok(cids) = state.runtime.list_by_label(LABEL_DATABASE, &id).await {
+            for cid in cids {
+                if let Ok(Some(health)) = state.runtime.health(&cid).await
+                    && health.state == ContainerState::Running
+                    && let Some(port) = health.host_port
+                    && wait_ready(state, &cid, port).await.is_ok()
+                {
+                    adopted = Some((cid, port));
+                    break;
+                }
+                let _ = state.runtime.remove(&cid).await;
+            }
+        }
+        if let Some((cid, port)) = adopted {
+            sqlx::query(
+                "UPDATE databases
+                    SET status = 'running', error = NULL, container_id = ?, host_port = ?
+                  WHERE id = ?",
+            )
+            .bind(&cid)
+            .bind(i64::from(port))
+            .bind(&id)
+            .execute(&state.db)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE databases
+                    SET status = 'failed',
+                        error = 'Rig restarted while this database was starting. Start it again.'
+                  WHERE id = ? AND status = 'creating'",
+            )
+            .bind(&id)
+            .execute(&state.db)
+            .await?;
+        }
+    }
     sqlx::query("UPDATE databases SET busy_op = NULL WHERE busy_op IS NOT NULL")
         .execute(&state.db)
         .await?;
@@ -451,5 +486,203 @@ mod tests {
         let cmd = redis.command().unwrap();
         assert!(cmd.iter().all(|a| !a.contains("s3")));
         assert!(cmd.iter().any(|a| a.contains("redis-server -")));
+    }
+
+    #[tokio::test]
+    async fn recover_adopts_live_database_container_and_fails_missing_one() {
+        use std::sync::Arc;
+
+        // Bind a real loopback TCP listener that holds connections open so
+        // `deploy::tcp_ready(port)` returns true for the adopted database.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = listener.local_addr().unwrap().port();
+        let accept_task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        struct DbRecoverRuntime {
+            live_port: u16,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::runtime::Runtime for DbRecoverRuntime {
+            async fn info(&self) -> Result<crate::runtime::EngineInfo> {
+                Ok(crate::runtime::EngineInfo {
+                    name: "docker".into(),
+                    version: "27.0".into(),
+                })
+            }
+            async fn pull(&self, _: &str, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn build(&self, _: crate::runtime::BuildSpec, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn build_plan(&self, _: crate::runtime::PlanSpec, _: &LogSink) -> Result<()> {
+                Ok(())
+            }
+            async fn run(&self, _: &ContainerSpec) -> Result<crate::runtime::Started> {
+                bail!("unused")
+            }
+            async fn state(&self, id: &str) -> Result<ContainerState> {
+                Ok(self
+                    .health(id)
+                    .await?
+                    .map_or(ContainerState::Missing, |h| h.state))
+            }
+            async fn health(&self, id: &str) -> Result<Option<crate::runtime::Health>> {
+                if id == "cid-db-live" {
+                    Ok(Some(crate::runtime::Health {
+                        state: ContainerState::Running,
+                        restart_count: 0,
+                        oom_killed: false,
+                        exit_code: Some(0),
+                        host_port: Some(self.live_port),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            async fn start(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn stop(&self, _: &str, _: u32) -> Result<()> {
+                Ok(())
+            }
+            async fn remove(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn logs_with(
+                &self,
+                _: &str,
+                _: crate::runtime::LogOptions,
+            ) -> crate::runtime::LogStream {
+                Box::pin(futures_util::stream::empty())
+            }
+            async fn list_by_label(&self, label: &str, value: &str) -> Result<Vec<String>> {
+                if label == LABEL_DATABASE && value == "db-live" {
+                    Ok(vec!["cid-db-live".into()])
+                } else {
+                    Ok(vec![])
+                }
+            }
+            async fn remove_volume(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn remove_network(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            async fn shell(
+                &self,
+                _: &str,
+                _: u16,
+                _: u16,
+            ) -> Result<crate::runtime::Shell> {
+                bail!("unused")
+            }
+            async fn image_id(&self, _: &str) -> Result<Option<String>> {
+                Ok(None)
+            }
+            async fn usage(&self, _: &str) -> Result<Option<crate::runtime::Usage>> {
+                Ok(None)
+            }
+            async fn resize_shell(&self, _: &str, _: u16, _: u16) -> Result<()> {
+                Ok(())
+            }
+            async fn exec(
+                &self,
+                _: &str,
+                _: Vec<String>,
+                _: Vec<String>,
+                _: Option<crate::runtime::ByteReader>,
+                _: crate::runtime::ByteWriter,
+            ) -> Result<crate::runtime::ExecOutcome> {
+                bail!("unused")
+            }
+        }
+
+        struct NoopProxy;
+        #[async_trait::async_trait]
+        impl crate::proxy::Proxy for NoopProxy {
+            async fn ready(&self) -> bool {
+                true
+            }
+            async fn apply(
+                &self,
+                _: &[crate::proxy::Route],
+                _: Option<&rig_api::DashboardDomain>,
+                _: &[String],
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn ports(&self) -> (u16, u16) {
+                (80, 443)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::state::open_db(&format!("sqlite://{}", dir.path().join("rig.db").display()))
+            .await
+            .unwrap();
+        let vault = crate::crypto::Vault::open(dir.path()).unwrap();
+        let state = AppState {
+            db: db.clone(),
+            vault,
+            config: Arc::new(crate::state::Config {
+                data_dir: dir.path().to_path_buf(),
+                secure_cookies: false,
+                github_api: "http://127.0.0.1".into(),
+                github_web: "http://127.0.0.1".into(),
+                poll_interval: 0,
+                allow_private_alerts: false,
+                allow_private_git: false,
+                enable_api_docs: false,
+            }),
+            runtime: Arc::new(DbRecoverRuntime { live_port }),
+            proxy: Arc::new(NoopProxy),
+            deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
+            access: crate::access::DashboardAccess::default(),
+        };
+
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id, org_id, name, slug, description, created_at) VALUES ('p1', 'org1', 'Alpha', 'alpha', '', '2026-11-22T00:00:00Z')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO databases (id, org_id, project_id, name, slug, engine, version, volume, db_name, username, password_enc, status, created_at)
+             VALUES ('db-live', 'org1', 'p1', 'Live', 'live', 'postgres', '17', 'rig-db-live', 'live', 'live', 'enc', 'creating', '2026-11-22T00:00:00Z'),
+                    ('db-dead', 'org1', 'p1', 'Dead', 'dead', 'postgres', '17', 'rig-db-dead', 'dead', 'dead', 'enc', 'creating', '2026-11-22T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        recover(&state).await.unwrap();
+        accept_task.abort();
+
+        let (live_status, live_cid, live_recorded_port): (String, Option<String>, Option<i64>) =
+            sqlx::query_as(
+                "SELECT status, container_id, host_port FROM databases WHERE id = 'db-live'",
+            )
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(live_status, "running");
+        assert_eq!(live_cid.as_deref(), Some("cid-db-live"));
+        assert_eq!(live_recorded_port, Some(i64::from(live_port)));
+
+        let dead_status: String =
+            sqlx::query_scalar("SELECT status FROM databases WHERE id = 'db-dead'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(dead_status, "failed");
     }
 }

@@ -57,7 +57,7 @@ Every deployment moves through a deterministic state machine (`DeploymentStatus`
 2. **Building (`building`):** Clones the Git repository (10-minute timeout) or pulls the registry image, and builds the container image. Build output streams live over Server-Sent Events (SSE) and persists in `deployment_logs`.
 3. **Deploying (`deploying`):**
    - **Stateless apps (`volumes` is empty):** Starts the new container alongside the running container, waits up to **90 seconds** (`HEALTH_TIMEOUT`) for two consecutive health checks to pass, updates Caddy's upstream port atomically, marks the previous deployment `superseded`, and stops the old container with a 10-second drain grace period.
-   - **Stateful apps (`volumes` is non-empty):** Stops the old container after the new image is built/pulled, mounts the named volumes onto the new container, verifies health checks, and updates Caddy.
+   - **Stateful apps (`volumes` is non-empty):** Stops the old container after the new image is built/pulled, mounts the named volumes onto the new container, verifies health checks, and updates Caddy. If the new container fails health checks, is cancelled, times out, or is interrupted by a `rig-server` restart/upgrade, Rig automatically removes the half-started container and restarts the previous container so the app does not remain down.
 4. **Running (`running`):** The container is live and serving traffic. If the deployment fails at any step for a stateless app, the previous deployment remains `running` and continues serving traffic without interruption.
 
 ## Rollbacks, restarts, and lifecycle actions

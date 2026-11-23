@@ -153,7 +153,7 @@ pub enum ContainerState {
 }
 
 /// What the engine remembers about a container's past: enough to notice that
-/// it died and came back between two looks.
+/// it died and came back between two looks, or that its loopback port changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Health {
     pub state: ContainerState,
@@ -162,6 +162,8 @@ pub struct Health {
     /// The kernel killed the last run for using more memory than its limit.
     pub oom_killed: bool,
     pub exit_code: Option<i64>,
+    /// Currently published loopback host port, when the container is running.
+    pub host_port: Option<u16>,
 }
 
 pub type LogStream = Pin<Box<dyn Stream<Item = Result<LogMsg>> + Send>>;

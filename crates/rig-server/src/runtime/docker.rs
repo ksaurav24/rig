@@ -433,6 +433,13 @@ impl Runtime for DockerRuntime {
             Ok(i) if i.name == "podman" => RestartPolicyNameEnum::ALWAYS,
             _ => RestartPolicyNameEnum::UNLESS_STOPPED,
         };
+        // Pin an explicit loopback port below the kernel's ephemeral outbound
+        // range (32768..60999) so container restarts, engine restarts, host
+        // reboots, and running after Rig is uninstalled always keep the exact
+        // same loopback port in HostConfig.PortBindings.
+        let pinned_port = allocate_loopback_port()
+            .map(|p| p.to_string())
+            .unwrap_or_default();
         let host = HostConfig {
             network_mode: spec.network.clone(),
             binds: (!spec.volumes.is_empty()).then(|| {
@@ -446,7 +453,7 @@ impl Runtime for DockerRuntime {
                 port_key.clone(),
                 Some(vec![PortBinding {
                     host_ip: Some("127.0.0.1".into()),
-                    host_port: Some(String::new()),
+                    host_port: Some(pinned_port),
                 }]),
             )])),
             restart_policy: Some(RestartPolicy {
@@ -463,7 +470,7 @@ impl Runtime for DockerRuntime {
             security_opt: Some(vec!["no-new-privileges".into()]),
             ..Default::default()
         };
-        let body = ContainerCreateBody {
+        let mut body = ContainerCreateBody {
             image: Some(spec.image.clone()),
             env: Some(spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
             labels: Some(spec.labels.clone()),
@@ -481,27 +488,50 @@ impl Runtime for DockerRuntime {
             host_config: Some(host),
             ..Default::default()
         };
-        let opts = CreateContainerOptionsBuilder::default()
-            .name(&spec.name)
-            .build();
-        let created = self
-            .api
-            .create_container(Some(opts), body)
-            .await
-            .with_context(|| format!("creating container {}", spec.name))?;
-        let id = created.id;
-        if let Err(e) = self.api.start_container(&id, None).await {
-            let _ = self.remove(&id).await;
-            return Err(anyhow!(e).context(format!("starting container {}", spec.name)));
-        }
-        let host_port = match self.host_port(&id, &port_key).await {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = self.remove(&id).await;
-                return Err(e);
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let fallback_port = if attempt == 1 {
+                    allocate_loopback_port()
+                        .map(|p| p.to_string())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if let Some(hc) = body.host_config.as_mut() {
+                    hc.port_bindings = Some(HashMap::from([(
+                        port_key.clone(),
+                        Some(vec![PortBinding {
+                            host_ip: Some("127.0.0.1".into()),
+                            host_port: Some(fallback_port),
+                        }]),
+                    )]));
+                }
             }
-        };
-        Ok(Started { id, host_port })
+            let opts = CreateContainerOptionsBuilder::default()
+                .name(&spec.name)
+                .build();
+            let created = self
+                .api
+                .create_container(Some(opts), body.clone())
+                .await
+                .with_context(|| format!("creating container {}", spec.name))?;
+            let id = created.id;
+            if let Err(e) = self.api.start_container(&id, None).await {
+                let _ = self.remove(&id).await;
+                last_err = Some(anyhow!(e).context(format!("starting container {}", spec.name)));
+                continue;
+            }
+            let host_port = match self.host_port(&id, &port_key).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = self.remove(&id).await;
+                    return Err(e);
+                }
+            };
+            return Ok(Started { id, host_port });
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("starting container {}", spec.name)))
     }
 
     async fn state(&self, id: &str) -> Result<ContainerState> {
@@ -517,6 +547,7 @@ impl Runtime for DockerRuntime {
             Err(e) if is_not_found(&e) => return Ok(None),
             Err(e) => return Err(anyhow!(e).context("inspecting container")),
         };
+        let host_port = first_published_port(&c);
         let restart_count = c.restart_count.unwrap_or(0);
         let Some(state) = c.state else {
             return Ok(Some(Health {
@@ -524,6 +555,7 @@ impl Runtime for DockerRuntime {
                 restart_count,
                 oom_killed: false,
                 exit_code: None,
+                host_port,
             }));
         };
         let current = match state.status {
@@ -543,6 +575,7 @@ impl Runtime for DockerRuntime {
             restart_count,
             oom_killed: state.oom_killed.unwrap_or(false),
             exit_code: state.exit_code,
+            host_port,
         }))
     }
 
@@ -859,6 +892,39 @@ impl DockerRuntime {
     }
 }
 
+/// Picks a free TCP port on `127.0.0.1` in `20000..=32000` (below the Linux
+/// ephemeral outbound range `32768..60999`) so a pinned container port is not
+/// stolen by random outbound host connections across restarts or reboots.
+fn allocate_loopback_port() -> Option<u16> {
+    const BASE: u16 = 20_000;
+    const SPAN: u16 = 12_000;
+    let start = rand::random::<u16>() % SPAN;
+    for offset in 0..128 {
+        let port = BASE + ((start + offset) % SPAN);
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Some(port);
+        }
+    }
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .filter(|p| *p != 0)
+}
+
+/// Extracts the first non-zero published host port from a container inspection.
+fn first_published_port(c: &bollard::models::ContainerInspectResponse) -> Option<u16> {
+    c.network_settings
+        .as_ref()?
+        .ports
+        .as_ref()?
+        .values()
+        .flatten()
+        .flatten()
+        .find_map(|b| b.host_port.as_deref()?.parse::<u16>().ok())
+        .filter(|p| *p != 0)
+}
+
 /// Turns one stats reading into CPU and memory use, the way `docker stats` does.
 fn usage_from(stats: &ContainerStatsResponse) -> Option<Usage> {
     let cpu = stats.cpu_stats.as_ref()?;
@@ -1005,6 +1071,15 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "cpu_stats": {}, "memory_stats": {} }))
                 .unwrap();
         assert_eq!(usage_from(&stopped), None);
+    }
+
+    #[test]
+    fn allocate_loopback_port_picks_dedicated_non_ephemeral_range() {
+        let port = allocate_loopback_port().expect("should allocate a loopback port");
+        assert!(
+            (20_000..=32_000).contains(&port),
+            "expected port in 20000..=32000, got {port}"
+        );
     }
 }
 

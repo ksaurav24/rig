@@ -65,9 +65,9 @@ All choices can also be passed on the command line (or via `RIG_*` environment v
 | `-y`, `--yes`, `--non-interactive` | `RIG_YES=1` | Skip interactive prompts and use flags/defaults |
 | `--version <ver>` | `RIG_VERSION` | Pin GitHub Release version (default: latest) |
 | `--repo <owner/repo>` | `RIG_REPO` | Override GitHub Releases repository |
-| `--uninstall` | — | Stop and remove Rig (keeps `/var/lib/rig` and `/etc/rig`) |
+| `--uninstall` | — | Stop and remove Rig while keeping running apps, databases, `rig-caddy`, `/var/lib/rig`, and `/etc/rig` online |
 
-Running `install.sh` again on an existing server upgrades in place after backing up `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<time>`.
+Running `install.sh` again on an existing server upgrades in place with zero workload downtime after staging the new binaries, pre-pulling any proxy image update, gracefully stopping `rig.service` (checkpointing the SQLite WAL), and backing up `/var/lib/rig/rig.db` to `/var/lib/rig/rig.db.pre-upgrade-<time>`.
 
 ## 2. Create the owner account
 
@@ -132,7 +132,7 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 | Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` (disables TOTP, removes recovery codes, and signs out all active sessions) |
 | Clear dashboard domain | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-domain --clear` |
 | Reset dashboard access | `sudo -u rig rig-server --data-dir /var/lib/rig dashboard-access public` |
-| Uninstall | `sudo ./install.sh --uninstall` (keeps `/var/lib/rig`) |
+| Uninstall | `sudo ./install.sh --uninstall` (detaches the dashboard route and removes `rig.service` and binaries while leaving running apps, databases, `rig-caddy`, and `/var/lib/rig` untouched) |
 
 ## Security notes
 

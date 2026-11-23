@@ -17,7 +17,7 @@ Rig is designed around a strict separation between the **control plane** (`rig-s
   │  • Remote IP guards for Public, LAN, and Tailscale access scopes     │
   └───────────────┬──────────────────────────────────────┬───────────────┘
                   │ Dashboard & API                      │ App Routes
-                  ▼ 127.0.0.1:7460                       ▼ 127.0.0.1:<ephemeral_port>
+                  ▼ 127.0.0.1:7460                       ▼ 127.0.0.1:<pinned_port>
   ┌───────────────────────────────────────────┐  ┌───────────────────────┐
   │ rig-server (Single Rust Binary)           │  │ Project Network       │
   │  • Axum HTTP API + Embedded React UI      │  │ (rig-net-<project>)   │
@@ -62,8 +62,9 @@ Rig communicates with both Podman and Docker through a single `Runtime` trait (`
 
 ### 4. Loopback port binding and per-project network isolation
 
-App and database containers never bind ports on `0.0.0.0`. Every container binds an ephemeral host port on **`127.0.0.1`** only:
+App and database containers never bind ports on `0.0.0.0`. Every container binds an explicitly pinned host port on **`127.0.0.1`** in the dedicated range **`20000..=32000`** (below the Linux kernel's ephemeral outbound port range `32768..60999`):
 
+- **Persistent port bindings across restarts and uninstalls:** Because Rig allocates and pins the concrete `host_port` in `HostConfig.PortBindings` when creating the container, Docker and Podman preserve the exact same loopback port across container crashes, engine restarts, host reboots, and even if Rig is later uninstalled.
 - **External traffic** enters through Caddy on ports `80`, `443`, or a configured domain listener port (`1024–65535`), passes Caddy's host and `remote_ip` access checks (which automatically exclude local container bridge subnets such as `docker*`, `br-*`, `podman*`, and `cni*` from LAN/Tailscale access), and proxies to `127.0.0.1:<host_port>`.
 - **East-west traffic inside a project** travels over a dedicated bridge network named `rig-net-<project_id>`. Every managed database joins its project's network with a network alias equal to its slug (for example `main-db:5432`), so apps in the same project connect directly by hostname while containers in other projects cannot reach it.
 
@@ -74,17 +75,17 @@ Rig adapts its deployment strategy (`crates/rig-server/src/deploy.rs`) based on 
 | App type | Strategy | Why |
 | --- | --- | --- |
 | **Stateless** (`volumes: []`) | **Zero-downtime swap:** Start new container → wait for HTTP/TCP health check (up to 90s) → atomically switch Caddy route to new loopback port → stop (`10s` grace) and remove old container. | If the build or health check fails, the existing container continues serving traffic uninterrupted. |
-| **Stateful** (`volumes: ["/data", ...]`) | **Stop-then-start:** Build/pull image first → stop old container → start new container mounted to the persistent named volumes (`rig-vol-<app>-<name>`) → verify health check → update Caddy route. | Prevents two containers from writing to the same SQLite database or filesystem volume concurrently. |
+| **Stateful** (`volumes: ["/data", ...]`) | **Stop-then-start with automatic rollback:** Build/pull image first → stop old container → start new container mounted to the persistent named volumes (`rig-vol-<app>-<name>`) → verify health check → update Caddy route. | Prevents two containers from writing to the same SQLite database or filesystem volume concurrently. If the new container fails health checks, is cancelled, or is interrupted by a `rig-server` restart/upgrade, Rig automatically removes the half-started container and restarts the previous container. |
 
 ## Background workers
 
-When `rig-server serve` boots, it recovers any interrupted deployments or database tasks and spawns five background tasks:
+When `rig-server serve` boots, it recovers any interrupted deployments or database tasks (`deploy::recover`, `databases::recover`, `backups::recover`) and spawns five background tasks. On `SIGTERM` / `SIGINT`, `rig-server` drains in-flight deployment swaps (`Deployer::shutdown`) and checkpoints the SQLite WAL (`PRAGMA wal_checkpoint(TRUNCATE)`) before exiting:
 
 | Worker | Cadence | Responsibility |
 | --- | --- | --- |
-| `deploy::worker` | Event-driven (`Notify`) | Processes `queued` deployments FIFO (one build/deploy at a time to protect small-server RAM), streams build/deploy logs to SQLite and SSE subscribers, and enforces a 30-minute deployment timeout and `< 1024 MB` free-disk guard. |
+| `deploy::worker` | Event-driven (`Notify`) | On startup, removes any half-started containers from interrupted deployments and restarts any stateful app container that was paused during an interrupted volume swap. Then processes `queued` deployments FIFO (one build/deploy at a time to protect small-server RAM), streams build/deploy logs to SQLite and SSE subscribers, and enforces a 30-minute deployment timeout and `< 1024 MB` free-disk guard. |
 | `metrics::sampler` | Every `30s` | Samples host CPU, RAM, disk, and physical network throughput alongside every running app and database container (`USAGE_TIMEOUT = 8s`). Stores 24 hours of samples in SQLite (pruned every 120 samples along with expired `sessions`, `pending_2fa`, and `login_attempts` rows) and triggers `disk.low` alerts when free disk drops below 5 GiB or 10%. |
-| `watch::watcher` | Every `15s` | Inspects every running app container's state, restart count, exit code, and `oom_killed` flag. Records crashes on the app (`last_crash`) and dispatches `app.crashed` or `app.down` alerts. |
+| `watch::watcher` | Every `15s` | Inspects every running app and database container's state, restart count, exit code, `oom_killed` flag, and live published loopback `host_port`. Reconciles `host_port` in SQLite (and syncs Caddy if an app port ever shifts), records crashes on the app (`last_crash`), and dispatches `app.crashed` or `app.down` alerts. |
 | `github::poller` | Every `RIG_POLL_INTERVAL` (default `120s`) | Runs `git ls-remote` against auto-deploy Git apps so private or firewalled servers that GitHub webhooks cannot reach still deploy automatically on new commits. |
 | `proxy::supervisor` | Every `60s` (`5s` on error) | Reconciles Caddy's live configuration against SQLite so a restarted Caddy container immediately regains all routes and TLS policies. |
 

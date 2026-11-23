@@ -23,7 +23,7 @@ When you choose **Podman** in `install.sh`:
 1. **System user and subuids:** The installer creates the `rig` system user (`--home-dir /var/lib/rig`) and allocates a 65,536-ID range in `/etc/subuid` and `/etc/subgid` (for example `rig:100000:65536`) so containers run mapped to unprivileged host UIDs.
 2. **User systemd lingering:** Enables `loginctl enable-linger rig` so the `rig` user's `systemd --user` instance and rootless containers stay running across boot and without an active SSH session.
 3. **User Podman socket:** Enables `podman.socket` under `XDG_RUNTIME_DIR=/run/user/$(id -u rig)` and sets `RIG_ENGINE_SOCKET=/run/user/<uid>/podman/podman.sock` in `/etc/rig/rig.env`.
-4. **Caddy on ports 80 and 443:** Runs `rig-caddy` with `--network host` and `CAP_NET_BIND_SERVICE` so Caddy can bind ports `80` and `443` and proxy to app containers listening on `127.0.0.1:<ephemeral_port>`.
+4. **Caddy on ports 80 and 443:** Runs `rig-caddy` with `--network host` and `CAP_NET_BIND_SERVICE` so Caddy can bind ports `80` and `443` and proxy to app containers listening on `127.0.0.1:<pinned_port>`.
 5. **Tailscale HTTPS certificate permissions:** When `--tls tailscale` is selected on rootless Podman, `install.sh` configures `tailscale set --operator=rig` so the rootless `rig-caddy` container can request `*.ts.net` TLS certificates from `/run/tailscale/tailscaled.sock`.
 
 ### Inspecting Podman containers on the server
@@ -39,7 +39,7 @@ sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman logs rig-caddy
 
 Regardless of whether you run Podman or Docker, Rig applies strict runtime hardening to every application and database container it starts:
 
-- **Loopback-only port bindings:** Every container port is bound exclusively to `127.0.0.1:0` (ephemeral loopback port). No app or database container ever binds `0.0.0.0` directly.
+- **Pinned loopback-only port bindings:** Every container port is bound exclusively to `127.0.0.1:<port>` using an explicitly pinned port in `20000..=32000` (below the Linux kernel's ephemeral outbound port range `32768..60999`). No app or database container ever binds `0.0.0.0` directly, and pinned ports remain stable across container restarts, engine restarts, host reboots, and after Rig is uninstalled.
 - **`no-new-privileges`, `NET_RAW` dropped, and PID limit:** Every workload container runs with `SecurityOpt: ["no-new-privileges"]`, `CapDrop: ["NET_RAW"]`, and `PidsLimit: 512` to block setuid/setgid escalation, raw packet crafting, and fork bombs.
 - **Rootless-only BuildKit privilege check:** When running a temporary BuildKit container for Railpack builds, Rig checks the container engine's security options and refuses `privileged: true` unless the engine is running rootless.
 - **Container bridge exclusion from LAN access:** Rig inspects local container bridge subnets (`docker*`, `br-*`, `podman*`, `cni*`) and explicitly excludes them from `Access::Lan` and `Access::Tailscale` matchers in both Caddy and `rig-server`, preventing compromised containers from reaching LAN-restricted apps or the dashboard.

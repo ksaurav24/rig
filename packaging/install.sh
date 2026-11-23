@@ -179,6 +179,13 @@ user_systemctl() {
 uninstall() {
   say "stopping Rig"
   systemctl disable --now rig.service 2>/dev/null || true
+  if [ -x "$BIN_DIR/rig-server" ] && [ -f "$DATA_DIR/rig.db" ] && id rig >/dev/null 2>&1; then
+    if [ -f "$ENV_FILE" ]; then
+      (set -a; . "$ENV_FILE" 2>/dev/null || true; set +a; runuser -u rig -- "$BIN_DIR/rig-server" --data-dir "$DATA_DIR" proxy-detach-dashboard >/dev/null 2>&1 || true)
+    else
+      runuser -u rig -- "$BIN_DIR/rig-server" --data-dir "$DATA_DIR" proxy-detach-dashboard >/dev/null 2>&1 || true
+    fi
+  fi
   rm -f "$UNIT"
   rm -rf "$DROPIN_DIR"
   systemctl daemon-reload
@@ -187,18 +194,15 @@ uninstall() {
     ENGINE=docker
     command -v docker >/dev/null || ENGINE=podman
   fi
-  if [ "$ENGINE" = podman ] && ! id rig >/dev/null 2>&1; then
-    :
-  elif command -v "$ENGINE" >/dev/null; then
-    engine rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
-  fi
   rm -f "$BIN_DIR/rig-server" "$BIN_DIR/rig"
-  say "removed. Your data is still in $DATA_DIR and $CONF_DIR; apps' containers were left running."
+  say "removed. Your data is still in $DATA_DIR and $CONF_DIR; apps, databases, and the $CADDY_NAME proxy were left running with zero downtime."
   if [ "$ENGINE" = podman ]; then
-    say "delete them with: sudo -u rig XDG_RUNTIME_DIR=/run/user/\$(id -u rig) podman ps -a --filter label=rig.managed"
+    say "to tear down running workloads too: sudo -u rig XDG_RUNTIME_DIR=/run/user/\$(id -u rig) podman ps -a --filter label=rig.managed"
+    say "to remove the proxy: sudo -u rig XDG_RUNTIME_DIR=/run/user/\$(id -u rig) podman rm -f $CADDY_NAME"
     say "then: loginctl disable-linger rig && rm -rf $DATA_DIR $CONF_DIR $SYSCTL_FILE"
   else
-    say "delete them with: docker ps -a --filter label=rig.managed && rm -rf $DATA_DIR $CONF_DIR"
+    say "to tear down running workloads too: docker ps -a --filter label=rig.managed"
+    say "to remove the proxy: docker rm -f $CADDY_NAME && rm -rf $DATA_DIR $CONF_DIR"
   fi
 }
 if [ "$DO_UNINSTALL" = 1 ]; then uninstall; exit 0; fi
@@ -597,12 +601,6 @@ fi
 
 upgrading=0
 systemctl is-active --quiet rig.service && upgrading=1
-if [ "$upgrading" = 1 ]; then
-  say "backing up the database before upgrading"
-  stamp=$(date +%Y%m%d-%H%M%S)
-  systemctl stop rig.service
-  [ -f "$DATA_DIR/rig.db" ] && install -m 0600 -o rig -g rig "$DATA_DIR/rig.db" "$DATA_DIR/rig.db.pre-upgrade-$stamp"
-fi
 
 say "installing binaries to $BIN_DIR"
 install -m 0755 "$HERE/rig-server" "$BIN_DIR/rig-server"
@@ -648,12 +646,28 @@ fi
 # podman-restart.service starts `always` containers.
 restart=unless-stopped
 [ "$ENGINE" = podman ] && restart=always
+ts_mount=()
+need_ts_mount=0
+if [ -d /run/tailscale ] && { [ "$PLAN_TLS" = tailscale ] || [ "$PLAN_ACCESS" = tailscale ]; }; then
+  ts_mount=(-v /run/tailscale:/run/tailscale)
+  need_ts_mount=1
+fi
+recreate_caddy=0
 if [ "$(engine inspect -f '{{.Config.Image}}' "$CADDY_NAME" 2>/dev/null)" != "$CADDY_IMAGE" ]; then
+  recreate_caddy=1
+elif [ "$need_ts_mount" = 1 ] && ! engine inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$CADDY_NAME" 2>/dev/null | grep -qw '/run/tailscale'; then
+  recreate_caddy=1
+fi
+if [ "$recreate_caddy" = 1 ]; then
   say "starting the proxy ($CADDY_IMAGE)"
-  engine rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
-  ts_mount=()
-  if [ -d /run/tailscale ] && { [ "$PLAN_TLS" = tailscale ] || [ "$PLAN_ACCESS" = tailscale ]; }; then
-    ts_mount=(-v /run/tailscale:/run/tailscale)
+  # Pull the new image before stopping an existing proxy container so running
+  # apps never lose ingress during a download or a failed pull.
+  if ! engine image inspect "$CADDY_IMAGE" >/dev/null 2>&1; then
+    engine pull "$CADDY_IMAGE" >/dev/null
+  fi
+  if engine inspect "$CADDY_NAME" >/dev/null 2>&1; then
+    engine stop -t 10 "$CADDY_NAME" >/dev/null 2>&1 || true
+    engine rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
   fi
   # Host networking so Caddy sees each visitor's real address. Its config is
   # pushed by Rig; --resume restores the last one across restarts.
@@ -698,6 +712,12 @@ SupplementaryGroups=docker
 EOF
 fi
 systemctl daemon-reload
+if [ "$upgrading" = 1 ]; then
+  say "backing up the database before upgrading"
+  stamp=$(date +%Y%m%d-%H%M%S)
+  systemctl stop rig.service
+  [ -f "$DATA_DIR/rig.db" ] && install -m 0600 -o rig -g rig "$DATA_DIR/rig.db" "$DATA_DIR/rig.db.pre-upgrade-$stamp"
+fi
 systemctl enable --now rig.service >/dev/null 2>&1
 systemctl restart rig.service
 

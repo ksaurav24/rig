@@ -52,12 +52,13 @@ Run administrative subcommands directly on the server as the `rig` OS user (`sud
 
 | Subcommand | Usage | Description |
 | --- | --- | --- |
-| **`serve`** | `rig-server serve` | Run the HTTP server and background workers (default when no subcommand is given). On first boot before setup is complete, the one-time setup token is only printed to `stderr` when attached to an interactive TTY (not to `journald` logs). |
+| **`serve`** | `rig-server serve` | Run the HTTP server and background workers (default when no subcommand is given). On first boot before setup is complete, the one-time setup token is only printed to `stderr` when attached to an interactive TTY (not to `journald` logs). On `SIGTERM` / `SIGINT`, drains any in-flight deployment swap, restores any paused stateful container, and runs `PRAGMA wal_checkpoint(TRUNCATE)` before closing SQLite. |
 | **`setup-token`** | `rig-server --data-dir /var/lib/rig setup-token` | Issue and print a fresh 30-minute one-time setup token before an owner account exists. Works while the server is running. |
 | **`reset-password`** | `rig-server --data-dir /var/lib/rig reset-password <email>` | Generate a new 15-character temporary password for `<email>` (valid 7 days; must be changed on next sign-in), revoke all active browser sessions and API tokens, clear login rate-limit lockouts, log `auth.password_reset` in the audit log, and print the temporary password once. |
 | **`reset2fa`** | `rig-server --data-dir /var/lib/rig reset2fa <email>` | Disable TOTP two-factor authentication, delete recovery codes, and revoke all active browser sessions for `<email>` if they lost their authenticator device. Records `auth.totp_reset` in the audit log. |
 | **`dashboard-domain`** | `rig-server --data-dir /var/lib/rig dashboard-domain <host> [--tls <auto\|internal\|tailscale\|off>]` or `--clear` | Set or clear the dashboard's hostname and TLS mode in SQLite. Applied within 60 seconds by a running server, or immediately on `sudo systemctl restart rig`. |
 | **`dashboard-access`** | `rig-server --data-dir /var/lib/rig dashboard-access <public\|lan\|tailscale>` | Set who may open the dashboard and API (`public`, `lan`, or `tailscale`). Restart `rig.service` for the change to take effect immediately. |
+| **`proxy-detach-dashboard`** | `rig-server --data-dir /var/lib/rig proxy-detach-dashboard` | Internal helper invoked by `install.sh --uninstall`: syncs `rig-caddy` with `dashboard_port: None` so the dashboard route is removed while all running application routes and TLS policies stay online. |
 | **`openapi`** | `rig-server openapi` | Print the complete OpenAPI 3.1 JSON specification to `stdout` and exit without touching the database or filesystem. |
 
 ## Systemd service hardening (`packaging/rig.service`)

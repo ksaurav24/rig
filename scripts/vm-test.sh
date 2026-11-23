@@ -174,6 +174,7 @@ echo "== uninstall"
 vm sh -c "cd $DIR && ./install.sh --uninstall" >/dev/null 2>&1
 check "service removed" "$(vm systemctl is-active rig 2>/dev/null)" inactive
 check "data kept" "$(vm test -f /var/lib/rig/rig.db && echo yes)" yes
+check "app still served with zero downtime after uninstall" "$(curl -fsS -H 'host: hello.vm.test' "$BASE/" | grep -c 'Welcome to nginx')" 1
 
 echo "== fresh HTTPS install via CLI flags"
 vm rm -rf /etc/rig /var/lib/rig/rig.db /var/lib/rig/rig.db-wal /var/lib/rig/rig.db-shm /var/lib/rig/master.key

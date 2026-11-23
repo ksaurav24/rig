@@ -169,6 +169,10 @@ enum Command {
         #[arg(long, conflicts_with = "host")]
         clear: bool,
     },
+    /// Remove the dashboard route from the proxy while keeping every running
+    /// application route active. Invoked by `install.sh --uninstall`.
+    #[command(hide = true)]
+    ProxyDetachDashboard,
 }
 
 #[tokio::main]
@@ -241,6 +245,35 @@ async fn main() -> Result<()> {
         println!("Dashboard access is now {mode}. Restart Rig for it to take effect.");
         return Ok(());
     }
+    if matches!(cli.command, Some(Command::ProxyDetachDashboard)) {
+        let state = AppState {
+            db,
+            vault,
+            runtime: Arc::new(runtime::docker::DockerRuntime::connect(
+                cli.engine_socket.as_deref(),
+            )?),
+            proxy: Arc::new(proxy::CaddyProxy::new(proxy::CaddyOptions {
+                admin: cli.caddy_admin,
+                http_port: cli.http_port,
+                https_port: cli.https_port,
+                dashboard_port: None,
+            })?),
+            deploys: Arc::new(deploy::Deployer::new()?),
+            access: access::DashboardAccess::default(),
+            config: Arc::new(Config {
+                data_dir: cli.data_dir,
+                secure_cookies: cli.secure_cookies,
+                github_api: trim_slash(&cli.github_api),
+                github_web: trim_slash(&cli.github_web),
+                poll_interval: cli.poll_interval,
+                allow_private_alerts: cli.allow_private_alerts,
+                allow_private_git: cli.allow_private_git,
+                enable_api_docs: cli.enable_api_docs,
+            }),
+        };
+        proxy::sync(&state).await?;
+        return Ok(());
+    }
     crypto::migrate_plaintext_secrets(&db, &vault).await?;
     auth::prune_expired(&db).await;
 
@@ -310,12 +343,18 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", cli.listen))?;
     tracing::info!(addr = %cli.listen, "rig listening");
+    let shutdown_state = state.clone();
     axum::serve(
         listener,
         routes::app(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown())
     .await?;
+    shutdown_state.deploys.shutdown().await;
+    let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&shutdown_state.db)
+        .await;
+    shutdown_state.db.close().await;
     Ok(())
 }
 
