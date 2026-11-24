@@ -31,11 +31,17 @@ pub struct ClientSource {
 }
 
 impl ClientSource {
-    fn resolve(&self) -> CliResult<Client> {
+    fn resolve(&self, node_override: Option<&str>) -> CliResult<Client> {
         let config = Config::load()?;
+        let (context, server) = crate::resolve_node_override(
+            &config,
+            node_override,
+            self.context.as_deref(),
+            self.server.as_deref(),
+        );
         let opts = ResolveOptions {
-            context: self.context.as_deref(),
-            server: self.server.as_deref(),
+            context,
+            server,
             token: self.token.as_deref(),
             insecure: self.insecure,
         };
@@ -108,7 +114,8 @@ pub async fn serve(source: ClientSource) -> CliResult<()> {
                 let key_inner = key.clone();
                 let join = tokio::spawn(async move {
                     let progress = progress_token.map(|tok| ProgressSink::new(tok, tx_task.clone()));
-                    let (payload, is_error) = match source_task.resolve() {
+                    let node_override = args.get("node").and_then(Value::as_str);
+                    let (payload, is_error) = match source_task.resolve(node_override) {
                         Ok(api) => match run_tool(&api, tool.name, &args, progress).await {
                             Ok(Outcome { value, failed }) => (value, failed),
                             Err(e) => (Value::String(e.to_string()), true),

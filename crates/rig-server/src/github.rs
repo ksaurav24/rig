@@ -488,6 +488,8 @@ pub async fn deploy_commit(
             created_by: None,
             image_ref: None,
             image_id: None,
+            source_dir: None,
+            commit_msg: None,
         },
     )
     .await

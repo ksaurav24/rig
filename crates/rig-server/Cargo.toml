@@ -48,6 +48,7 @@ utoipa = "6.0.0"
 utoipa-axum = "0.3.0"
 utoipa-scalar = { version = "0.4.0", features = ["axum"] }
 uuid = { version = "1.29.2", features = ["v7"] }
+zstd = "0.13"
 
 [build-dependencies]
 brotli = "9.1.2"

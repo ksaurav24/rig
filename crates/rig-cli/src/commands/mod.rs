@@ -1,5 +1,6 @@
 //! Top-level CLI subcommand definitions and dispatch.
 
+pub mod adopt;
 pub mod alerts;
 pub mod apps;
 pub mod audit;
@@ -22,6 +23,7 @@ pub mod open;
 pub mod projects;
 pub mod status;
 pub mod tokens;
+pub mod up;
 pub mod webhook;
 
 use clap::Subcommand;
@@ -46,6 +48,10 @@ pub enum Command {
     Apps(apps::AppsArgs),
     /// Deploy an app and follow the build log.
     Deploy(deploy::DeployArgs),
+    /// Deploy a local directory or pre-compiled Linux binary directly without Git.
+    Up(up::UpArgs),
+    /// Discover and adopt running Docker/Podman containers into Rig with zero downtime.
+    Adopt(adopt::AdoptArgs),
     /// Start a stopped app.
     Start(deploy::StartArgs),
     /// Restart an app with zero-downtime swap.

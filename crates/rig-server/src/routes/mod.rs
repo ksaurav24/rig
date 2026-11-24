@@ -1,4 +1,5 @@
 pub mod account;
+mod adopt;
 mod alerts;
 pub mod apps;
 pub mod auth;
@@ -11,6 +12,7 @@ mod org;
 mod projects;
 pub mod system;
 mod terminal;
+mod uploads;
 
 use std::net::SocketAddr;
 
@@ -96,6 +98,8 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(hooks::router())
         .merge(github::router())
         .merge(alerts::router())
+        .merge(uploads::json_router())
+        .merge(adopt::router())
 }
 
 /// The OpenAPI document, without building a server. Used by `rig-server openapi`.
@@ -150,6 +154,8 @@ pub fn app(state: AppState) -> Router {
     }
     router
         .fallback(crate::dashboard::serve)
+        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
+        .merge(uploads::streaming_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::access::guard,
@@ -159,7 +165,6 @@ pub fn app(state: AppState) -> Router {
             hsts_middleware,
         ))
         .with_state(state)
-        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),

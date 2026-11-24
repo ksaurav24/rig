@@ -25,7 +25,8 @@ use tokio_util::io::ReaderStream;
 
 use super::{
     BuildSpec, ByteReader, ByteWriter, ContainerSpec, ContainerState, EngineInfo, ExecOutcome,
-    Health, LogMsg, LogSink, LogStream, PlanSpec, Runtime, Shell, Started, Usage,
+    Health, InspectedContainer, InspectedMount, InspectedPort, LogMsg, LogSink, LogStream,
+    PlanSpec, Runtime, Shell, Started, Usage,
 };
 
 /// BuildKit used for plan builds on Podman, which has no BuildKit of its own.
@@ -460,7 +461,7 @@ impl Runtime for DockerRuntime {
             binds: (!spec.volumes.is_empty()).then(|| {
                 spec.volumes
                     .iter()
-                    .map(|(v, path)| format!("{v}:{path}"))
+                    .map(|v| v.bind_spec())
                     .collect()
             }),
             // Loopback only: the proxy is the single public entry point.
@@ -491,6 +492,7 @@ impl Runtime for DockerRuntime {
             labels: Some(spec.labels.clone()),
             exposed_ports: Some(vec![port_key.clone()]),
             cmd: spec.command.clone(),
+            entrypoint: spec.entrypoint.clone(),
             networking_config: spec.network.as_ref().map(|network| NetworkingConfig {
                 endpoints_config: Some(HashMap::from([(
                     network.clone(),
@@ -536,6 +538,14 @@ impl Runtime for DockerRuntime {
                 let _ = self.remove(&id).await;
                 last_err = Some(anyhow!(e).context(format!("starting container {}", spec.name)));
                 continue;
+            }
+            for net in &spec.extra_networks {
+                if spec.network.as_deref() == Some(net.as_str()) {
+                    continue;
+                }
+                if let Err(e) = self.connect_network(&id, net).await {
+                    tracing::warn!(container = %id, network = %net, error = %e, "could not attach extra network");
+                }
             }
             let host_port = match self.host_port(&id, &port_key).await {
                 Ok(p) => p,
@@ -843,6 +853,257 @@ impl Runtime for DockerRuntime {
             exit_code: inspected.exit_code,
             stderr: String::from_utf8_lossy(&stderr[start..]).trim().to_owned(),
         })
+    }
+
+    async fn load_image(&self, archive_path: &Path, log: &LogSink) -> Result<()> {
+        log.line("build", "Loading image into container engine").await;
+        let file = tokio::fs::File::open(archive_path)
+            .await
+            .with_context(|| format!("opening image archive {}", archive_path.display()))?;
+        let stream = ReaderStream::with_capacity(file, 64 * 1024);
+        let mut load = self.long.import_image_stream(
+            bollard::query_parameters::ImportImageOptions::default(),
+            stream,
+            None,
+        );
+        while let Some(item) = load.next().await {
+            let info = item.context("loading image archive")?;
+            if let Some(detail) = info.error_detail {
+                bail!(
+                    "loading image failed: {}",
+                    detail.message.unwrap_or_default()
+                );
+            }
+            if let Some(text) = info.stream {
+                log.line("build", text).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn list_external_containers(&self) -> Result<Vec<InspectedContainer>> {
+        let opts = ListContainersOptionsBuilder::default().all(true).build();
+        let list = self
+            .api
+            .list_containers(Some(opts))
+            .await
+            .context("listing containers from engine")?;
+        let mut out = Vec::new();
+        for summary in list {
+            let Some(id) = summary.id else { continue };
+            let labels = summary.labels.unwrap_or_default();
+            if labels.get("rig.managed").map(String::as_str) == Some("true") {
+                continue;
+            }
+            if let Some(inspected) = self.inspect_container_full(&id).await? {
+                out.push(inspected);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn inspect_container_full(&self, id: &str) -> Result<Option<InspectedContainer>> {
+        let c = match self.api.inspect_container(id, None).await {
+            Ok(c) => c,
+            Err(e) if is_not_found(&e) => return Ok(None),
+            Err(e) => return Err(anyhow!(e).context("inspecting container")),
+        };
+        let config = c.config.as_ref();
+        let host = c.host_config.as_ref();
+        let image = config
+            .and_then(|cfg| cfg.image.clone())
+            .or_else(|| c.image.clone())
+            .unwrap_or_default();
+        let image_id = c.image.clone();
+        let image_digest = if !image.is_empty() {
+            match self.api.inspect_image(&image).await {
+                Ok(img) => img.repo_digests.and_then(|mut d| {
+                    if d.is_empty() {
+                        None
+                    } else {
+                        Some(d.remove(0))
+                    }
+                }),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let name = c
+            .name
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_string();
+        let state = c
+            .state
+            .and_then(|s| s.status)
+            .map(|s| s.to_string().to_ascii_lowercase())
+            .unwrap_or_else(|| "unknown".into());
+        let labels = config.and_then(|cfg| cfg.labels.clone()).unwrap_or_default();
+        let env = config
+            .and_then(|cfg| cfg.env.as_ref())
+            .map(|vars| {
+                vars.iter()
+                    .filter_map(|line| {
+                        let (k, v) = line.split_once('=')?;
+                        Some((k.to_string(), v.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut ports = Vec::new();
+        let mut seen_ports = std::collections::HashSet::new();
+        if let Some(port_map) = c.network_settings.as_ref().and_then(|n| n.ports.as_ref()) {
+            for (key, bindings) in port_map {
+                let (port_str, proto) = key.split_once('/').unwrap_or((key, "tcp"));
+                let Ok(container_port) = port_str.parse::<u16>() else {
+                    continue;
+                };
+                match bindings {
+                    Some(list) if !list.is_empty() => {
+                        for b in list {
+                            let host_port = b
+                                .host_port
+                                .as_deref()
+                                .and_then(|p| p.parse::<u16>().ok())
+                                .filter(|p| *p != 0);
+                            seen_ports.insert((container_port, proto.to_string()));
+                            ports.push(InspectedPort {
+                                container_port,
+                                protocol: proto.to_string(),
+                                host_ip: b.host_ip.clone().filter(|ip| !ip.is_empty()),
+                                host_port,
+                            });
+                        }
+                    }
+                    _ => {
+                        seen_ports.insert((container_port, proto.to_string()));
+                        ports.push(InspectedPort {
+                            container_port,
+                            protocol: proto.to_string(),
+                            host_ip: None,
+                            host_port: None,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(exposed) = config.and_then(|cfg| cfg.exposed_ports.as_ref()) {
+            for key in exposed {
+                let (port_str, proto) = key.split_once('/').unwrap_or((key, "tcp"));
+                if let Ok(container_port) = port_str.parse::<u16>()
+                    && !seen_ports.contains(&(container_port, proto.to_string()))
+                {
+                    ports.push(InspectedPort {
+                        container_port,
+                        protocol: proto.to_string(),
+                        host_ip: None,
+                        host_port: None,
+                    });
+                }
+            }
+        }
+        ports.sort_by_key(|p| (p.host_port.is_none(), p.container_port));
+
+        let mounts = c
+            .mounts
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| {
+                let destination = m.destination?;
+                let kind = match m.typ.as_deref() {
+                    Some("bind") => "bind",
+                    Some("volume") => "volume",
+                    _ => return None,
+                };
+                let source = if kind == "volume" {
+                    m.name.or(m.source)?
+                } else {
+                    m.source?
+                };
+                Some(InspectedMount {
+                    kind: kind.to_string(),
+                    source,
+                    destination,
+                    read_only: !m.rw.unwrap_or(true),
+                })
+            })
+            .collect();
+
+        let mut networks: Vec<String> = c
+            .network_settings
+            .as_ref()
+            .and_then(|n| n.networks.as_ref())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        networks.sort();
+
+        let restart_policy = host
+            .and_then(|h| h.restart_policy.as_ref())
+            .and_then(|r| r.name.as_ref())
+            .map(|n| n.to_string().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+
+        let memory_mb = host
+            .and_then(|h| h.memory)
+            .filter(|&m| m > 0)
+            .and_then(|m| u32::try_from(m / (1024 * 1024)).ok())
+            .filter(|&mb| mb > 0);
+
+        let cpu_millis = host
+            .and_then(|h| h.nano_cpus)
+            .filter(|&n| n > 0)
+            .and_then(|n| u32::try_from(n / 1_000_000).ok())
+            .or_else(|| {
+                let quota = host?.cpu_quota.filter(|&q| q > 0)?;
+                let period = host?.cpu_period.filter(|&p| p > 0).unwrap_or(100_000);
+                u32::try_from((quota * 1000) / period).ok()
+            })
+            .filter(|&m| m > 0);
+
+        let command = config
+            .and_then(|cfg| cfg.cmd.clone())
+            .filter(|v| !v.is_empty());
+        let entrypoint = config
+            .and_then(|cfg| cfg.entrypoint.clone())
+            .filter(|v| !v.is_empty());
+
+        Ok(Some(InspectedContainer {
+            id: c.id.unwrap_or_else(|| id.to_string()),
+            name,
+            state,
+            image,
+            image_digest,
+            image_id,
+            labels,
+            env,
+            ports,
+            mounts,
+            networks,
+            restart_policy,
+            memory_mb,
+            cpu_millis,
+            command,
+            entrypoint,
+            created_at: c.created,
+        }))
+    }
+
+    async fn connect_network(&self, container_id: &str, network: &str) -> Result<()> {
+        if matches!(network, "bridge" | "host" | "none" | "default" | "podman") {
+            return Ok(());
+        }
+        let req = bollard::models::NetworkConnectRequest {
+            container: container_id.to_string(),
+            endpoint_config: None,
+        };
+        match self.api.connect_network(network, req).await {
+            Ok(()) => Ok(()),
+            // Ignore already-connected / not-found errors gracefully.
+            Err(e) if is_status(&e, 403) || is_status(&e, 404) || is_status(&e, 409) => Ok(()),
+            Err(e) => Err(anyhow!(e).context(format!("attaching container to network {network}"))),
+        }
     }
 
     async fn resize_shell(&self, shell_id: &str, cols: u16, rows: u16) -> Result<()> {

@@ -22,6 +22,36 @@ pub struct RigLink {
     /// Optional server URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// Optional prebuilt image reference (written by `rig adopt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Optional container port for `rig up`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Optional Dockerfile/Containerfile relative path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dockerfile: Option<String>,
+    /// Optional HTTP health check path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_path: Option<String>,
+    /// Optional memory limit in MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+    /// Optional CPU limit in millicores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_millis: Option<u32>,
+    /// Optional default binary path for direct binary `rig up`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+    /// Optional default remote-build toggle for `rig up`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_build: Option<bool>,
+    /// Optional volumes recorded in `rig.toml`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<String>,
+    /// Optional domains recorded in `rig.toml`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
 }
 
 impl RigLink {
@@ -50,10 +80,9 @@ pub fn find_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Loads the nearest `rig.toml` walking upward from the current working directory.
-pub fn discover() -> CliResult<Option<(PathBuf, RigLink)>> {
-    let cwd = std::env::current_dir()?;
-    let Some(path) = find_from(&cwd) else {
+/// Loads the nearest `rig.toml` walking upward from `start`.
+pub fn discover_from(start: &Path) -> CliResult<Option<(PathBuf, RigLink)>> {
+    let Some(path) = find_from(start) else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(&path)
@@ -67,6 +96,12 @@ pub fn discover() -> CliResult<Option<(PathBuf, RigLink)>> {
         )));
     }
     Ok(Some((path, link)))
+}
+
+/// Loads the nearest `rig.toml` walking upward from the current working directory.
+pub fn discover() -> CliResult<Option<(PathBuf, RigLink)>> {
+    let cwd = std::env::current_dir()?;
+    discover_from(&cwd)
 }
 
 /// Saves `link` to `dir/rig.toml`.
@@ -92,6 +127,7 @@ mod tests {
             project: Some("Alpha".into()),
             context: Some("prod".into()),
             server: None,
+            ..Default::default()
         };
         let written = save(dir.path(), &link).unwrap();
         assert_eq!(find_from(&nested).as_deref(), Some(written.as_path()));

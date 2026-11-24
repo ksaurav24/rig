@@ -1,9 +1,9 @@
 ---
 title: MCP Tools Reference
-description: Complete schema reference, parameter constraints, annotations, and return payloads for all 28 Rig MCP tools.
+description: Complete schema reference, parameter constraints, annotations, and return payloads for all 32 Rig MCP tools.
 ---
 
-`rig mcp` exposes **28 tools** (`crates/rig-cli/src/mcp/tools.rs`). Every tool enforces strict input validation (`additionalProperties: false`) and returns both human-readable JSON text in `content` and machine-parsed data in `structuredContent`.
+`rig mcp` exposes **32 tools** (`crates/rig-cli/src/mcp/tools.rs`). Every tool enforces strict input validation (`additionalProperties: false`) and returns both human-readable JSON text in `content` and machine-parsed data in `structuredContent`.
 
 ## Tool summary matrix
 
@@ -37,6 +37,10 @@ description: Complete schema reference, parameter constraints, annotations, and 
 | [`create_backup`](#create_backup) | Backups | <RoleBadge role="Admin" /> | `false` | `false` | Start a new native backup dump of a running managed database. |
 | [`restore_backup`](#restore_backup) | Backups | <RoleBadge role="Admin" /> | `false` | `true` | Restore a backup dump into its database, replacing current data. |
 | [`delete_backup`](#delete_backup) | Backups | <RoleBadge role="Admin" /> | `false` | `true` | Delete a backup and its dump file from the server. |
+| [`deploy_local`](#deploy_local) | Local Deploys | <RoleBadge role="Developer" /> | `false` | `false` | Deploy a local directory or Linux ELF binary without Git (`rig up`). |
+| [`discover_containers`](#discover_containers) | Adoption | <RoleBadge role="Admin" /> | `true` | `false` | Inspect unmanaged Docker/Podman containers eligible for adoption (secrets masked). |
+| [`preview_adopt`](#preview_adopt) | Adoption | <RoleBadge role="Admin" /> | `true` | `false` | Dry-run adoption preview returning `rig.toml`, Podman Quadlets, mounts, domains, and warnings. |
+| [`adopt_container`](#adopt_container) | Adoption | <RoleBadge role="Admin" /> | `false` | `true` | Execute safe container adoption with preserved mounts, vault secrets, and automatic rollback. |
 
 ---
 
@@ -252,3 +256,61 @@ Lists all managed databases (`Database[]`). Takes no arguments (`{}`).
 | `create_backup` | `database` | `string` | Yes | Database name, `project/db`, or UUID to dump (<RoleBadge role="Admin" />). |
 | `restore_backup` | `backup_id` | `string` | Yes | Backup UUID from `list_backups` or `create_backup` to restore in place (<RoleBadge role="Admin" />). |
 | `delete_backup` | `backup_id` | `string` | Yes | Backup UUID from `list_backups` to delete (<RoleBadge role="Admin" />). |
+
+---
+
+## Local Deploys & Container Adoption
+
+### `deploy_local`
+
+Deploys a local project directory or pre-compiled Linux ELF binary without Git (`rig up`). Respects `.gitignore` and `.dockerignore`, deduplicates unchanged files/layers against the server blob cache, streams `zstd`-compressed deltas, and triggers a zero-downtime swap. Log lines are returned inside the `untrusted_log_output` envelope.
+
+| Parameter | Type | Required | Constraints / Default | Description |
+| --- | --- | :---: | --- | --- |
+| `path` | `string` | No | Current working directory | Local project directory or Linux ELF binary path. |
+| `binary` | `string` | No | Auto-detected if `path` is a file | Explicit path to a pre-compiled Linux ELF binary (zero-Dockerfile scratch/distroless wrap). |
+| `app` | `string` | No | Linked `rig.toml` or folder/binary name | Target app name, `project/app`, or UUID. |
+| `project` | `string` | No | Sole project or `rig.toml` | Project name or ID when creating a new local app. |
+| `node` | `string` | No | Active context | Optional Rig server context name or URL (`--node`). |
+| `remote_build` | `boolean` | No | `false` | Stream a minimal `zstd` delta tarball and build remotely on the server. |
+| `port` | `integer` | No | `1..=65535` | Optional container port override. |
+| `dockerfile` | `string` | No | `Dockerfile` / `Containerfile` | Optional relative Dockerfile/Containerfile path. |
+| `health_path` | `string` | No | — | Optional HTTP health check path (for example `/health`). |
+| `base_image` | `string` | No | `scratch` / `distroless` | Optional base image override for direct binary deploys. |
+| `wait` | `boolean` | No | `true` | Wait for the deployment to finish and return logs + upload dedup stats (`mode`, `uploaded_assets`, `cached_assets`, `uploaded_bytes_compressed`). |
+
+### `discover_containers`
+
+Inspects unmanaged Docker/Podman containers, Compose stacks, Coolify, and Dokploy workloads on the target server (<RoleBadge role="Admin" /> required, `readOnlyHint: true`). Suspected secret environment variable values are always masked (`preview_value: null`).
+
+| Parameter | Type | Required | Description |
+| --- | --- | :---: | --- |
+| `node` | `string` | No | Optional Rig server context name or URL (`--node`). |
+
+### `preview_adopt`
+
+Generates a read-only dry-run adoption preview without modifying anything on disk, in SQLite, or in the container engine (<RoleBadge role="Admin" /> required, `readOnlyHint: true`). Returns `rig_toml`, `quadlet_container`, `quadlet_network`, preserved `mounts`, detected `domains`, `env_keys` secret classifications, `cutover_strategy`, and `warnings`.
+
+| Parameter | Type | Required | Constraints / Default | Description |
+| --- | --- | :---: | --- | --- |
+| `container_id` | `string` | Yes | — | Container ID or name from `discover_containers`. |
+| `project` | `string` | No | — | Optional target Rig project name, slug, or ID. |
+| `app_name` | `string` | No | Container/service name | Optional override for the adopted Rig app name. |
+| `port` | `integer` | No | `1..=65535` | Optional container port override. |
+| `health_path` | `string` | No | — | Optional HTTP health check path. |
+| `node` | `string` | No | Active context | Optional Rig server context name or URL (`--node`). |
+
+### `adopt_container`
+
+Executes safe adoption of an external container into Rig with preserved bind/volume mounts, vault-encrypted secrets, health-checked Caddy cutover, and automatic rollback to the old container if health checks fail (<RoleBadge role="Admin" /> required, `destructiveHint: true`).
+
+| Parameter | Type | Required | Constraints / Default | Description |
+| --- | --- | :---: | --- | --- |
+| `container_id` | `string` | Yes | — | Container ID or name from `discover_containers`. |
+| `project` | `string` | Yes | — | Target Rig project name, slug, or ID. |
+| `app_name` | `string` | No | Container/service name | Optional override for the adopted Rig app name. |
+| `port` | `integer` | No | `1..=65535` | Optional container port override. |
+| `health_path` | `string` | No | — | Optional HTTP health check path. |
+| `stop_old` | `boolean` | No | `true` | Gracefully stop the old container after healthy cutover. |
+| `remove_old` | `boolean` | No | `false` | Permanently remove the old container after stopping it. |
+| `node` | `string` | No | Active context | Optional Rig server context name or URL (`--node`). |

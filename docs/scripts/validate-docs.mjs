@@ -61,6 +61,8 @@ const expectedCliCommands = [
   'rig projects',
   'rig apps',
   'rig deploy',
+  'rig up',
+  'rig adopt',
   'rig start',
   'rig restart',
   'rig rollback',

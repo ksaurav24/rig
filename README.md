@@ -23,6 +23,11 @@ Then open the printed HTTPS address and enter the one-time setup token. The full
 (CLI flags, HTTPS, password reset, first deploy, workspace branding, backups, upgrades) is in
 [docs/deploy-on-a-server.md](docs/deploy-on-a-server.md).
 
+## Local deploys & adopting existing containers
+
+- **Deploy without Git (`rig up`):** Deploy a local project directory or a pre-compiled Linux ELF binary straight from your laptop with zero Git push required. Respects `.gitignore` and `.dockerignore`, deduplicates unchanged files and OCI layers via a content-addressed blob cache, streams `zstd`-compressed deltas over Rig's API, wraps static/dynamic binaries automatically into `scratch`/`distroless` OCI images, and performs a health-checked zero-downtime swap.
+- **One-click adopt (`rig adopt`):** Discover running Docker/Podman containers, Docker Compose stacks, or Coolify/Dokploy workloads, preview the generated `rig.toml` and Podman Quadlet (`.container` / `.network`) units before touching anything, encrypt detected secrets into Rig's vault, preserve exact host bind mounts and volumes in-place, and hand off traffic with automatic rollback on health-check failure.
+
 ## Dashboard & customization
 
 - **Organization branding (`Settings → General`):** Set your organization name, upload a custom logo (PNG, JPEG, WebP, or GIF) or paste an HTTPS image link, choose a workspace brand accent color, and optionally add an environment badge (e.g. `Production`, `Staging`, `Homelab`). Branding automatically applies to the sidebar, browser tab title, favicon, and split-screen sign-in page.

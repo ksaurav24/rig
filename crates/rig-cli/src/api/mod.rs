@@ -12,13 +12,16 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use reqwest::{Method, Response, StatusCode, header};
 use rig_api::{
-    AddDomainRequest, AddMemberRequest, AlertChannel, AlertTestResult, ApiToken, App, AppWebhook,
-    AuditEntry, Backup, BulkSetEnvRequest, CreateAlertChannelRequest, CreateApiTokenRequest,
-    CreateAppRequest, CreateDatabaseRequest, CreateProjectRequest, CreatedAlertChannel,
-    CreatedApiToken, Database, DatabaseCredentials, DatabaseEngineInfo, Deployment, Domain, EnvVar,
-    ErrorBody, GithubBranch, GithubRepo, GithubStatus, Me, Member, MemberWithPassword, MetricRange,
-    MetricSeries, Project, RevealedEnvVar, SetEnvVarRequest, SystemInfo, UpdateAlertChannelRequest,
-    UpdateAppRequest, UpdateMemberRequest, UpdateProjectRequest,
+    AddDomainRequest, AddMemberRequest, AdoptExecuteRequest, AdoptExecuteResult, AdoptPreview,
+    AdoptPreviewRequest, AlertChannel, AlertTestResult, ApiToken, App, AppWebhook, AuditEntry,
+    Backup, BinaryDeployRequest, BulkSetEnvRequest, CheckBlobsRequest, CheckBlobsResponse,
+    CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest, CreateDatabaseRequest,
+    CreateProjectRequest, CreatedAlertChannel, CreatedApiToken, Database, DatabaseCredentials,
+    DatabaseEngineInfo, Deployment, DiscoveredContainer, Domain, EnvVar, ErrorBody, GithubBranch,
+    GithubRepo, GithubStatus, LocalImageDeployRequest, LocalSourceDeployRequest, Me, Member,
+    MemberWithPassword, MetricRange, MetricSeries, Project, RevealedEnvVar, SetEnvVarRequest,
+    StoredBlob, StoredBlobBatch, SystemInfo, UpdateAlertChannelRequest, UpdateAppRequest,
+    UpdateMemberRequest, UpdateProjectRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -224,6 +227,177 @@ impl Client {
         self.send(Method::DELETE, path, None::<&()>, false, None)
             .await
             .map(drop)
+    }
+
+    async fn send_bytes<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> CliResult<T> {
+        let started = Instant::now();
+        let url = format!("{}{path}", self.base);
+        let res = self
+            .http
+            .request(method.clone(), &url)
+            .bearer_auth(&self.token)
+            .header(header::CONTENT_TYPE, content_type)
+            .timeout(timeout)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| {
+                let is_net = e.is_connect() || e.is_timeout();
+                let clean = e.without_url();
+                if is_net {
+                    CliError::network(format!(
+                        "could not reach {} while uploading: {clean}",
+                        self.base
+                    ))
+                } else {
+                    CliError::from(clean)
+                }
+            })?;
+        if self.verbose {
+            eprintln!(
+                "rig: debug: {} {} -> {} ({}ms)",
+                method,
+                path,
+                res.status().as_u16(),
+                started.elapsed().as_millis()
+            );
+        }
+        if let Some(ver) = res
+            .headers()
+            .get("x-rig-version")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.check_version_skew(ver);
+        }
+        if res.status().is_success() {
+            return decode(res).await;
+        }
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        let message = match serde_json::from_str::<ErrorBody>(&text) {
+            Ok(body) => body.error.message,
+            Err(_) => format!("the server answered {status}"),
+        };
+        Err(match status {
+            StatusCode::UNAUTHORIZED => CliError::auth(format!(
+                "{message}. The token may be expired or deleted. Sign in again with: rig login {}",
+                self.base
+            )),
+            StatusCode::FORBIDDEN => CliError::auth(message),
+            StatusCode::NOT_FOUND => CliError::not_found(message),
+            StatusCode::CONFLICT => CliError::conflict(message),
+            _ => CliError::message(message),
+        })
+    }
+
+    // --------------------------------------------------------- local uploads
+
+    pub async fn check_blobs(&self, hashes: &[String]) -> CliResult<CheckBlobsResponse> {
+        self.post(
+            "/api/v1/uploads/blobs/check",
+            Some(&CheckBlobsRequest {
+                hashes: hashes.to_vec(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn upload_blob_zstd(&self, sha256: &str, zstd_bytes: Vec<u8>) -> CliResult<StoredBlob> {
+        self.send_bytes(
+            Method::PUT,
+            &format!("/api/v1/uploads/blobs/{}", segment(sha256)),
+            "application/zstd",
+            zstd_bytes,
+            Duration::from_secs(600),
+        )
+        .await
+    }
+
+    pub async fn upload_blob_batch_zstd(
+        &self,
+        zstd_tar_bytes: Vec<u8>,
+    ) -> CliResult<StoredBlobBatch> {
+        self.send_bytes(
+            Method::POST,
+            "/api/v1/uploads/blobs/batch",
+            "application/zstd",
+            zstd_tar_bytes,
+            Duration::from_secs(600),
+        )
+        .await
+    }
+
+    pub async fn deploy_local_image(
+        &self,
+        app_id: &str,
+        req: &LocalImageDeployRequest,
+    ) -> CliResult<Deployment> {
+        let body = serde_json::to_vec(req)?;
+        self.send_bytes(
+            Method::POST,
+            &format!("/api/v1/apps/{}/deploy/local-image", segment(app_id)),
+            "application/json",
+            body,
+            Duration::from_secs(600),
+        )
+        .await
+    }
+
+    pub async fn deploy_local_source(
+        &self,
+        app_id: &str,
+        req: &LocalSourceDeployRequest,
+    ) -> CliResult<Deployment> {
+        self.post(
+            &format!("/api/v1/apps/{}/deploy/local-source", segment(app_id)),
+            Some(req),
+        )
+        .await
+    }
+
+    pub async fn deploy_binary(
+        &self,
+        app_id: &str,
+        req: &BinaryDeployRequest,
+    ) -> CliResult<Deployment> {
+        let body = serde_json::to_vec(req)?;
+        self.send_bytes(
+            Method::POST,
+            &format!("/api/v1/apps/{}/deploy/binary", segment(app_id)),
+            "application/json",
+            body,
+            Duration::from_secs(600),
+        )
+        .await
+    }
+
+    // ----------------------------------------------------------------- adopt
+
+    pub async fn list_adoptable_containers(&self) -> CliResult<Vec<DiscoveredContainer>> {
+        self.get("/api/v1/adopt/containers").await
+    }
+
+    pub async fn preview_adopt(&self, req: &AdoptPreviewRequest) -> CliResult<AdoptPreview> {
+        self.post("/api/v1/adopt/preview", Some(req)).await
+    }
+
+    pub async fn execute_adopt(&self, req: &AdoptExecuteRequest) -> CliResult<AdoptExecuteResult> {
+        let body = serde_json::to_vec(req)?;
+        self.send_bytes(
+            Method::POST,
+            "/api/v1/adopt/execute",
+            "application/json",
+            body,
+            Duration::from_secs(300),
+        )
+        .await
     }
 
     /// Streams a binary response into `dest` (or derives filename from `Content-Disposition`).

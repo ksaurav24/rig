@@ -1,9 +1,9 @@
 ---
 title: Deployments, Logs & Terminal
-description: Reference for rig deploy, rig start, rig restart, rig rollback, rig stop, rig deployments, rig logs, and rig exec.
+description: Reference for rig deploy, rig up, rig adopt, rig start, rig restart, rig rollback, rig stop, rig deployments, rig logs, and rig exec.
 ---
 
-Use these commands to build, deploy, roll back, inspect logs, and open interactive shells inside your running application containers.
+Use these commands to build, deploy (from Git, a local folder, or a pre-compiled binary), adopt existing containers, roll back, inspect logs, and open interactive shells inside your running application containers.
 
 ## Deploy an application (`rig deploy`)
 
@@ -29,6 +29,104 @@ rig deploy [app] [--no-follow] [--attach] [--wait-healthy] [--timeout <duration>
   Detached. Deployment 91caec40 continues on the server. Follow it with: rig deployments logs 019a1e2d-...
   ```
   To actually cancel a running build on the server, run `rig deployments cancel <id>`.
+
+## Local folder and binary deploys (`rig up`)
+
+Deploy a local project directory or a pre-compiled Linux ELF binary straight from your workstation to a Rig server without committing or pushing to Git:
+
+```sh
+rig up [path] \
+  [--node <vm>] \
+  [--app <app>] \
+  [--project <project>] \
+  [--binary <path>] \
+  [--remote-build] \
+  [--port <port>] \
+  [--dockerfile <path>] \
+  [--health-path <path>] \
+  [--base-image <image>] \
+  [--arg <arg>...] \
+  [--no-follow] [--wait-healthy] [--timeout <duration>]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `[path]` | `.` (current directory) | Project directory or pre-compiled Linux ELF binary path. Passing a regular file automatically enters Direct Binary Mode. |
+| `--node <vm>` | Active context / `rig.toml` | Target Rig server (saved context name or server URL). |
+| `--app <app>` | Linked `rig.toml` or folder/binary name | Target app name, `project/app`, or UUID. Auto-creates a `local` app on first run when unambiguous. |
+| `--project <project>` | Sole project or `rig.toml` | Project name, slug, or ID used when creating a new local app. |
+| `--binary <path>` | Auto-detected when `[path]` is a file | Force Direct Binary Mode for a pre-compiled Linux ELF executable (no Dockerfile required). |
+| `--remote-build` | `false` | Stream a minimal `zstd`-compressed delta tarball and build on the Rig server instead of building the OCI image locally. |
+| `--port <port>` | `rig.toml` or `8080` | Container port the app listens on. |
+| `--dockerfile <path>` | `Dockerfile` or `Containerfile` | Relative Dockerfile/Containerfile path inside the directory. |
+| `--health-path <path>` | `rig.toml` or TCP check | HTTP health check path (for example `/health`). |
+| `--base-image <image>` | `scratch` (static) / `distroless` (dynamic) | Base image override for Direct Binary Mode. |
+| `--arg <arg>` | None | Default command-line arguments passed to the binary (repeatable). |
+
+### Deploy modes and deduplication
+
+- **Source Mode (local build — default):** When a `Dockerfile` or `Containerfile` exists and local `podman` or `docker` is installed, `rig up` builds the OCI image locally (keeping server RAM free), checks the server's SHA-256 blob cache (`POST /api/v1/uploads/blobs/check`), streams only changed `zstd`-compressed layers, loads the image on the server, and runs a health-checked zero-downtime swap.
+- **Source Mode (remote delta build — `--remote-build` or fallback):** Walks the directory respecting `.gitignore` and `.dockerignore`, computes SHA-256 file hashes, uploads only changed files in one `zstd` delta tarball, and builds remotely via `Dockerfile`, `Containerfile`, or Railpack.
+- **Direct Binary Mode:** Validates ELF magic and `PT_INTERP` headers. Statically linked binaries (e.g. Rust `musl` or Go `CGO_ENABLED=0`) are wrapped directly in a pure-Rust `FROM scratch` OCI image with zero network pull; dynamically linked Linux ELF binaries are wrapped onto `gcr.io/distroless/cc-debian12:nonroot`.
+
+```sh
+# Build locally and push only changed zstd layers to your prod context
+rig up --node prod
+
+# Force a remote delta build on the server (respecting .gitignore and .dockerignore)
+rig up --node prod --remote-build
+
+# Deploy a statically linked Rust binary directly with zero Dockerfile
+cargo build --release --target x86_64-unknown-linux-musl
+rig up ./target/x86_64-unknown-linux-musl/release/api --node prod --port 8080 --health-path /health
+```
+
+## Adopt existing containers (`rig adopt`)
+
+Discover running Docker/Podman containers, Docker Compose stacks, or Coolify/Dokploy workloads on a Rig server and migrate them into Rig with zero downtime and automatic rollback (<RoleBadge role="Admin" /> required):
+
+```sh
+rig adopt [containers...] \
+  [--node <vm>] \
+  [--project <project>] \
+  [--app <name>] \
+  [--port <port>] \
+  [--health-path <path>] \
+  [--domain <host>...] \
+  [--secret <key>...] \
+  [--plain <key>...] \
+  [--dry-run] \
+  [--export-quadlets <dir>] \
+  [--write-rig-toml <dir>] \
+  [--keep-old | --remove-old]
+```
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `[containers...]` | Interactive multi-select | Container names, IDs, or Compose stack names to adopt. |
+| `--node <vm>` | Active context | Target Rig server (saved context name or server URL). |
+| `--project <project>` | Interactive select / sole project | Target Rig project to register adopted apps under. |
+| `--app <name>` | Service/container name | Override the created Rig app name (single container only). |
+| `--port <port>` | Auto-detected | Override detected container HTTP port (single container only). |
+| `--health-path <path>` | Auto-detected or TCP check | Override HTTP health check path. |
+| `--domain <host>` | Auto-extracted from Traefik/Caddy/`VIRTUAL_HOST` | Explicit domain hostname(s) to register (repeatable). |
+| `--secret <key>` / `--plain <key>` | Auto-classified | Override which environment variable keys are stored as vault secrets vs. plain text (repeatable). |
+| `--dry-run` | `false` | Print the full preview (`rig.toml`, Quadlet `.container` / `.network` files, mounts, domains, secrets, and warnings) without modifying anything. |
+| `--export-quadlets <dir>` | None | Write generated Podman Quadlet `.container` and `.network` unit files to `<dir>`. |
+| `--write-rig-toml <dir>` | None | Write generated `rig.toml` file(s) to `<dir>`. |
+| `--keep-old` | `false` | Leave the old container running alongside the adopted one after cutover. |
+| `--remove-old` | `false` | Permanently remove the old container after stopping it (by default Rig stops it cleanly and keeps it as a backup). |
+
+```sh
+# Inspect unmanaged containers interactively and preview before touching anything
+rig adopt --node prod --dry-run --export-quadlets ./quadlets
+
+# Adopt a Compose stack or single Coolify container with confirmed cutover
+rig adopt billing-api --node prod --project production
+```
+
+- **Zero data movement:** Host bind mounts and existing named volumes keep their exact paths/names (`owned = 0`), so deleting an adopted app in Rig never deletes user host data.
+- **Automatic rollback:** If the newly adopted container fails health checks, Rig deletes the failed container, automatically restarts the original container (if it was paused for writable mounts), and cleans up any database rows.
 
 ## Start, restart, and stop
 

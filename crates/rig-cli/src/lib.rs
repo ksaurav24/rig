@@ -105,9 +105,16 @@ pub async fn run(cli: Cli) -> CliResult<()> {
         command => {
             let config = Config::load()?;
             let env_token = std::env::var("RIG_TOKEN").ok();
+            let node_override = match &command {
+                Command::Up(a) => a.node.as_deref(),
+                Command::Adopt(a) => a.node.as_deref(),
+                _ => None,
+            };
+            let (resolved_context, resolved_server) =
+                resolve_node_override(&config, node_override, cli.context.as_deref(), cli.server.as_deref());
             let ctx = config.resolve_with(&ResolveOptions {
-                context: cli.context.as_deref(),
-                server: cli.server.as_deref(),
+                context: resolved_context,
+                server: resolved_server,
                 token: env_token.as_deref(),
                 insecure: cli.insecure,
             })?;
@@ -117,6 +124,8 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                 Command::Projects(args) => commands::projects::run(&api, args, out).await,
                 Command::Apps(args) => commands::apps::run(&api, args, out).await,
                 Command::Deploy(args) => commands::deploy::run_deploy(&api, args, out).await,
+                Command::Up(args) => commands::up::run(&api, args, out).await,
+                Command::Adopt(args) => commands::adopt::run(&api, args, out).await,
                 Command::Start(args) => commands::deploy::run_start(&api, args, out).await,
                 Command::Restart(args) => commands::deploy::run_restart(&api, args, out).await,
                 Command::Rollback(args) => commands::deploy::run_rollback(&api, args, out).await,
@@ -148,6 +157,26 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                 | Command::Mcp => unreachable!(),
             }
         }
+    }
+}
+
+/// Resolves `--node <vm>` as either a saved context name or a direct server URL.
+pub fn resolve_node_override<'a>(
+    config: &Config,
+    node: Option<&'a str>,
+    cli_context: Option<&'a str>,
+    cli_server: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let Some(n) = node.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (cli_context, cli_server);
+    };
+    if config.contexts.contains_key(n) {
+        (Some(n), None)
+    } else if n.contains("://") || n.contains('.') || n.contains(':') {
+        (None, Some(n))
+    } else {
+        // Treat unknown bare names as context names so Config::resolve reports a crisp context error.
+        (Some(n), None)
     }
 }
 

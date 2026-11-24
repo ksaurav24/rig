@@ -318,7 +318,7 @@ fn app_from_row(r: &sqlx::sqlite::SqliteRow) -> ApiResult<App> {
     })
 }
 
-async fn load_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<App> {
+pub(crate) async fn load_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<App> {
     let row = sqlx::query(app_select!("WHERE a.id = ? AND a.org_id = ?"))
         .bind(id)
         .bind(org_id)
@@ -329,7 +329,7 @@ async fn load_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<App> {
 }
 
 /// Fail with 404 unless the app belongs to the caller's organization.
-async fn require_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<()> {
+pub(crate) async fn require_app(state: &AppState, org_id: &str, id: &str) -> ApiResult<()> {
     let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM apps WHERE id = ? AND org_id = ?")
         .bind(id)
         .bind(org_id)
@@ -510,6 +510,12 @@ fn validate_source_with(
     match kind {
         SourceKind::Image => Ok(Source {
             image: Some(validate_image(image.unwrap_or_default())?),
+            git_url: None,
+            git_branch: None,
+            dockerfile_path: dockerfile_path.to_string(),
+        }),
+        SourceKind::Local => Ok(Source {
+            image: None,
             git_url: None,
             git_branch: None,
             dockerfile_path: dockerfile_path.to_string(),
@@ -860,13 +866,27 @@ async fn load_deployment(state: &AppState, org_id: &str, id: &str) -> ApiResult<
     deployment_from_row(&row)
 }
 
-async fn start_deployment<R: MinRole>(
+pub(crate) async fn start_deployment<R: MinRole>(
     state: &AppState,
     auth: &Auth<R>,
     app_id: &str,
     trigger: &str,
     image_ref: Option<&str>,
     image_id: Option<&str>,
+) -> ApiResult<Deployment> {
+    start_deployment_with(state, auth, app_id, trigger, image_ref, image_id, None, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_deployment_with<R: MinRole>(
+    state: &AppState,
+    auth: &Auth<R>,
+    app_id: &str,
+    trigger: &str,
+    image_ref: Option<&str>,
+    image_id: Option<&str>,
+    source_dir: Option<&str>,
+    commit_msg: Option<&str>,
 ) -> ApiResult<Deployment> {
     if deployment_in_progress(state, app_id).await? {
         return Err(ApiError::Conflict(
@@ -882,6 +902,8 @@ async fn start_deployment<R: MinRole>(
             created_by: Some(&auth.user_id),
             image_ref,
             image_id,
+            source_dir,
+            commit_msg,
         },
     )
     .await

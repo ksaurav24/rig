@@ -345,6 +345,8 @@ pub enum SourceKind {
     Image,
     /// A git repository built from its Dockerfile.
     Git,
+    /// Deployed directly from a local folder or binary via `rig up`.
+    Local,
 }
 
 impl SourceKind {
@@ -352,6 +354,7 @@ impl SourceKind {
         match self {
             SourceKind::Image => "image",
             SourceKind::Git => "git",
+            SourceKind::Local => "local",
         }
     }
 
@@ -359,6 +362,7 @@ impl SourceKind {
         Some(match s {
             "image" => SourceKind::Image,
             "git" => SourceKind::Git,
+            "local" => SourceKind::Local,
             _ => return None,
         })
     }
@@ -640,7 +644,7 @@ pub struct Domain {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct AddDomainRequest {
     pub host: String,
@@ -1157,4 +1161,302 @@ pub struct CreatedAlertChannel {
 pub struct AlertTestResult {
     pub ok: bool,
     pub error: Option<String>,
+}
+
+// --------------------------------------------------- local deploys (`rig up`)
+
+/// Check which content-addressed SHA-256 blobs are already cached on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct CheckBlobsRequest {
+    pub hashes: Vec<String>,
+}
+
+/// Result of checking the server's content-addressed blob cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct CheckBlobsResponse {
+    pub present: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+/// Summary of a stored content-addressed blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct StoredBlob {
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// Summary of a batch delta tarball upload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct StoredBlobBatch {
+    pub stored: usize,
+    pub bytes: u64,
+}
+
+/// One file in a local build context manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct ContextFileEntry {
+    /// Relative POSIX path inside the project directory (no leading `/` or `..`).
+    pub path: String,
+    /// Lowercase hex SHA-256 of the file's contents.
+    pub sha256: String,
+    /// Unix file mode bits (e.g. `0o644` or `0o755`).
+    pub mode: u32,
+    pub size: u64,
+}
+
+/// Deploy an app by materializing a local directory on the server and building it remotely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct LocalSourceDeployRequest {
+    pub files: Vec<ContextFileEntry>,
+    /// Optional Dockerfile/Containerfile path relative to the context root.
+    #[serde(default)]
+    pub dockerfile: Option<String>,
+    /// Optional short description recorded on the deployment (e.g. folder name).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// One entry in a locally built OCI/Docker image archive, backed by the server blob cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct ArchiveBlobEntry {
+    /// Tar entry path inside the saved image archive (e.g. `manifest.json`, `blobs/sha256/...`).
+    pub archive_path: String,
+    /// Lowercase hex SHA-256 of the entry bytes stored in the blob cache.
+    pub sha256: String,
+    /// Unix mode bits for the tar entry.
+    #[serde(default = "default_archive_mode")]
+    pub mode: u32,
+}
+
+fn default_archive_mode() -> u32 {
+    0o644
+}
+
+/// Deploy an app using an OCI/Docker image built locally on the developer's machine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct LocalImageDeployRequest {
+    /// Image reference / tag inside the saved archive (e.g. `rig/my-app:up-1a2b3c4d`).
+    pub image_ref: String,
+    /// Ordered entries that reconstruct the Docker/OCI image tarball from cached blobs.
+    pub entries: Vec<ArchiveBlobEntry>,
+    /// Optional label recorded on the deployment.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Deploy a pre-compiled Linux binary directly without a Dockerfile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct BinaryDeployRequest {
+    /// Lowercase hex SHA-256 of the uploaded ELF binary in the blob cache.
+    pub sha256: String,
+    /// Original filename of the binary (for display/audit).
+    pub filename: String,
+    /// Optional default command-line arguments passed to the binary.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional base image override (e.g. `gcr.io/distroless/cc-debian12:nonroot` or `debian:bookworm-slim`).
+    /// When omitted, static binaries use `scratch` and dynamically linked binaries use `gcr.io/distroless/cc-debian12:nonroot`.
+    #[serde(default)]
+    pub base_image: Option<String>,
+    /// Optional port override for the app container.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+// -------------------------------------------- adopt existing containers (`rig adopt`)
+
+/// A port binding discovered on an external container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DiscoveredPort {
+    pub container_port: u16,
+    pub protocol: String,
+    pub host_ip: Option<String>,
+    pub host_port: Option<u16>,
+}
+
+/// A bind mount or named volume discovered on an external container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DiscoveredMount {
+    /// `"bind"` (host path) or `"volume"` (engine named volume).
+    pub kind: String,
+    /// Exact host path (for `"bind"`) or volume name (for `"volume"`).
+    pub source: String,
+    /// Mount path inside the container.
+    pub destination: String,
+    pub read_only: bool,
+}
+
+/// An environment variable discovered on an external container.
+/// Suspected secrets never include their plaintext value in discovery responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DiscoveredEnvVar {
+    pub key: String,
+    /// Plaintext preview for non-secret values; always `None` when `is_secret_guess` is true.
+    pub preview_value: Option<String>,
+    pub is_secret_guess: bool,
+    pub secret_reason: Option<String>,
+}
+
+/// A reverse proxy domain rule extracted from container labels or environment variables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DiscoveredDomain {
+    pub host: String,
+    pub tls_mode: TlsMode,
+    /// Where the rule came from: `"traefik"`, `"caddy"`, or `"virtual_host"`.
+    pub source: String,
+    pub service_port: Option<u16>,
+}
+
+/// An unmanaged Docker/Podman container discovered on the server and eligible for adoption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DiscoveredContainer {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub image: String,
+    /// Exact immutable repo digest (`repo@sha256:...`), when available.
+    pub image_digest: Option<String>,
+    /// Local engine content ID (`sha256:...`).
+    pub image_id: Option<String>,
+    /// `"standalone"`, `"compose"`, `"coolify"`, or `"dokploy"`.
+    pub origin: String,
+    /// Compose project or Coolify/Dokploy stack name, when part of a stack.
+    pub stack: Option<String>,
+    /// Compose service name, when present.
+    pub service: Option<String>,
+    pub ports: Vec<DiscoveredPort>,
+    /// Best-guess primary HTTP container port.
+    pub detected_port: Option<u16>,
+    pub mounts: Vec<DiscoveredMount>,
+    pub networks: Vec<String>,
+    pub env: Vec<DiscoveredEnvVar>,
+    pub domains: Vec<DiscoveredDomain>,
+    pub restart_policy: Option<String>,
+    pub memory_mb: Option<u32>,
+    pub cpu_millis: Option<u32>,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
+    pub health_path: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Request a dry-run preview of adopting an external container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct AdoptPreviewRequest {
+    pub container_id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub health_path: Option<String>,
+    /// Optional explicit domains to attach instead of the auto-detected ones.
+    #[serde(default)]
+    pub domains: Option<Vec<AddDomainRequest>>,
+    /// Force these env keys to be encrypted as secrets in Rig's vault.
+    #[serde(default)]
+    pub secret_keys: Option<Vec<String>>,
+    /// Force these env keys to be stored as non-secret (still encrypted at rest, shown unmasked).
+    #[serde(default)]
+    pub plain_keys: Option<Vec<String>>,
+}
+
+/// One environment variable's planned vault classification during adoption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct AdoptEnvPreview {
+    pub key: String,
+    pub is_secret: bool,
+    pub secret_reason: Option<String>,
+}
+
+/// Dry-run preview of adopting an external container into Rig.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct AdoptPreview {
+    pub container: DiscoveredContainer,
+    pub app_name: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub image: String,
+    pub port: u16,
+    pub health_path: Option<String>,
+    pub memory_mb: Option<u32>,
+    pub cpu_millis: Option<u32>,
+    pub mounts: Vec<DiscoveredMount>,
+    pub domains: Vec<AddDomainRequest>,
+    pub env_keys: Vec<AdoptEnvPreview>,
+    /// Preview of the generated `rig.toml`.
+    pub rig_toml: String,
+    /// Preview of the generated Podman Quadlet `.container` unit.
+    pub quadlet_container: String,
+    /// Preview of the generated Podman Quadlet `.network` unit.
+    pub quadlet_network: String,
+    /// `"zero-downtime"` for stateless containers, `"stop-start-with-rollback"` when writable mounts exist.
+    pub cutover_strategy: String,
+    pub warnings: Vec<String>,
+}
+
+/// Execute adoption of an external container into Rig with safe cutover and automatic rollback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct AdoptExecuteRequest {
+    pub container_id: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub health_path: Option<String>,
+    #[serde(default)]
+    pub domains: Option<Vec<AddDomainRequest>>,
+    #[serde(default)]
+    pub secret_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub plain_keys: Option<Vec<String>>,
+    /// Stop the old container once the adopted container passes health checks and proxy cutover (default true).
+    #[serde(default = "default_true")]
+    pub stop_old: bool,
+    /// Also remove the old container after stopping it (default false: keeps it stopped as a safety net).
+    #[serde(default)]
+    pub remove_old: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Result of a completed container adoption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct AdoptExecuteResult {
+    pub app: App,
+    pub deployment: Deployment,
+    pub old_container_id: String,
+    pub old_container_stopped: bool,
+    pub old_container_removed: bool,
+    pub domains_registered: Vec<String>,
+    pub volumes_preserved: Vec<DiscoveredMount>,
+    pub secrets_encrypted: usize,
+    pub rig_toml: String,
+    pub quadlet_container: String,
+    pub quadlet_network: String,
 }

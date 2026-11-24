@@ -7,12 +7,13 @@ An **App** in Rig represents a containerized service running inside a project. Y
 
 ## Application sources
 
-Every application uses one of two `source_kind` values:
+Every application uses one of three `source_kind` values:
 
 | Source kind | Required field | How Rig builds and runs it |
 | --- | --- | --- |
-| **`image`** | `image` (for example `nginx:alpine` or `ghcr.io/org/app:v1.2.0`) | Rig pulls the image from the registry (`runtime.pull`), records the resolved image digest (`image_id`), and starts the container. |
-| **`git`** | `git_url` (`https://` or `ssh://` URL) | Rig validates the URL and resolved remote IP (blocking loopback/private hosts unless `--allow-private-git` is enabled), clones the target branch with redirects and symlinks disabled, rejects symlinks in the checkout, records the commit SHA and message, and builds an image tagged `rig-app-<slug>:<deployment_short_id>`. |
+| **`image`** | `image` (for example `nginx:alpine` or `ghcr.io/org/app:v1.2.0`) | Rig pulls the image from the registry (`runtime.pull`), records the resolved image digest (`image_id`), and starts the container. Also used for containers adopted via `rig adopt` (pinned to the running container's digest/`image_id`). |
+| **`git`** | `git_url` (`https://` or `ssh://` URL) | Rig validates the URL and resolved remote IP (blocking loopback/private hosts unless `--allow-private-git` is enabled), clones the target branch with redirects and symlinks disabled, rejects symlinks in the checkout, records the commit SHA and message, and builds an image tagged `rig/<slug>:<deployment_short_id>`. |
+| **`local`** | None (pushed via `rig up`) | Deployed directly from a developer's local folder or pre-compiled Linux ELF binary without Git. Uses Rig's content-addressed `zstd` blob cache so unchanged files, OCI layers, and binaries are never re-uploaded. |
 
 ### Dockerfile vs. Railpack builds
 
@@ -24,6 +25,22 @@ For `git` apps, Rig checks whether `dockerfile_path` (default `Dockerfile`) exis
    - Rig runs `railpack prepare` with a stripped environment (`PATH`, `HOME`, `NO_COLOR=1`) and a 120-second timeout to inspect the source code and emit `railpack-plan.json`.
    - BuildKit executes the plan using the digest-pinned frontend image `ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc`.
    - You can customize Railpack's auto-detection by placing a `railpack.json` file in your repository root.
+
+### Local folder & binary deploys (`rig up`)
+
+You can deploy directly from your workstation without committing or pushing to Git using [`rig up`](/docs/cli/deployments-and-logs/#local-folder-and-binary-deploys-rig-up) (or the `deploy_local` MCP tool):
+
+1. **Source Mode (local OCI build, default):** When a `Dockerfile` or `Containerfile` is present and local `podman` or `docker` is available, `rig up` builds the OCI image locally to save server RAM, checks the server's SHA-256 blob cache, streams only changed `zstd`-compressed layers, reassembles and loads the image into the server engine, and runs a zero-downtime swap.
+2. **Source Mode (remote delta build, `--remote-build` or fallback):** Walks the project directory respecting `.gitignore` and `.dockerignore`, streams only changed files in a single `zstd`-compressed delta tarball, materializes a symlink-checked build context on the server, and builds via `Dockerfile`, `Containerfile`, or Railpack.
+3. **Direct Binary Mode (`rig up ./path/to/binary` or `--binary`):** Validates Linux ELF headers, deduplicates and streams the binary `zstd`-compressed, and wraps it with zero Dockerfile required — using a pure-Rust `FROM scratch` OCI image for statically linked binaries (e.g. musl/Go) or `gcr.io/distroless/cc-debian12:nonroot` (configurable via `--base-image`) for dynamically linked binaries.
+
+### Adopting existing containers (`rig adopt`)
+
+To migrate unmanaged Docker/Podman containers, Docker Compose stacks, or Coolify/Dokploy workloads into Rig without downtime or manual rewriting, use [`rig adopt`](/docs/cli/deployments-and-logs/#adopt-existing-containers-rig-adopt):
+
+- **Inspection & secret protection:** Extracts exact image digests, environment variables (automatically flagging suspected secrets for XChaCha20-Poly1305 vault encryption while masking them in discovery responses), host bind mounts and named volumes, ports, networks, restart policies, resource limits, and Traefik/Caddy/`VIRTUAL_HOST` domain rules.
+- **In-place volume safety:** Preserved host bind mounts and pre-existing named volumes are recorded with `owned = 0`, so Rig mounts them at their exact paths without moving data and will never delete them if the adopted app is later removed.
+- **Dry-run previews & rollback:** Generates `rig.toml` and Podman Quadlet (`.container` / `.network`) unit previews before making any changes. During cutover, if the new container fails health checks, Rig automatically cleans it up and restores the original container.
 
 ## Resource limits and runtime defaults
 

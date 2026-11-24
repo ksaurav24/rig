@@ -6,3 +6,4 @@ pub mod deployments;
 pub mod env;
 pub mod projects;
 pub mod system;
+pub mod up;

@@ -13,6 +13,7 @@ In the CLI and web dashboard, users with the <RoleBadge role="Developer" /> role
 
 - Calling `list_env` returns variable names and metadata (`is_secret: true`, `updated_at`), with `value: null` for every secret.
 - Calling `list_databases` returns the database's internal hostname, port, username, and database name, without its password or connection URL.
+- Calling `discover_containers` masks suspected secret environment variables (`preview_value: null`) on unmanaged containers; during `adopt_container`, `rig-server` reads live env vars directly over the engine socket and encrypts them straight into `Vault` without ever returning plaintext secrets to the agent.
 - An AI agent can **create or rotate** a secret using `set_env` (which defaults to `secret: true`), but can never read existing secret values into the LLM context window.
 
 ## 2. Prompt-injection defense on container and build logs
@@ -53,6 +54,6 @@ Create dedicated scoped tokens in the dashboard under **Settings → API tokens*
 
 MCP clients such as Claude Code and Cursor inspect tool annotations to decide whether to ask for human confirmation before running a tool. `rig mcp` tags every tool with explicit hints:
 
-- **Read-only (`readOnlyHint: true`, `destructiveHint: false`):** `system_status`, `list_projects`, `list_apps`, `get_app`, `list_deployments`, `deployment_logs`, `app_logs`, `list_env`, `list_domains`, `get_metrics`, `list_databases`, `list_backups`.
-- **Additive / non-destructive writes (`readOnlyHint: false`, `destructiveHint: false`):** `deploy_app`, `start_app`, `restart_app`, `rollback_app`, `cancel_deployment`, `set_env`, `add_domain`, `create_database`, `start_database`, `create_backup`.
-- **Destructive writes (`readOnlyHint: false`, `destructiveHint: true`):** `stop_app`, `remove_domain`, `stop_database`, `delete_database`, `restore_backup`, `delete_backup`.
+- **Read-only (`readOnlyHint: true`, `destructiveHint: false`):** `system_status`, `list_projects`, `list_apps`, `get_app`, `list_deployments`, `deployment_logs`, `app_logs`, `list_env`, `list_domains`, `get_metrics`, `list_databases`, `list_backups`, `discover_containers`, `preview_adopt`.
+- **Additive / non-destructive writes (`readOnlyHint: false`, `destructiveHint: false`):** `deploy_app`, `deploy_local`, `start_app`, `restart_app`, `rollback_app`, `cancel_deployment`, `set_env`, `add_domain`, `create_database`, `start_database`, `create_backup`.
+- **Destructive writes (`readOnlyHint: false`, `destructiveHint: true`):** `stop_app`, `remove_domain`, `stop_database`, `delete_database`, `restore_backup`, `delete_backup`, `adopt_container`.

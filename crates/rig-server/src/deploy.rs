@@ -24,7 +24,9 @@ use tokio::{
 
 use crate::{
     proxy,
-    runtime::{BuildSpec, ContainerSpec, ContainerState, LogMsg, LogSink, PlanSpec, Started},
+    runtime::{
+        BuildSpec, ContainerSpec, ContainerState, LogMsg, LogSink, PlanSpec, Started, VolumeMount,
+    },
     state::{AppState, new_id, now},
 };
 
@@ -152,6 +154,10 @@ pub struct NewDeployment<'a> {
     pub image_ref: Option<&'a str>,
     /// With `image_ref`: the exact image to run, when the engine still has it.
     pub image_id: Option<&'a str>,
+    /// Optional staged local source directory for `rig up --remote-build`.
+    pub source_dir: Option<&'a str>,
+    /// Optional short label/message recorded on the deployment.
+    pub commit_msg: Option<&'a str>,
 }
 
 /// Queue a deployment and wake the worker. Returns the deployment id.
@@ -160,8 +166,8 @@ pub struct NewDeployment<'a> {
 pub async fn enqueue(state: &AppState, d: NewDeployment<'_>) -> Result<String, sqlx::Error> {
     let id = new_id();
     sqlx::query(
-        "INSERT INTO deployments (id, org_id, app_id, status, trigger, image_ref, image_id, created_by, created_at)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+        "INSERT INTO deployments (id, org_id, app_id, status, trigger, image_ref, image_id, source_dir, commit_msg, created_by, created_at)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(d.org_id)
@@ -169,6 +175,8 @@ pub async fn enqueue(state: &AppState, d: NewDeployment<'_>) -> Result<String, s
     .bind(d.trigger)
     .bind(d.image_ref)
     .bind(d.image_id)
+    .bind(d.source_dir)
+    .bind(d.commit_msg)
     .bind(d.created_by)
     .bind(now())
     .execute(&state.db)
@@ -349,19 +357,31 @@ struct AppRow {
     current_deployment_id: Option<String>,
     project_id: String,
     org_id: String,
+    command: Option<Vec<String>>,
+    entrypoint: Option<Vec<String>>,
+    extra_networks: Vec<String>,
 }
 
-/// An image fixed when the deployment was queued (a rollback).
+/// An image or staged source fixed when the deployment was queued.
 struct Preset {
     image_ref: Option<String>,
     image_id: Option<String>,
+    source_dir: Option<String>,
+}
+
+fn parse_json_vec(raw: Option<String>) -> Option<Vec<String>> {
+    let s = raw?;
+    serde_json::from_str::<Vec<String>>(&s)
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 async fn load_app(state: &AppState, deployment_id: &str) -> Result<(AppRow, Preset)> {
     let r = sqlx::query(
         "SELECT a.id, a.slug, a.source_kind, a.image, a.git_url, a.git_branch, a.dockerfile_path,
                 a.port, a.memory_mb, a.cpu_millis, a.health_path, a.current_deployment_id,
-                a.project_id, a.org_id, d.image_ref, d.image_id
+                a.project_id, a.org_id, a.command, a.entrypoint, a.extra_networks,
+                d.image_ref, d.image_id, d.source_dir
            FROM deployments d JOIN apps a ON a.id = d.app_id
           WHERE d.id = ?",
     )
@@ -388,10 +408,14 @@ async fn load_app(state: &AppState, deployment_id: &str) -> Result<(AppRow, Pres
         current_deployment_id: r.get("current_deployment_id"),
         project_id: r.get("project_id"),
         org_id: r.get("org_id"),
+        command: parse_json_vec(r.get("command")),
+        entrypoint: parse_json_vec(r.get("entrypoint")),
+        extra_networks: parse_json_vec(r.get("extra_networks")).unwrap_or_default(),
     };
     let preset = Preset {
         image_ref: r.get("image_ref"),
         image_id: r.get("image_id"),
+        source_dir: r.get("source_dir"),
     };
     Ok((app, preset))
 }
@@ -628,42 +652,65 @@ async fn pipeline(state: &AppState, deployment_id: &str, log: &LogSink) -> Resul
         Some(id) => state.runtime.image_id(id).await?,
         None => None,
     };
-    let image = match (preset.image_ref, app.source_kind.as_str()) {
-        (Some(image), _) if pinned.is_some() => {
-            log.line("build", format!("Reusing image {image}")).await;
-            image
-        }
-        (Some(image), "git") => {
-            log.line("build", format!("Reusing image {image}")).await;
-            image
-        }
-        (Some(image), _) => {
-            log.line("build", format!("Pulling {image}")).await;
-            state.runtime.pull(&image, log).await?;
-            image
-        }
-        (None, "git") => {
-            let _build_permit = match state.deploys.build_lock.try_acquire() {
-                Ok(p) => p,
-                Err(_) => {
-                    log.line("build", "Waiting for another build to finish").await;
-                    state
-                        .deploys
-                        .build_lock
-                        .acquire()
-                        .await
-                        .context("build queue closed")?
-                }
-            };
-            let tag = format!("rig/{}:{short}", app.slug);
-            build_from_git(state, deployment_id, &app, &tag, log).await?;
-            tag
-        }
-        (None, _) => {
-            let image = app.image.clone().context("the app has no image set")?;
-            log.line("build", format!("Pulling {image}")).await;
-            state.runtime.pull(&image, log).await?;
-            image
+    let image = if let Some(source_dir) = preset.source_dir.as_deref() {
+        let _build_permit = match state.deploys.build_lock.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                log.line("build", "Waiting for another build to finish").await;
+                state
+                    .deploys
+                    .build_lock
+                    .acquire()
+                    .await
+                    .context("build queue closed")?
+            }
+        };
+        let tag = format!("rig/{}:{short}", app.slug);
+        let res = build_from_local_dir(state, &app, Path::new(source_dir), &tag, log).await;
+        let _ = tokio::fs::remove_dir_all(source_dir).await;
+        res?;
+        tag
+    } else {
+        match (preset.image_ref, app.source_kind.as_str()) {
+            (Some(image), _) if pinned.is_some() => {
+                log.line("build", format!("Reusing image {image}")).await;
+                image
+            }
+            (Some(image), "git" | "local") => {
+                log.line("build", format!("Reusing image {image}")).await;
+                image
+            }
+            (Some(image), _) => {
+                log.line("build", format!("Pulling {image}")).await;
+                state.runtime.pull(&image, log).await?;
+                image
+            }
+            (None, "git") => {
+                let _build_permit = match state.deploys.build_lock.try_acquire() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        log.line("build", "Waiting for another build to finish").await;
+                        state
+                            .deploys
+                            .build_lock
+                            .acquire()
+                            .await
+                            .context("build queue closed")?
+                    }
+                };
+                let tag = format!("rig/{}:{short}", app.slug);
+                build_from_git(state, deployment_id, &app, &tag, log).await?;
+                tag
+            }
+            (None, "local") => {
+                bail!("local apps are deployed from your workstation with `rig up`");
+            }
+            (None, _) => {
+                let image = app.image.clone().context("the app has no image set")?;
+                log.line("build", format!("Pulling {image}")).await;
+                state.runtime.pull(&image, log).await?;
+                image
+            }
         }
     };
     let image_id = match pinned {
@@ -699,21 +746,24 @@ async fn pipeline(state: &AppState, deployment_id: &str, log: &LogSink) -> Resul
         // Small servers must survive one leaky app, so nothing runs unbounded.
         memory_mb: Some(app.memory_mb.unwrap_or(DEFAULT_APP_MEMORY_MB)),
         cpu_millis: app.cpu_millis,
-        command: None,
+        command: app.command.clone(),
+        entrypoint: app.entrypoint.clone(),
         // Shared with the project's databases, so apps reach them by name.
         network: Some(project_network(&app.project_id)),
         aliases: vec![app.slug.clone()],
+        extra_networks: app.extra_networks.clone(),
         volumes: volumes.clone(),
     };
 
-    // Two containers must never write one volume, so stateful apps stop the
-    // old container first and accept a few seconds of downtime.
+    // Two containers must never write one volume, so stateful apps with writable
+    // mounts stop the old container first and accept a few seconds of downtime.
+    let has_writable_volumes = volumes.iter().any(|v| !v.read_only);
     let mut paused = Vec::new();
-    if !volumes.is_empty() {
+    if has_writable_volumes {
         for id in state.runtime.list_by_label(LABEL_APP, &app.id).await? {
             log.line(
                 "deploy",
-                "Stopping the running container: this app has volumes",
+                "Stopping the running container: this app has writable volumes",
             )
             .await;
             state.runtime.stop(&id, STOP_GRACE_SECS).await?;
@@ -870,19 +920,34 @@ async fn cleanup_aborted_deployment(state: &AppState, deployment_id: &str, log: 
     }
 }
 
-/// `(engine volume name, mount path)` pairs for an app.
-async fn app_volumes(state: &AppState, app_id: &str) -> Result<Vec<(String, String)>> {
-    Ok(sqlx::query_as(
-        "SELECT name, mount_path FROM app_volumes WHERE app_id = ? ORDER BY mount_path",
+/// Volume/bind mounts attached to an app.
+async fn app_volumes(state: &AppState, app_id: &str) -> Result<Vec<VolumeMount>> {
+    let rows = sqlx::query(
+        "SELECT name, mount_path, read_only FROM app_volumes WHERE app_id = ? ORDER BY mount_path",
     )
     .bind(app_id)
     .fetch_all(&state.db)
-    .await?)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| VolumeMount {
+            source: r.get("name"),
+            target: r.get("mount_path"),
+            read_only: r.get::<i64, _>("read_only") != 0,
+        })
+        .collect())
 }
 
-/// Delete an app's volumes. Call after its containers are gone.
+/// Delete an app's Rig-owned named volumes. Preserves adopted host bind mounts
+/// and pre-existing external volumes (`owned = 0` or `kind = 'bind'`).
 pub async fn remove_app_volumes(state: &AppState, app_id: &str) -> Result<()> {
-    for (name, _) in app_volumes(state, app_id).await? {
+    let owned: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM app_volumes WHERE app_id = ? AND kind = 'volume' AND owned = 1",
+    )
+    .bind(app_id)
+    .fetch_all(&state.db)
+    .await?;
+    for name in owned {
         state.runtime.remove_volume(&name).await?;
     }
     Ok(())
@@ -905,17 +970,19 @@ async fn load_env(state: &AppState, app_id: &str) -> Result<Vec<(String, String)
         .collect()
 }
 
-/// Wait until the new container answers, or explain why it does not.
-async fn wait_healthy(
+/// Wait until a freshly started container passes health checks (2 consecutive
+/// passes on HTTP `health_path` or TCP port). Shared by `deploy` and `adopt`.
+pub async fn wait_container_healthy(
     state: &AppState,
     started: &Started,
-    app: &AppRow,
+    port: u16,
+    health_path: Option<&str>,
     log: &LogSink,
 ) -> Result<()> {
     const BACKOFF_MS: &[u64] = &[100, 150, 250, 500, 700];
-    let what = match &app.health_path {
-        Some(path) => format!("GET {path} on port {}", app.port),
-        None => format!("port {}", app.port),
+    let what = match health_path {
+        Some(path) => format!("GET {path} on port {port}"),
+        None => format!("port {port}"),
     };
     log.line("deploy", format!("Waiting for {what}")).await;
     let begin = Instant::now();
@@ -933,7 +1000,7 @@ async fn wait_healthy(
             ContainerState::Missing => bail!("the container disappeared before it became healthy"),
             ContainerState::Running | ContainerState::Other(_) => {}
         }
-        let ok = match &app.health_path {
+        let ok = match health_path {
             Some(path) => {
                 let url = format!("http://127.0.0.1:{}{path}", started.host_port);
                 matches!(state.deploys.http.get(&url).send().await, Ok(r) if r.status().as_u16() < 400)
@@ -951,16 +1018,25 @@ async fn wait_healthy(
         }
         if begin.elapsed() > HEALTH_TIMEOUT {
             bail!(
-                "nothing answered on {what} within {}s. Check that the app listens on 0.0.0.0:{} \
+                "nothing answered on {what} within {}s. Check that the app listens on 0.0.0.0:{port} \
                  (not 127.0.0.1) and that the port setting matches",
                 HEALTH_TIMEOUT.as_secs(),
-                app.port
             );
         }
         let delay_ms = BACKOFF_MS[attempt.min(BACKOFF_MS.len() - 1)];
         attempt += 1;
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
+}
+
+/// Wait until the new container answers, or explain why it does not.
+async fn wait_healthy(
+    state: &AppState,
+    started: &Started,
+    app: &AppRow,
+    log: &LogSink,
+) -> Result<()> {
+    wait_container_healthy(state, started, app.port, app.health_path.as_deref(), log).await
 }
 
 /// The engine network shared by one project's apps and databases. Projects
@@ -995,6 +1071,102 @@ async fn tail_container(state: &AppState, id: &str, log: &LogSink) {
     while let Some(Ok(msg)) = lines.next().await {
         log.line(msg.stream, msg.line).await;
     }
+}
+
+// --------------------------------------------------------- local source build
+
+/// Build an image from a staged local context uploaded by `rig up --remote-build`.
+/// Supports `Dockerfile`, `Containerfile`, or Railpack auto-detection.
+async fn build_from_local_dir(
+    state: &AppState,
+    app: &AppRow,
+    context: &Path,
+    tag: &str,
+    log: &LogSink,
+) -> Result<()> {
+    validate_relative_path(&app.dockerfile_path).map_err(|m| anyhow!(m))?;
+    let ctx_check = context.to_path_buf();
+    tokio::task::spawn_blocking(move || verify_no_symlinks(&ctx_check))
+        .await
+        .context("verifying uploaded context safety")??;
+
+    // Resolve Dockerfile or Containerfile when using default dockerfile_path.
+    let candidates: Vec<&str> = if app.dockerfile_path == DEFAULT_DOCKERFILE {
+        vec![DEFAULT_DOCKERFILE, "Containerfile"]
+    } else {
+        vec![app.dockerfile_path.as_str()]
+    };
+    let mut chosen_dockerfile = None;
+    for candidate in candidates {
+        let meta = tokio::fs::symlink_metadata(context.join(candidate)).await;
+        match meta {
+            Ok(m) if m.file_type().is_symlink() => {
+                bail!("the {candidate} path cannot be a symbolic link");
+            }
+            Ok(m) if m.is_file() => {
+                chosen_dockerfile = Some(candidate.to_string());
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let Some(dockerfile) = chosen_dockerfile else {
+        if app.dockerfile_path != DEFAULT_DOCKERFILE {
+            bail!(
+                "no file at {} in the uploaded directory",
+                app.dockerfile_path
+            );
+        }
+        log.line(
+            "build",
+            "No Dockerfile or Containerfile found, building with Railpack",
+        )
+        .await;
+        let builds = state.config.data_dir.join("builds");
+        tokio::fs::create_dir_all(&builds).await?;
+        let work = tempfile::Builder::new()
+            .prefix("local-plan-")
+            .tempdir_in(&builds)?;
+        let bin = crate::railpack::binary(&state.config.data_dir, log).await?;
+        let plan_dir = work.path().join("plan");
+        crate::railpack::prepare(&bin, context, &plan_dir, log).await?;
+        log.line("build", format!("Building {tag}")).await;
+        return state
+            .runtime
+            .build_plan(
+                PlanSpec {
+                    context: context.to_path_buf(),
+                    plan_dir,
+                    work_dir: work.path().to_path_buf(),
+                    frontend: crate::railpack::FRONTEND.to_string(),
+                    tag: tag.to_string(),
+                },
+                log,
+            )
+            .await;
+    };
+
+    log.line(
+        "build",
+        format!("Building {tag} from uploaded context ({dockerfile})"),
+    )
+    .await;
+    state
+        .runtime
+        .build(
+            BuildSpec {
+                context: context.to_path_buf(),
+                dockerfile,
+                tag: tag.to_string(),
+                labels: HashMap::from([
+                    (LABEL_MANAGED.to_string(), "true".to_string()),
+                    (LABEL_APP.to_string(), app.id.clone()),
+                ]),
+            },
+            log,
+        )
+        .await
 }
 
 // ------------------------------------------------------------------ git build

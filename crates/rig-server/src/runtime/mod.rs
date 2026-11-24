@@ -116,6 +116,34 @@ pub struct PlanSpec {
     pub tag: String,
 }
 
+/// A volume or host bind mount attached to a container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    /// Engine volume name (e.g. `rig-app-...`) or absolute host path (e.g. `/var/lib/data`).
+    pub source: String,
+    /// Absolute path inside the container.
+    pub target: String,
+    pub read_only: bool,
+}
+
+impl VolumeMount {
+    pub fn rw(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            target: target.into(),
+            read_only: false,
+        }
+    }
+
+    pub fn bind_spec(&self) -> String {
+        if self.read_only {
+            format!("{}:{}:ro", self.source, self.target)
+        } else {
+            format!("{}:{}", self.source, self.target)
+        }
+    }
+}
+
 pub struct ContainerSpec {
     pub name: String,
     pub image: String,
@@ -128,12 +156,56 @@ pub struct ContainerSpec {
     pub cpu_millis: Option<u32>,
     /// Replaces the image's default command.
     pub command: Option<Vec<String>>,
+    /// Replaces the image's default entrypoint.
+    pub entrypoint: Option<Vec<String>>,
     /// Private network to join, created on demand, and the extra DNS names
     /// the container answers to on it.
     pub network: Option<String>,
     pub aliases: Vec<String>,
-    /// Named volumes as `(volume, path inside the container)`.
-    pub volumes: Vec<(String, String)>,
+    /// Additional existing networks to attach the container to after creation
+    /// (used when adopting containers from Compose stacks so sibling DNS stays working).
+    pub extra_networks: Vec<String>,
+    /// Named volumes or host bind mounts.
+    pub volumes: Vec<VolumeMount>,
+}
+
+/// Full engine inspection snapshot of an unmanaged container for `rig adopt`.
+#[derive(Debug, Clone)]
+pub struct InspectedContainer {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+    pub image: String,
+    pub image_digest: Option<String>,
+    pub image_id: Option<String>,
+    pub labels: HashMap<String, String>,
+    pub env: Vec<(String, String)>,
+    pub ports: Vec<InspectedPort>,
+    pub mounts: Vec<InspectedMount>,
+    pub networks: Vec<String>,
+    pub restart_policy: Option<String>,
+    pub memory_mb: Option<u32>,
+    pub cpu_millis: Option<u32>,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InspectedPort {
+    pub container_port: u16,
+    pub protocol: String,
+    pub host_ip: Option<String>,
+    pub host_port: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InspectedMount {
+    /// `"bind"` or `"volume"`.
+    pub kind: String,
+    pub source: String,
+    pub destination: String,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +296,26 @@ pub trait Runtime: Send + Sync {
 
     /// Build `spec.tag` from a BuildKit frontend plan.
     async fn build_plan(&self, spec: PlanSpec, log: &LogSink) -> Result<()>;
+
+    /// Load an OCI or Docker image tar archive into the local engine.
+    async fn load_image(&self, _archive_path: &std::path::Path, _log: &LogSink) -> Result<()> {
+        anyhow::bail!("loading image archives is not supported by this runtime")
+    }
+
+    /// Inspect all external (non-Rig-managed) containers on the engine socket.
+    async fn list_external_containers(&self) -> Result<Vec<InspectedContainer>> {
+        Ok(Vec::new())
+    }
+
+    /// Inspect one container in detail by id or name. Returns `None` if not found.
+    async fn inspect_container_full(&self, _id: &str) -> Result<Option<InspectedContainer>> {
+        Ok(None)
+    }
+
+    /// Attach a container to an additional existing network.
+    async fn connect_network(&self, _container_id: &str, _network: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Create and start a container, returning its id and loopback port.
     async fn run(&self, spec: &ContainerSpec) -> Result<Started>;

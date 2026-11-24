@@ -27,7 +27,7 @@ You can run Rig on either **rootless Podman (4.9+)** or **Docker Engine** on any
     {
       label: 'Interfaces',
       value: 'Web · CLI · MCP',
-      detail: 'Embedded React UI, rig CLI, and 28-tool stdio MCP server',
+      detail: 'Embedded React UI, rig CLI, and 32-tool stdio MCP server',
     },
   ]}
 />
@@ -40,12 +40,13 @@ curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh 
 ## What Rig provides
 
 - **One-binary control plane:** `rig-server` embeds pre-compressed (`br` and `gzip`) dashboard assets, an OpenAPI 3.1 HTTP API, a deployment queue, a 10-second system status poller, a 30-second resource metrics sampler, a 15-second crash and OOM watcher, a GitHub branch poller, and a Caddy configuration supervisor. State lives in SQLite (`WAL` mode) rather than separate PostgreSQL and Redis control-plane containers.
-- **Zero-downtime application deploys:** Deploy from prebuilt registry images, Git repositories with a `Dockerfile`, or repositories without a `Dockerfile` using pinned [Railpack](https://railpack.com) (`v0.43.0`) and BuildKit. Stateless apps start the new container alongside the live container, verify health checks, switch the proxy route atomically, and drain the old container.
+- **Zero-downtime application deploys:** Deploy from prebuilt registry images, Git repositories with a `Dockerfile`, repositories without a `Dockerfile` using pinned [Railpack](https://railpack.com) (`v0.43.0`) and BuildKit, or directly from a local folder or pre-compiled Linux ELF binary without Git via `rig up`. Stateless apps start the new container alongside the live container, verify health checks, switch the proxy route atomically, and drain the old container.
+- **One-click adoption of existing containers:** Migrate running Docker/Podman containers, Docker Compose stacks, or Coolify/Dokploy workloads into Rig via `rig adopt` with dry-run `rig.toml` and Podman Quadlet previews, in-place volume/bind-mount preservation, automatic vault secret classification, and rollback-protected cutover.
 - **First-class rootless Podman and Docker:** Run apps under a dedicated `rig` OS user with rootless Podman in a private subordinate UID/GID namespace, or on an existing Docker Engine installation.
 - **Automatic HTTPS and network access scopes:** Route public domains with Let's Encrypt (`auto`), internal LAN domains or bare IPs with Rig's local certificate authority (`internal`), or tailnet hostnames (`*.ts.net`) with Tailscale certificates (`tailscale`). Restrict individual domains or the entire dashboard to `public`, `lan`, or `tailscale` IP ranges.
 - **Managed databases and backups:** Provision isolated PostgreSQL, MySQL, MariaDB, Redis, and MongoDB instances attached to per-project bridge networks. Stream native container backups (`pg_dump`, `mysqldump`, `mariadb-dump`, `mongodump`, `redis-cli --rdb`) encrypted at rest (`XChaCha20-Poly1305`) to disk, download decrypted dump files, or restore in place.
 - **Encrypted secrets and RBAC:** Encrypt environment variables, database passwords, GitHub App private keys, app webhook secrets, alert webhook URLs and signing secrets, and database backups at rest using XChaCha20-Poly1305 (`Vault`) keyed by a `0600` master key. Control team access with four ordered roles (`Viewer`, `Developer`, `Admin`, `Owner`), TOTP two-factor authentication, session-gated administrative actions, scoped API tokens, and an organization audit log.
-- **Terminal-first CLI and AI-native MCP server:** Operate one or many Rig servers from your laptop or CI pipeline with `rig`, link repositories via `rig.toml`, open raw-TTY container shells with `rig exec`, or expose 28 schema-validated tools to Claude Code, Cursor, and other AI coding agents via `rig mcp`.
+- **Terminal-first CLI and AI-native MCP server:** Operate one or many Rig servers from your laptop or CI pipeline with `rig`, deploy local directories/binaries with `rig up`, adopt existing containers with `rig adopt`, link repositories via `rig.toml`, open raw-TTY container shells with `rig exec`, or expose 32 schema-validated tools to Claude Code, Cursor, and other AI coding agents via `rig mcp`.
 
 ## When to use Rig
 
@@ -88,7 +89,7 @@ curl -fsSL https://github.com/ksaurav24/rig/releases/latest/download/install.sh 
   <Card
     href="/docs/mcp/"
     title="MCP server (rig mcp)"
-    description="Connect Claude Code, Cursor, or custom AI agents to all 28 Rig MCP tools with safety guardrails."
+    description="Connect Claude Code, Cursor, or custom AI agents to all 32 Rig MCP tools with safety guardrails."
   />
   <Card
     href="/docs/operations/server-cli-and-config/"

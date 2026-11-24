@@ -3,7 +3,7 @@ title: MCP Overview & Architecture
 description: Expose your Rig server to AI assistants and coding agents over the Model Context Protocol using rig mcp.
 ---
 
-`rig mcp` runs a built-in **Model Context Protocol (MCP)** server over standard input and output (`stdio`, newline-delimited JSON-RPC 2.0). It exposes **28 schema-validated tools** backed by the exact same `rig_cli::ops` layer used by the `rig` terminal CLI, enabling AI coding agents such as Claude Code, Cursor, Windsurf, and custom MCP clients to inspect, deploy, monitor, and manage applications and databases on your Rig server.
+`rig mcp` runs a built-in **Model Context Protocol (MCP)** server over standard input and output (`stdio`, newline-delimited JSON-RPC 2.0). It exposes **32 schema-validated tools** backed by the exact same `rig_cli::ops` layer used by the `rig` terminal CLI, enabling AI coding agents such as Claude Code, Cursor, Windsurf, and custom MCP clients to inspect, deploy (from Git, local folders, or binaries), adopt existing containers, monitor, and manage applications and databases on your Rig server.
 
 ```sh
 rig mcp
@@ -20,7 +20,7 @@ rig mcp
 | **Lazy authentication** | `initialize`, `ping`, and `tools/list` always succeed even before `rig login` has been run. Each `tools/call` resolves the active context (`--context`, `--server` + `RIG_TOKEN`, `rig.toml`, or `config.toml`) dynamically at call time. |
 | **Concurrent execution** | Every `tools/call` spawns onto its own Tokio task. A 10-minute `deploy_app` stream never blocks concurrent `ping`, `tools/list`, `system_status`, or `app_logs` calls. |
 | **Request cancellation** | Tracks in-flight tool tasks in an `AbortHandle` registry keyed by JSON-RPC request `id`. Sending `notifications/cancelled` (`{"params": {"requestId": <id>}}`) aborts the task immediately and suppresses its reply. |
-| **Live progress notifications** | When a client passes `params._meta.progressToken` on `deploy_app`, `start_app`, `restart_app`, `rollback_app`, or `deployment_logs`, `rig mcp` emits throttled `notifications/progress` frames (at most once every `250ms`) as build and deploy log lines arrive. |
+| **Live progress notifications** | When a client passes `params._meta.progressToken` on `deploy_app`, `deploy_local`, `start_app`, `restart_app`, `rollback_app`, or `deployment_logs`, `rig mcp` emits throttled `notifications/progress` frames (at most once every `250ms`) as upload steps and build/deploy log lines arrive. |
 | **Structured content (`2025-06-18`)** | Every successful tool call returns both `content: [{ "type": "text", "text": "<pretty-json>" }]` and `structuredContent: <object>` (arrays are wrapped as `{ "items": [...] }`). |
 | **Tool annotations** | Every tool advertises accurate `annotations`: `readOnlyHint` (`true`/`false`), `destructiveHint` (`true`/`false`), and `openWorldHint: false`. |
 
@@ -60,7 +60,7 @@ Response:
 
 ### 2. Tool discovery (`tools/list`)
 
-Returns the full JSON Schema (`inputSchema` with `additionalProperties: false`) and `annotations` for all 28 tools.
+Returns the full JSON Schema (`inputSchema` with `additionalProperties: false`) and `annotations` for all 32 tools.
 
 ### 3. Tool execution (`tools/call`)
 
@@ -81,7 +81,7 @@ Before invoking the HTTP client, `Tool::check` validates the incoming `arguments
   <Card
     href="/docs/mcp/tools-reference/"
     title="MCP tools reference"
-    description="Complete input schemas, annotations, and return structures for all 28 MCP tools."
+    description="Complete input schemas, annotations, and return structures for all 32 MCP tools."
   />
   <Card
     href="/docs/mcp/security-and-guardrails/"

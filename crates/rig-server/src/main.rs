@@ -1,4 +1,5 @@
 mod access;
+mod adopt;
 mod alerts;
 mod auth;
 mod backups;
@@ -16,6 +17,7 @@ mod runtime;
 mod setup;
 mod state;
 mod totp;
+mod uploads;
 mod watch;
 mod wizard;
 

@@ -414,3 +414,47 @@ Every endpoint below is served by `rig-server` under `/api/v1/`. Unless marked <
 <Endpoint method="POST" path="/api/v1/hooks/github/{org_id}" role="Public">
   Receives GitHub App `push` webhook deliveries verified strictly via HMAC-SHA256 (`X-Hub-Signature-256` or `X-Rig-Signature`, rejecting `X-Gitlab-Token`) using the organization's GitHub App webhook secret and queues deployments for all matching `auto_deploy` applications. Returns `GithubPushResult: { deployment_ids, skipped }`.
 </Endpoint>
+
+---
+
+## Local Uploads & Direct Deploys (`rig up`)
+
+<Endpoint method="POST" path="/api/v1/uploads/blobs/check" role="Developer">
+  Checks which lowercase hex SHA-256 digests (`CheckBlobsRequest: { hashes }`) are already present in the server's content-addressed blob cache. Returns `CheckBlobsResponse: { present, missing }`.
+</Endpoint>
+
+<Endpoint method="PUT" path="/api/v1/uploads/blobs/{sha256}" role="Developer">
+  Streams a single blob (up to 512 MiB, `Content-Type: application/zstd` or raw bytes), verifies that the decompressed payload hashes to `{sha256}`, and stores it atomically. Returns `201 Created` with `StoredBlob: { sha256, size }`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/uploads/blobs/batch" role="Developer">
+  Streams a `zstd`-compressed delta tarball (`application/zstd`, up to 256 MiB decompressed) whose entries are named `<sha256>`. Verifies every entry's checksum before caching. Returns `201 Created` with `StoredBlobBatch: { stored, bytes }`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/deploy/local-image" role="Developer">
+  Reassembles a locally built OCI/Docker image tar from cached + uploaded blobs (`LocalImageDeployRequest: { image_ref, entries, label? }`), loads it into Docker/Podman, and queues a zero-downtime deployment (`trigger: "local"`). Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/deploy/local-source" role="Developer">
+  Materializes a symlink-checked build context from cached blobs (`LocalSourceDeployRequest: { files, dockerfile?, label? }`) and queues a remote build via `Dockerfile`, `Containerfile`, or Railpack (`trigger: "local"`). Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/apps/{id}/deploy/binary" role="Developer">
+  Validates an uploaded Linux ELF binary blob (`BinaryDeployRequest: { sha256, filename, args?, base_image?, port? }`), wraps static binaries in a pure-Rust `FROM scratch` OCI image (or dynamically linked binaries on `distroless` / `base_image`), and queues a zero-downtime deployment (`trigger: "local"`). Returns `202 Accepted` with `Deployment`.
+</Endpoint>
+
+---
+
+## Container Adoption (`rig adopt`)
+
+<Endpoint method="GET" path="/api/v1/adopt/containers" role="Admin">
+  Inspects unmanaged Docker/Podman containers on the server and returns `DiscoveredContainer[]` with image digests, origin (`standalone`, `compose`, `coolify`, `dokploy`), ports, preserved mounts, networks, Traefik/Caddy/`VIRTUAL_HOST` domains, and secret-masked environment variables.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/adopt/preview" role="Admin">
+  Generates a read-only dry-run `AdoptPreview` (`AdoptPreviewRequest: { container_id, project_id?, app_name?, port?, health_path?, domains?, secret_keys?, plain_keys? }`) containing generated `rig.toml`, Podman Quadlet `.container` and `.network` units, cutover strategy, and warnings without modifying state.
+</Endpoint>
+
+<Endpoint method="POST" path="/api/v1/adopt/execute" role="Admin">
+  Executes safe adoption (`AdoptExecuteRequest: { container_id, project_id, app_name?, port?, health_path?, domains?, secret_keys?, plain_keys?, stop_old?, remove_old? }`): preserves host bind mounts and external volumes (`owned = 0`), encrypts secrets into `Vault`, starts and health-checks the adopted container, cuts over Caddy atomically, and rolls back automatically on failure. Returns `201 Created` with `AdoptExecuteResult`.
+</Endpoint>

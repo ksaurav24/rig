@@ -50,6 +50,7 @@ pub async fn run(
         project: Some(app.project_name.clone()),
         context: active_context,
         server: Some(api.base().to_string()),
+        ..Default::default()
     };
     let cwd = std::env::current_dir()?;
     let path = link::save(&cwd, &link)?;

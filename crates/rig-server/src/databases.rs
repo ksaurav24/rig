@@ -289,9 +289,14 @@ async fn start(state: &AppState, id: &str) -> Result<(String, u16)> {
         memory_mb: Some(DEFAULT_DATABASE_MEMORY_MB),
         cpu_millis: None,
         command: spec.command(),
+        entrypoint: None,
         network: Some(deploy::project_network(&row.project_id)),
         aliases: vec![row.slug.clone()],
-        volumes: vec![(row.volume.clone(), spec.data_dir.to_string())],
+        extra_networks: Vec::new(),
+        volumes: vec![crate::runtime::VolumeMount::rw(
+            row.volume.clone(),
+            spec.data_dir.to_string(),
+        )],
     };
     let started = state.runtime.run(&container).await?;
 

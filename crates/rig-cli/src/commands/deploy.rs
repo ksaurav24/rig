@@ -87,11 +87,11 @@ pub struct StopArgs {
     pub app: Option<String>,
 }
 
-struct FollowOptions {
-    no_follow: bool,
-    wait_healthy: bool,
-    timeout: Option<Duration>,
-    verb: &'static str,
+pub(crate) struct FollowOptions {
+    pub(crate) no_follow: bool,
+    pub(crate) wait_healthy: bool,
+    pub(crate) timeout: Option<Duration>,
+    pub(crate) verb: &'static str,
 }
 
 pub async fn run_deploy(api: &Client, args: DeployArgs, out: OutputOpts) -> CliResult<()> {
@@ -235,7 +235,7 @@ async fn find_active_deployment(api: &Client, app_id: &str) -> CliResult<Option<
     Ok(deps.into_iter().find(|d| !d.status.is_finished()))
 }
 
-async fn after_enqueue(
+pub(crate) async fn after_enqueue(
     api: &Client,
     app: &App,
     dep: Deployment,

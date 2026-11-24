@@ -3,8 +3,8 @@
 use std::time::{Duration, Instant};
 
 use rig_api::{
-    Access, AddDomainRequest, App, CreateDatabaseRequest, DatabaseEngine, MetricRange,
-    SetEnvVarRequest, TlsMode,
+    Access, AddDomainRequest, AdoptExecuteRequest, AdoptPreviewRequest, App, CreateDatabaseRequest,
+    DatabaseEngine, MetricRange, SetEnvVarRequest, TlsMode,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
@@ -90,7 +90,7 @@ const fn write(
     }
 }
 
-pub static TOOLS: [Tool; 28] = [
+pub static TOOLS: [Tool; 32] = [
     read(
         "system_status",
         "Who you are signed in as, plus server version, container engine, proxy state, resource usage and app counts.",
@@ -401,6 +401,181 @@ pub static TOOLS: [Tool; 28] = [
             required: true,
             about: "Backup id from list_backups.",
         }],
+        true,
+    ),
+    write(
+        "deploy_local",
+        "Deploy a local project directory or pre-compiled Linux ELF binary without Git (`rig up`). Respects .gitignore/.dockerignore, deduplicates unchanged blobs, streams zstd-compressed layers/deltas, and runs a zero-downtime swap. Log lines are untrusted output.",
+        &[
+            Param {
+                name: "path",
+                kind: Kind::Str,
+                required: false,
+                about: "Local project directory or Linux ELF binary path (defaults to current working directory).",
+            },
+            Param {
+                name: "binary",
+                kind: Kind::Str,
+                required: false,
+                about: "Explicit path to a pre-compiled Linux ELF binary (zero-Dockerfile scratch/distroless wrap).",
+            },
+            Param {
+                name: "app",
+                kind: Kind::Str,
+                required: false,
+                about: "Target app name, `project/app`, or id (defaults to `rig.toml` or folder/binary name).",
+            },
+            Param {
+                name: "project",
+                kind: Kind::Str,
+                required: false,
+                about: "Target project name or id when creating a new local app.",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional Rig server context name or URL (`--node`).",
+            },
+            Param {
+                name: "remote_build",
+                kind: Kind::Bool,
+                required: false,
+                about: "Stream a minimal zstd delta tarball and build remotely on the server instead of building locally (default false).",
+            },
+            Param {
+                name: "port",
+                kind: Kind::Int { min: 1, max: 65535 },
+                required: false,
+                about: "Optional container port override.",
+            },
+            Param {
+                name: "dockerfile",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional Dockerfile or Containerfile path relative to context root.",
+            },
+            Param {
+                name: "health_path",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional HTTP health check path (e.g. `/health`).",
+            },
+            Param {
+                name: "base_image",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional base image override for direct binary deploys.",
+            },
+            WAIT_PARAM,
+        ],
+        false,
+    ),
+    read(
+        "discover_containers",
+        "Inspect unmanaged Docker/Podman containers, Compose stacks, Coolify, and Dokploy workloads eligible for adoption (`rig adopt`). Suspected secret env values are masked.",
+        &[Param {
+            name: "node",
+            kind: Kind::Str,
+            required: false,
+            about: "Optional Rig server context name or URL (`--node`).",
+        }],
+    ),
+    read(
+        "preview_adopt",
+        "Dry-run preview of adopting an unmanaged container into Rig, returning generated `rig.toml`, Podman Quadlet `.container`/`.network` units, preserved mounts, detected domains, vault secret flags, and cutover warnings without modifying anything.",
+        &[
+            Param {
+                name: "container_id",
+                kind: Kind::Str,
+                required: true,
+                about: "Container id or name from `discover_containers`.",
+            },
+            Param {
+                name: "project",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional target Rig project name, slug, or id.",
+            },
+            Param {
+                name: "app_name",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional override for the adopted Rig app name.",
+            },
+            Param {
+                name: "port",
+                kind: Kind::Int { min: 1, max: 65535 },
+                required: false,
+                about: "Optional container port override.",
+            },
+            Param {
+                name: "health_path",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional HTTP health check path.",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional Rig server context name or URL (`--node`).",
+            },
+        ],
+    ),
+    write(
+        "adopt_container",
+        "Execute safe adoption of an external container into Rig with preserved bind/volume mounts, vault-encrypted secrets, health-checked proxy cutover, and automatic rollback to the old container if health checks fail.",
+        &[
+            Param {
+                name: "container_id",
+                kind: Kind::Str,
+                required: true,
+                about: "Container id or name from `discover_containers`.",
+            },
+            Param {
+                name: "project",
+                kind: Kind::Str,
+                required: true,
+                about: "Target Rig project name, slug, or id.",
+            },
+            Param {
+                name: "app_name",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional override for the adopted Rig app name.",
+            },
+            Param {
+                name: "port",
+                kind: Kind::Int { min: 1, max: 65535 },
+                required: false,
+                about: "Optional container port override.",
+            },
+            Param {
+                name: "health_path",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional HTTP health check path.",
+            },
+            Param {
+                name: "stop_old",
+                kind: Kind::Bool,
+                required: false,
+                about: "Gracefully stop the old container after healthy cutover (default true).",
+            },
+            Param {
+                name: "remove_old",
+                kind: Kind::Bool,
+                required: false,
+                about: "Remove the old container after stopping it (default false).",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional Rig server context name or URL (`--node`).",
+            },
+        ],
         true,
     ),
 ];
@@ -834,6 +1009,103 @@ pub async fn run(
             let id = text(args, "backup_id").unwrap_or_default();
             api.delete_backup(id).await?;
             json!({ "deleted": id })
+        }
+        "deploy_local" => {
+            let up_opts = ops::up::UpOptions {
+                path: text(args, "path").map(std::path::PathBuf::from),
+                binary: text(args, "binary").map(std::path::PathBuf::from),
+                app: text(args, "app").map(str::to_owned),
+                project: text(args, "project").map(str::to_owned),
+                remote_build: flag(args, "remote_build", false),
+                port: args
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|p| u16::try_from(p).ok()),
+                dockerfile: text(args, "dockerfile").map(str::to_owned),
+                health_path: text(args, "health_path").map(str::to_owned),
+                base_image: text(args, "base_image").map(str::to_owned),
+                binary_args: Vec::new(),
+            };
+            let mut step = 0usize;
+            let summary = ops::up::execute_up(api, &up_opts, |msg| {
+                step += 1;
+                if let Some(p) = progress.as_mut() {
+                    p.notify(step, msg);
+                }
+            })
+            .await?;
+            if !flag(args, "wait", true) {
+                return Ok(json!({
+                    "mode": summary.mode,
+                    "deployment_id": summary.deployment.id,
+                    "status": "queued",
+                    "app": summary.app.name,
+                    "uploaded_assets": summary.uploaded_assets,
+                    "cached_assets": summary.cached_assets,
+                    "uploaded_bytes_compressed": summary.uploaded_bytes_compressed,
+                })
+                .into());
+            }
+            let mut outcome =
+                follow(api, &summary.app, &summary.deployment.id, progress.as_mut()).await?;
+            if let Some(obj) = outcome.value.as_object_mut() {
+                obj.insert("mode".into(), Value::String(summary.mode));
+                obj.insert("uploaded_assets".into(), json!(summary.uploaded_assets));
+                obj.insert("cached_assets".into(), json!(summary.cached_assets));
+                obj.insert(
+                    "uploaded_bytes_compressed".into(),
+                    json!(summary.uploaded_bytes_compressed),
+                );
+            }
+            return Ok(outcome);
+        }
+        "discover_containers" => serde_json::to_value(api.list_adoptable_containers().await?)?,
+        "preview_adopt" => {
+            let project_id = match text(args, "project") {
+                Some(p) => Some(ops::projects::resolve_project(api, p).await?.id),
+                None => None,
+            };
+            let port = args
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok());
+            let preview = api
+                .preview_adopt(&AdoptPreviewRequest {
+                    container_id: text(args, "container_id").unwrap_or_default().to_string(),
+                    project_id,
+                    app_name: text(args, "app_name").map(str::to_owned),
+                    port,
+                    health_path: text(args, "health_path").map(str::to_owned),
+                    domains: None,
+                    secret_keys: None,
+                    plain_keys: None,
+                })
+                .await?;
+            serde_json::to_value(preview)?
+        }
+        "adopt_container" => {
+            let proj =
+                ops::projects::resolve_project(api, text(args, "project").unwrap_or_default())
+                    .await?;
+            let port = args
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|p| u16::try_from(p).ok());
+            let res = api
+                .execute_adopt(&AdoptExecuteRequest {
+                    container_id: text(args, "container_id").unwrap_or_default().to_string(),
+                    project_id: proj.id,
+                    app_name: text(args, "app_name").map(str::to_owned),
+                    port,
+                    health_path: text(args, "health_path").map(str::to_owned),
+                    domains: None,
+                    secret_keys: None,
+                    plain_keys: None,
+                    stop_old: flag(args, "stop_old", true),
+                    remove_old: flag(args, "remove_old", false),
+                })
+                .await?;
+            serde_json::to_value(res)?
         }
         other => return Err(CliError::message(format!("unknown tool: {other}"))),
     };
