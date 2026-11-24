@@ -287,12 +287,14 @@ mod tests {
                 allow_private_alerts: false,
                 allow_private_git: false,
                 enable_api_docs: false,
+                mode: rig_api::ServerMode::Full,
             }),
             runtime: Arc::new(MockRuntime(mock_state)),
             proxy: Arc::new(RecordingProxy(Arc::clone(&proxy_hosts))),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
             caches: Arc::new(RuntimeCaches::default()),
+            events: Arc::new(crate::events::EventBus::new()),
         };
 
         let org_id = "01940000-0000-7000-8000-000000000001";

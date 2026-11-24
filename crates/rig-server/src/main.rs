@@ -8,6 +8,7 @@ mod dashboard;
 mod databases;
 mod deploy;
 mod error;
+mod events;
 mod github;
 mod metrics;
 mod proxy;
@@ -125,6 +126,38 @@ struct Cli {
     /// Serve interactive Scalar API docs at `/api/docs` (authenticated).
     #[arg(long, env = "RIG_ENABLE_API_DOCS", global = true)]
     enable_api_docs: bool,
+
+    /// Install mode: `full` (API + embedded web dashboard) or `headless` (API only).
+    #[arg(
+        long,
+        env = "RIG_MODE",
+        default_value = "full",
+        value_parser = ["full", "headless"],
+        global = true
+    )]
+    mode: String,
+}
+
+#[derive(Subcommand)]
+enum DevicesCommand {
+    /// Generate a short-lived one-time pairing code for Rig Desktop or mobile.
+    Pair {
+        /// User email to pair as. Defaults to the first owner account.
+        #[arg(long)]
+        email: Option<String>,
+        /// Role granted to the device (defaults to the user's role).
+        #[arg(long, value_parser = ["viewer", "developer", "admin", "owner"])]
+        role: Option<String>,
+        /// Lifetime in seconds (default 300).
+        #[arg(long, default_value_t = 300)]
+        ttl: u32,
+    },
+    /// List paired desktop/mobile devices.
+    List,
+    /// Revoke a paired device token by id or prefix.
+    Revoke {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -148,12 +181,17 @@ enum Command {
     /// Interactive install wizard invoked by install.sh.
     #[command(hide = true)]
     InstallWizard(wizard::WizardArgs),
-    /// Set who may open the dashboard: public, lan or tailscale. Use
-    /// `public` to get back in after locking yourself out. Takes effect on
+    /// Set who may open the dashboard/API: public, lan, tailscale or local.
+    /// Use `public` to get back in after locking yourself out. Takes effect on
     /// the next start.
     DashboardAccess {
-        #[arg(value_parser = ["public", "lan", "tailscale"])]
+        #[arg(value_parser = ["public", "lan", "tailscale", "local"])]
         mode: String,
+    },
+    /// Pair, list or revoke desktop/mobile devices directly from the server console.
+    Devices {
+        #[command(subcommand)]
+        action: DevicesCommand,
     },
     /// Print a fresh one-time setup token (valid 30 minutes) while Rig has
     /// no owner yet. Works while the server is running.
@@ -247,6 +285,10 @@ async fn main() -> Result<()> {
         println!("Dashboard access is now {mode}. Restart Rig for it to take effect.");
         return Ok(());
     }
+    if let Some(Command::Devices { action }) = &cli.command {
+        return run_devices_command(&db, action).await;
+    }
+    let server_mode = rig_api::ServerMode::parse(&cli.mode).unwrap_or(rig_api::ServerMode::Full);
     if matches!(cli.command, Some(Command::ProxyDetachDashboard)) {
         let state = AppState {
             db,
@@ -259,10 +301,12 @@ async fn main() -> Result<()> {
                 http_port: cli.http_port,
                 https_port: cli.https_port,
                 dashboard_port: None,
+                dashboard_access: None,
             })?),
             deploys: Arc::new(deploy::Deployer::new()?),
             access: access::DashboardAccess::default(),
             caches: Arc::new(state::RuntimeCaches::default()),
+            events: Arc::new(events::EventBus::new()),
             config: Arc::new(Config {
                 data_dir: cli.data_dir,
                 secure_cookies: cli.secure_cookies,
@@ -272,6 +316,7 @@ async fn main() -> Result<()> {
                 allow_private_alerts: cli.allow_private_alerts,
                 allow_private_git: cli.allow_private_git,
                 enable_api_docs: cli.enable_api_docs,
+                mode: server_mode,
             }),
         };
         proxy::sync(&state).await?;
@@ -298,10 +343,12 @@ async fn main() -> Result<()> {
             http_port: cli.http_port,
             https_port: cli.https_port,
             dashboard_port: cli.proxy_dashboard.then(|| cli.listen.port()),
+            dashboard_access: Some(dashboard_access.clone()),
         })?),
         deploys: Arc::new(deploy::Deployer::new()?),
         access: dashboard_access,
         caches: Arc::new(state::RuntimeCaches::default()),
+        events: Arc::new(events::EventBus::new()),
         config: Arc::new(Config {
             data_dir: cli.data_dir,
             secure_cookies: cli.secure_cookies,
@@ -311,6 +358,7 @@ async fn main() -> Result<()> {
             allow_private_alerts: cli.allow_private_alerts,
             allow_private_git: cli.allow_private_git,
             enable_api_docs: cli.enable_api_docs,
+            mode: server_mode,
         }),
     };
 
@@ -483,6 +531,112 @@ async fn reset_password(db: &sqlx::SqlitePool, email: &str) -> Result<String> {
 /// A base URL without its trailing slash, so paths can be appended.
 fn trim_slash(url: &url::Url) -> String {
     url.as_str().trim_end_matches('/').to_string()
+}
+
+async fn run_devices_command(db: &sqlx::SqlitePool, action: &DevicesCommand) -> Result<()> {
+    use sqlx::Row;
+    match action {
+        DevicesCommand::Pair { email, role, ttl } => {
+            let row = if let Some(email) = email {
+                let normalized = email.trim().to_lowercase();
+                sqlx::query(
+                    "SELECT u.id AS user_id, u.email, m.org_id, m.role
+                     FROM users u JOIN memberships m ON m.user_id = u.id
+                     WHERE u.email = ? AND u.disabled = 0
+                     ORDER BY m.created_at LIMIT 1",
+                )
+                .bind(&normalized)
+                .fetch_optional(db)
+                .await?
+                .with_context(|| format!("no active user with email {normalized}"))?
+            } else {
+                sqlx::query(
+                    "SELECT u.id AS user_id, u.email, m.org_id, m.role
+                     FROM users u JOIN memberships m ON m.user_id = u.id
+                     WHERE u.disabled = 0
+                     ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
+                              m.created_at LIMIT 1",
+                )
+                .fetch_optional(db)
+                .await?
+                .context("Rig is not set up yet; complete first-run setup first")?
+            };
+            let user_id: String = row.get("user_id");
+            let user_email: String = row.get("email");
+            let org_id: String = row.get("org_id");
+            let member_role =
+                rig_api::Role::parse(row.get("role")).unwrap_or(rig_api::Role::Viewer);
+            let requested = role
+                .as_deref()
+                .and_then(rig_api::Role::parse)
+                .unwrap_or(member_role);
+            if requested > member_role {
+                anyhow::bail!(
+                    "requested role '{}' exceeds {user_email}'s role '{}'",
+                    requested.as_str(),
+                    member_role.as_str()
+                );
+            }
+            let ttl_clamped = (*ttl).clamp(60, 900);
+            let pairing = routes::devices::issue_pairing_code(
+                db,
+                &org_id,
+                &user_id,
+                requested,
+                ttl_clamped,
+            )
+            .await?;
+            println!(
+                "\n  Device pairing code for {user_email} ({}):\n\n      {}\n\n  Valid until {} (single use).\n  Enter this code in Rig Desktop -> Add server.\n",
+                pairing.role.as_str(),
+                pairing.code,
+                pairing.expires_at
+            );
+            Ok(())
+        }
+        DevicesCommand::List => {
+            let rows = sqlx::query(
+                "SELECT t.id, t.name, t.prefix, t.role, t.last_ip, t.last_used_at, t.created_at, u.email
+                 FROM api_tokens t JOIN users u ON u.id = t.user_id
+                 WHERE t.kind = 'device'
+                 ORDER BY t.created_at DESC",
+            )
+            .fetch_all(db)
+            .await?;
+            if rows.is_empty() {
+                println!("No paired devices.");
+                return Ok(());
+            }
+            println!(
+                "{:<36}  {:<28}  {:<9}  {:<15}  {}",
+                "ID", "DEVICE", "ROLE", "LAST IP", "USER"
+            );
+            for r in rows {
+                let id: String = r.get("id");
+                let name: String = r.get("name");
+                let role: String = r.get("role");
+                let ip: String = r.get::<Option<String>, _>("last_ip").unwrap_or_else(|| "-".into());
+                let email: String = r.get("email");
+                println!("{id:<36}  {name:<28}  {role:<9}  {ip:<15}  {email}");
+            }
+            Ok(())
+        }
+        DevicesCommand::Revoke { id } => {
+            let n = sqlx::query(
+                "DELETE FROM api_tokens WHERE kind = 'device' AND (id = ? OR prefix = ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .execute(db)
+            .await?
+            .rows_affected();
+            if n == 0 {
+                anyhow::bail!("no paired device matches '{id}'");
+            }
+            println!("Revoked paired device {id}.");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

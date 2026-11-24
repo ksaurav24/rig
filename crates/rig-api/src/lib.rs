@@ -66,7 +66,7 @@ pub struct PublicBranding {
     pub env_color: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SetupStatus {
     /// False until the first owner account has been created.
@@ -247,6 +247,31 @@ pub struct Me {
 
 // ------------------------------------------------------------------ tokens
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum TokenKind {
+    #[default]
+    Api,
+    Device,
+}
+
+impl TokenKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenKind::Api => "api",
+            TokenKind::Device => "device",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "device" => TokenKind::Device,
+            _ => TokenKind::Api,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct ApiToken {
@@ -255,6 +280,10 @@ pub struct ApiToken {
     /// First characters of the token, for recognising it in a list.
     pub prefix: String,
     pub role: Role,
+    #[serde(default)]
+    pub kind: TokenKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ip: Option<String>,
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: String,
@@ -275,6 +304,133 @@ pub struct CreatedApiToken {
     pub token: ApiToken,
     /// The full secret. Shown once and never retrievable again.
     pub secret: String,
+}
+
+// ----------------------------------------------------------- device pairing
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct CreatePairingRequest {
+    /// Role granted to the paired device (cannot exceed the creator's role).
+    #[serde(default)]
+    pub role: Option<Role>,
+    /// Lifetime in seconds (default 300, max 900).
+    #[serde(default)]
+    pub expires_in_secs: Option<u32>,
+}
+
+/// Short-lived, single-use pairing code issued by the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct PairingCode {
+    pub id: String,
+    /// Human-readable one-time code, e.g. `ABCD-EFGH`.
+    pub code: String,
+    pub role: Role,
+    pub expires_at: String,
+    /// SHA-256 hex fingerprint of the server TLS certificate when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_fingerprint: Option<String>,
+    /// SVG QR code encoding a pairing URI.
+    pub qr_svg: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct ExchangePairingRequest {
+    pub code: String,
+    /// Human-readable device label, e.g. `"xlr8-thinkpad · Rig Desktop"`.
+    pub device_name: String,
+}
+
+/// Password (+ optional TOTP) sign-in that directly mints a revocable device token.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct DeviceLoginRequest {
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_token: Option<String>,
+    pub device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct PairedDevice {
+    pub token: ApiToken,
+    /// Full bearer token secret. Shown once and stored in the OS keychain.
+    pub secret: String,
+    pub user: User,
+    pub org: Organization,
+    pub role: Role,
+}
+
+// ------------------------------------------------------ server meta & events
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ServerMode {
+    #[default]
+    Full,
+    Headless,
+}
+
+impl ServerMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServerMode::Full => "full",
+            ServerMode::Headless => "headless",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "full" => ServerMode::Full,
+            "headless" => ServerMode::Headless,
+            _ => return None,
+        })
+    }
+}
+
+/// Version, mode, and feature capability negotiation returned by `GET /api/v1/meta`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct ServerMeta {
+    pub server_version: String,
+    pub api_version: u32,
+    /// Populated only for authenticated callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ServerMode>,
+    /// Populated only for authenticated callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+    /// Feature flags supported by this server build.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// One event pushed on `GET /api/v1/events` (SSE).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct ServerEvent {
+    pub id: u64,
+    /// e.g. `deploy.started`, `deploy.finished`, `deploy.failed`, `app.crashed`, `app.down`, `alert.fired`.
+    pub kind: String,
+    pub at: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 // ------------------------------------------------------------------- audit
@@ -669,6 +825,8 @@ pub enum Access {
     Lan,
     /// Devices on your tailnet (100.64/10, fd7a:115c:a1e0::/48) and this machine.
     Tailscale,
+    /// Loopback only (127.0.0.1 / ::1). Reachable on-box or over an SSH tunnel.
+    Local,
 }
 
 impl Access {
@@ -677,6 +835,7 @@ impl Access {
             Access::Public => "public",
             Access::Lan => "lan",
             Access::Tailscale => "tailscale",
+            Access::Local => "local",
         }
     }
 
@@ -685,6 +844,7 @@ impl Access {
             "public" => Access::Public,
             "lan" => Access::Lan,
             "tailscale" => Access::Tailscale,
+            "local" => Access::Local,
             _ => return None,
         })
     }
@@ -739,7 +899,7 @@ pub struct DashboardAccessRequest {
 
 // ------------------------------------------------------------------ system
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct SystemInfo {
     pub version: String,

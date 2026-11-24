@@ -2208,12 +2208,14 @@ mod tests {
                 allow_private_alerts: false,
                 allow_private_git: false,
                 enable_api_docs: false,
+                mode: rig_api::ServerMode::Full,
             }),
             runtime: Arc::new(StubRuntime),
             proxy: Arc::new(StubProxy),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
             caches: Arc::new(crate::state::RuntimeCaches::default()),
+            events: Arc::new(crate::events::EventBus::new()),
         };
 
         // Seed org, user, token, two projects, and apps.
@@ -2645,12 +2647,14 @@ mod tests {
                 allow_private_alerts: false,
                 allow_private_git: false,
                 enable_api_docs: false,
+                mode: rig_api::ServerMode::Full,
             }),
             runtime: Arc::new(StubRuntime),
             proxy: Arc::new(StubProxy),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
             caches: Arc::new(crate::state::RuntimeCaches::default()),
+            events: Arc::new(crate::events::EventBus::new()),
         };
 
         let owner_pw = "owner-super-secret-pw";

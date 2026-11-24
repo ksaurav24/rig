@@ -312,6 +312,23 @@ pub async fn worker(state: AppState) {
                 match claimed {
                     Ok(res) if res.rows_affected() == 1 => {
                         state.deploys.touch_deployment(&id);
+                        if let Ok(Some((org_id, app_id, name))) = sqlx::query_as::<_, (String, String, String)>(
+                            "SELECT a.org_id, a.id, a.name FROM apps a JOIN deployments d ON d.app_id = a.id WHERE d.id = ?",
+                        )
+                        .bind(&id)
+                        .fetch_optional(&state.db)
+                        .await
+                        {
+                            state.events.publish(
+                                org_id,
+                                "deploy.started",
+                                format!("Deploying {name}"),
+                                None,
+                                Some(app_id),
+                                Some(id.clone()),
+                                Some("building".into()),
+                            );
+                        }
                         let st = state.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
@@ -822,6 +839,16 @@ async fn pipeline(state: &AppState, deployment_id: &str, log: &LogSink) -> Resul
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+
+    state.events.publish(
+        &app.org_id,
+        "deploy.finished",
+        format!("Deployed {}", app.slug),
+        None,
+        Some(app.id.clone()),
+        Some(deployment_id.to_owned()),
+        Some("running".into()),
+    );
 
     match proxy::sync(state).await {
         Ok(()) => log.line("deploy", "Proxy routes updated").await,
@@ -1780,12 +1807,14 @@ mod tests {
                 allow_private_alerts: false,
                 allow_private_git: false,
                 enable_api_docs: false,
+                mode: rig_api::ServerMode::Full,
             }),
             runtime: Arc::new(MockRuntime(mock.clone())),
             proxy: Arc::new(NoopProxy),
             deploys: Arc::new(Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
             caches: Arc::new(crate::state::RuntimeCaches::default()),
+            events: Arc::new(crate::events::EventBus::new()),
         };
 
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")

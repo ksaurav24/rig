@@ -120,7 +120,7 @@ impl<R: MinRole> FromRequestParts<AppState> for Auth<R> {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
         let ip = client_ip(parts);
         let mut auth = match bearer(&parts.headers) {
-            Some(token) => from_api_token(state, token).await?,
+            Some(token) => from_api_token(state, token, ip.as_deref()).await?,
             None => from_session(state, parts).await?,
         };
         if auth.must_change_password
@@ -160,7 +160,40 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-async fn from_api_token(state: &AppState, token: &str) -> ApiResult<Auth<Viewer>> {
+/// Non-failing authentication check for endpoints that enrich their response
+/// when the caller presents valid credentials (e.g. `GET /api/v1/meta`).
+pub async fn is_authenticated_request(state: &AppState, headers: &HeaderMap) -> bool {
+    if let Some(token) = bearer(headers) {
+        return from_api_token(state, token, None).await.is_ok();
+    }
+    let jar = CookieJar::from_headers(headers);
+    let Some(token) = jar.get(SESSION_COOKIE).map(Cookie::value) else {
+        return false;
+    };
+    let hash = crypto::hash_token(token);
+    let current_now = now();
+    let idle_cutoff = ts(chrono::Utc::now() - chrono::Duration::days(SESSION_IDLE_DAYS));
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sessions s
+         JOIN users u ON u.id = s.user_id AND u.disabled = 0
+         WHERE s.token_hash = ? AND s.expires_at > ?
+           AND (s.last_active_at IS NULL OR s.last_active_at > ?)",
+    )
+    .bind(&hash)
+    .bind(&current_now)
+    .bind(&idle_cutoff)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+async fn from_api_token(
+    state: &AppState,
+    token: &str,
+    ip: Option<&str>,
+) -> ApiResult<Auth<Viewer>> {
     let hash = crypto::hash_token(token);
     let current_now = now();
     let row = sqlx::query(
@@ -182,15 +215,16 @@ async fn from_api_token(state: &AppState, token: &str) -> ApiResult<Auth<Viewer>
     let member_role = parse_role(row.get("member_role"))?;
     let id: String = row.get("id");
 
-    // Coarse last-used tracking: at most one write per token per minute.
+    // Coarse last-used + last-ip tracking: at most one write per token per minute.
     let cutoff = ts(chrono::Utc::now() - chrono::Duration::minutes(1));
     let last_used: Option<String> = row.get("last_used_at");
     if last_used.as_deref().is_none_or(|t| t < cutoff.as_str()) {
         let _ = sqlx::query(
-            "UPDATE api_tokens SET last_used_at = ?
+            "UPDATE api_tokens SET last_used_at = ?, last_ip = COALESCE(?, last_ip)
              WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
         )
         .bind(&current_now)
+        .bind(ip)
         .bind(&id)
         .bind(&cutoff)
         .execute(&state.db)

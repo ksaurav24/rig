@@ -46,11 +46,15 @@ pub const TAILSCALE_RANGES: &[&str] = &[
     "::1/128",
 ];
 
+/// Loopback-only ranges for `local` mode.
+pub const LOCAL_RANGES: &[&str] = &["127.0.0.0/8", "::1/128"];
+
 pub fn ranges(access: Access) -> &'static [&'static str] {
     match access {
         Access::Public => &[],
         Access::Lan => LAN_RANGES,
         Access::Tailscale => TAILSCALE_RANGES,
+        Access::Local => LOCAL_RANGES,
     }
 }
 
@@ -270,7 +274,7 @@ pub fn allows_with_blocked<S: AsRef<str>>(access: Access, ip: IpAddr, blocked: &
 
 /// The dashboard's current mode and active container bridge CIDRs, kept in
 /// memory so per-request checks cost nothing.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DashboardAccess {
     mode: Arc<AtomicU8>,
     blocked_bridges: Arc<RwLock<(Vec<String>, Option<Instant>)>>,
@@ -281,6 +285,7 @@ impl DashboardAccess {
         match self.mode.load(Ordering::Relaxed) {
             1 => Access::Lan,
             2 => Access::Tailscale,
+            3 => Access::Local,
             _ => Access::Public,
         }
     }
@@ -290,6 +295,7 @@ impl DashboardAccess {
             Access::Public => 0,
             Access::Lan => 1,
             Access::Tailscale => 2,
+            Access::Local => 3,
         };
         self.mode.store(v, Ordering::Relaxed);
     }
@@ -326,6 +332,7 @@ pub fn parse(s: &str) -> Access {
     match s {
         "lan" => Access::Lan,
         "tailscale" => Access::Tailscale,
+        "local" => Access::Local,
         _ => Access::Public,
     }
 }
@@ -360,12 +367,20 @@ pub async fn guard(State(state): State<AppState>, req: Request, next: Next) -> R
         let peer = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| crate::auth::real_ip(req.headers(), c.0.ip()));
+            .map(|c| {
+                // Local mode ignores forwarded headers completely: only direct loopback peers pass.
+                if mode == Access::Local {
+                    c.0.ip()
+                } else {
+                    crate::auth::real_ip(req.headers(), c.0.ip())
+                }
+            });
         let blocked = state.access.blocked_bridges();
         if !peer.is_some_and(|ip| allows_with_blocked(mode, ip, &blocked)) {
             let msg = match mode {
-                Access::Lan => "This Rig dashboard only answers on the local network.",
-                _ => "This Rig dashboard only answers on its tailnet.",
+                Access::Lan => "This Rig server only answers on the local network.",
+                Access::Local => "This Rig server only answers on loopback (local mode).",
+                _ => "This Rig server only answers on its tailnet.",
             };
             return (axum::http::StatusCode::FORBIDDEN, msg).into_response();
         }
@@ -414,11 +429,16 @@ mod tests {
     fn mode_round_trips() {
         let d = DashboardAccess::default();
         assert_eq!(d.get(), Access::Public);
-        for a in [Access::Lan, Access::Tailscale, Access::Public] {
+        for a in [Access::Lan, Access::Tailscale, Access::Local, Access::Public] {
             d.set(a);
             assert_eq!(d.get(), a);
             assert_eq!(parse(a.as_str()), a);
         }
+        assert!(allows(Access::Local, ip("127.0.0.1")));
+        assert!(allows(Access::Local, ip("::1")));
+        assert!(!allows(Access::Local, ip("192.168.1.9")));
+        assert!(!allows(Access::Local, ip("100.126.82.121")));
+        assert!(!allows(Access::Local, ip("8.8.8.8")));
     }
 
     #[test]

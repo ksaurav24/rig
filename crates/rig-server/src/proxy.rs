@@ -55,6 +55,9 @@ pub struct CaddyOptions {
     /// Loopback port Rig itself listens on, so the proxy can serve the
     /// dashboard. None leaves the dashboard off the proxy.
     pub dashboard_port: Option<u16>,
+    /// Current dashboard access mode; when `Access::Local`, Caddy publishes no
+    /// route for the Rig API/dashboard while keeping app domains intact.
+    pub dashboard_access: Option<access::DashboardAccess>,
 }
 
 pub struct CaddyProxy {
@@ -150,7 +153,13 @@ pub fn caddy_config_with_blocked(
 ) -> Value {
     let mut all: Vec<Route> = routes.to_vec();
     let mut fallback = None;
-    if let Some(port) = opts.dashboard_port {
+    let is_local_only = opts
+        .dashboard_access
+        .as_ref()
+        .is_some_and(|a| a.get() == Access::Local);
+    if !is_local_only
+        && let Some(port) = opts.dashboard_port
+    {
         match dashboard {
             Some(d) => all.push(Route {
                 host: d.host.clone(),
@@ -425,7 +434,30 @@ mod tests {
             http_port: 80,
             https_port: 443,
             dashboard_port: None,
+            dashboard_access: None,
         }
+    }
+
+    #[test]
+    fn local_access_omits_dashboard_route_but_keeps_apps() {
+        let access = access::DashboardAccess::default();
+        access.set(Access::Local);
+        let o = CaddyOptions {
+            dashboard_port: Some(7460),
+            dashboard_access: Some(access),
+            ..opts()
+        };
+        let d = DashboardDomain {
+            host: "rig.example.com".into(),
+            tls_mode: TlsMode::Auto,
+        };
+        let c = caddy_config(&o, &[r("app.example.com", TlsMode::Auto, 32001)], Some(&d));
+        let https = c["apps"]["http"]["servers"]["rig_https"]["routes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(https.len(), 1);
+        assert_eq!(https[0]["match"][0]["host"], json!(["app.example.com"]));
+        assert!(c["apps"]["http"]["servers"].get("rig_http").is_none());
     }
 
     #[test]

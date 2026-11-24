@@ -112,6 +112,19 @@ impl From<reqwest::Error> for CliError {
     }
 }
 
+impl From<rig_client::ClientError> for CliError {
+    fn from(e: rig_client::ClientError) -> Self {
+        match e {
+            rig_client::ClientError::Auth(m) => Self::Auth(m),
+            rig_client::ClientError::SecondFactorRequired { message, .. } => Self::Auth(message),
+            rig_client::ClientError::NotFound(m) => Self::NotFound(m),
+            rig_client::ClientError::Conflict(m) => Self::Conflict(m),
+            rig_client::ClientError::Network(m) => Self::Network(m),
+            other => Self::Other(anyhow::anyhow!(other.to_string())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

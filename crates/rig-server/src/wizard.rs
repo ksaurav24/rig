@@ -64,9 +64,13 @@ pub struct WizardArgs {
     #[arg(long)]
     pub tls: Option<String>,
 
-    /// Pre-selected dashboard access mode from CLI flags (`public`, `lan`, `tailscale`).
+    /// Pre-selected dashboard access mode from CLI flags (`public`, `lan`, `tailscale`, `local`).
     #[arg(long)]
     pub access: Option<String>,
+
+    /// Pre-selected install mode from CLI flags (`full` or `headless`).
+    #[arg(long)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +172,7 @@ enum AccessChoice {
     Public,
     Lan,
     Tailscale,
+    Local,
 }
 
 impl AccessChoice {
@@ -176,6 +181,7 @@ impl AccessChoice {
             Self::Public => "public",
             Self::Lan => "lan",
             Self::Tailscale => "tailscale",
+            Self::Local => "local",
         }
     }
 
@@ -184,6 +190,7 @@ impl AccessChoice {
             Self::Public => "Public (anyone with the URL)",
             Self::Lan => "LAN only (private networks)",
             Self::Tailscale => "Tailscale only (tailnet devices)",
+            Self::Local => "Local only (SSH / on-box)",
         }
     }
 }
@@ -417,7 +424,15 @@ async fn run_inner(args: &WizardArgs) -> Result<WizardOutcome> {
     };
 
     // Step 2: Install mode
-    let mode = loop {
+    let mode = if let Some(pre) = args.mode.as_deref() {
+        match pre {
+            "full" | "headless" => {
+                cliclack::log::step(format!("Install mode: {pre} (from CLI flag)"))?;
+                pre.to_string()
+            }
+            other => bail!("invalid install mode '{other}' (expected full or headless)"),
+        }
+    } else {
         let picked = cliclack::select("Install mode")
             .item(
                 ModeChoice::Full,
@@ -426,18 +441,14 @@ async fn run_inner(args: &WizardArgs) -> Result<WizardOutcome> {
             )
             .item(
                 ModeChoice::Headless,
-                "Headless (API & CLI only) [coming soon]",
-                "not available yet",
+                "Headless (API only)",
+                "manage from Rig Desktop or CLI",
             )
             .initial_value(ModeChoice::Full)
             .interact()?;
         match picked {
-            ModeChoice::Full => break "full".to_string(),
-            ModeChoice::Headless => {
-                cliclack::log::warning(
-                    "Headless mode is not available yet — choose Full to continue, or press Esc/Ctrl+C to cancel.",
-                )?;
-            }
+            ModeChoice::Full => "full".to_string(),
+            ModeChoice::Headless => "headless".to_string(),
         }
     };
 
@@ -479,9 +490,15 @@ async fn run_inner(args: &WizardArgs) -> Result<WizardOutcome> {
         _ => "Off (plain HTTP)",
     };
 
+    let mode_label = if mode == "headless" {
+        "Headless (API only)"
+    } else {
+        "Full (API + web dashboard)"
+    };
+
     let summary = format!(
         "Engine:   {engine_note}\n\
-         Mode:     Full (API + web dashboard)\n\
+         Mode:     {mode_label}\n\
          Address:  {public_url}\n\
          HTTPS:    {tls_label}\n\
          Access:   {}",
@@ -771,6 +788,12 @@ fn prompt_access(
         let choice = match pre {
             "public" => AccessChoice::Public,
             "lan" => AccessChoice::Lan,
+            "local" => {
+                cliclack::log::warning(
+                    "The desktop app can reach this server only over an SSH tunnel (coming later) or from this machine.",
+                )?;
+                AccessChoice::Local
+            }
             "tailscale" => {
                 if !ts_state.is_connected() {
                     bail!(
@@ -779,7 +802,7 @@ fn prompt_access(
                 }
                 AccessChoice::Tailscale
             }
-            other => bail!("invalid access mode '{other}' (expected public, lan or tailscale)"),
+            other => bail!("invalid access mode '{other}' (expected public, lan, tailscale or local)"),
         };
         cliclack::log::step(format!("Dashboard access: {} (from CLI flag)", choice.as_str()))?;
         return Ok(choice);
@@ -802,8 +825,18 @@ fn prompt_access(
             .item(AccessChoice::Public, "Public", "anyone with the URL")
             .item(AccessChoice::Lan, "LAN only", "private network ranges only")
             .item(AccessChoice::Tailscale, ts_access_label, ts_access_hint)
+            .item(
+                AccessChoice::Local,
+                "Local only (SSH / on-box)",
+                "loopback 127.0.0.1 / ::1 only; no proxy route",
+            )
             .initial_value(default_access)
             .interact()?;
+        if picked == AccessChoice::Local {
+            cliclack::log::warning(
+                "The desktop app can reach this server only over an SSH tunnel (coming later) or from this machine.",
+            )?;
+        }
         if picked == AccessChoice::Tailscale && !ts_state.is_connected() {
             match ts_state {
                 TailscaleState::InstalledNotConnected => {
@@ -1170,6 +1203,7 @@ mod tests {
             domain: None,
             tls: None,
             access: None,
+            mode: None,
         }
     }
 

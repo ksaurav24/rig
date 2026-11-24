@@ -180,6 +180,15 @@ pub fn notify(state: &AppState, org_id: &str, alert: Alert) {
     if !should_send(org_id, &alert) {
         return;
     }
+    state.events.publish(
+        org_id,
+        event_key(alert.event),
+        alert.title.clone(),
+        Some(alert.detail.clone()),
+        alert.target.clone(),
+        None,
+        None,
+    );
     let state = state.clone();
     let org_id = org_id.to_owned();
     tokio::spawn(async move {

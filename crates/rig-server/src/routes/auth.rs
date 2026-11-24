@@ -8,7 +8,7 @@ use axum::{
 use axum_extra::extract::CookieJar;
 use rig_api::{
     ApiToken, AuditEntry, CreateApiTokenRequest, CreatedApiToken, ErrorBody, LoginRequest, Me,
-    Organization, PublicBranding, Role, SetupRequest, SetupStatus, User,
+    Organization, PublicBranding, Role, SetupRequest, SetupStatus, TokenKind, User,
 };
 use sqlx::Row;
 use std::net::SocketAddr;
@@ -268,22 +268,26 @@ async fn complete_setup(
     ))
 }
 
-/// Sign in with email and password. Sets the session cookie.
-#[utoipa::path(post, path = "/api/v1/auth/login", tag = "auth", request_body = LoginRequest,
-    responses((status = 200, body = Me), (status = 401, body = ErrorBody),
-              (status = 429, body = ErrorBody)))]
-async fn login(
-    State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Json(req): Json<LoginRequest>,
-) -> ApiResult<(CookieJar, Json<Me>)> {
-    auth::check_origin(&state, &headers, Some(addr.ip()))?;
-    let ip = peer_ip(&headers, addr);
-    let ua = user_agent(&headers).map(|s| s.chars().take(256).collect::<String>());
+pub(crate) struct VerifiedLogin {
+    pub user: User,
+    pub org: Organization,
+    pub role: Role,
+    pub must_change_password: bool,
+    pub ip: String,
+}
+
+/// Shared password + TOTP verification used by both browser session login
+/// (`/api/v1/auth/login`) and Rig Desktop device login (`/api/v1/devices/login`).
+pub(crate) async fn verify_login_credentials(
+    state: &AppState,
+    addr: SocketAddr,
+    headers: &HeaderMap,
+    req: LoginRequest,
+) -> ApiResult<VerifiedLogin> {
+    let ip = peer_ip(headers, addr);
+    let ua = user_agent(headers).map(|s| s.chars().take(256).collect::<String>());
     let ip_key = format!("login:ip:{ip}");
-    auth::check_rate(&state, &ip_key, MAX_LOGIN_FAILURES_PER_IP).await?;
+    auth::check_rate(state, &ip_key, MAX_LOGIN_FAILURES_PER_IP).await?;
 
     // Step 2 using a server-side 2FA challenge token (no password re-transmission).
     let (user_id, email, name, avatar_url, must_change_password) =
@@ -309,7 +313,7 @@ async fn login(
             .fetch_optional(&state.db)
             .await?;
             let Some(prow) = prow else {
-                auth::record_failure(&state, &ip_key).await?;
+                auth::record_failure(state, &ip_key).await?;
                 return Err(ApiError::Unauthorized);
             };
             let bound_ip: Option<String> = prow.get("ip");
@@ -318,7 +322,7 @@ async fn login(
                 || bound_ua.as_deref() != ua.as_deref()
                 || prow.get::<i64, _>("disabled") != 0
             {
-                auth::record_failure(&state, &ip_key).await?;
+                auth::record_failure(state, &ip_key).await?;
                 return Err(ApiError::Unauthorized);
             }
             let user_id: String = prow.get("user_id");
@@ -327,12 +331,12 @@ async fn login(
                 return Err(ApiError::Unauthorized);
             };
             let totp_key = format!("totp:user:{user_id}");
-            auth::check_rate(&state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
-            if !super::account::check_code(&state, &user_id, &secret, code).await? {
-                auth::record_failure(&state, &ip_key).await?;
-                auth::record_failure(&state, &totp_key).await?;
+            auth::check_rate(state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+            if !super::account::check_code(state, &user_id, &secret, code).await? {
+                auth::record_failure(state, &ip_key).await?;
+                auth::record_failure(state, &totp_key).await?;
                 auth::audit(
-                    &state,
+                    state,
                     AuditEvent {
                         org_id: None,
                         user_id: Some(&user_id),
@@ -346,8 +350,6 @@ async fn login(
                 .await?;
                 return Err(ApiError::Unauthorized);
             }
-            // Single-use: consume the challenge atomically so two concurrent
-            // requests cannot both redeem it.
             let consumed = sqlx::query("DELETE FROM pending_2fa WHERE token_hash = ?")
                 .bind(&challenge_hash)
                 .execute(&state.db)
@@ -356,7 +358,7 @@ async fn login(
             if consumed != 1 {
                 return Err(ApiError::Unauthorized);
             }
-            auth::clear_failures(&state, &totp_key).await?;
+            auth::clear_failures(state, &totp_key).await?;
             let must_change = prow.get::<i64, _>("must_change_password") != 0;
             if must_change
                 && let Some(exp) = prow.get::<Option<String>, _>("temp_password_expires_at")
@@ -377,9 +379,8 @@ async fn login(
             let email = req.email.trim().to_lowercase();
             let pair_key = format!("login:pair:{email}:{ip}");
             let global_email_key = format!("login:email:{email}");
-            auth::check_rate(&state, &pair_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
-            auth::check_rate(&state, &global_email_key, MAX_LOGIN_FAILURES_PER_EMAIL_GLOBAL)
-                .await?;
+            auth::check_rate(state, &pair_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+            auth::check_rate(state, &global_email_key, MAX_LOGIN_FAILURES_PER_EMAIL_GLOBAL).await?;
 
             let row = sqlx::query(
                 "SELECT u.id, u.name, u.avatar_url, u.password_hash, u.disabled, u.totp_secret,
@@ -390,8 +391,6 @@ async fn login(
             .fetch_optional(&state.db)
             .await?;
 
-            // Always run one Argon2 verification, so response time does not reveal
-            // whether the account exists.
             let (stored, found) = match &row {
                 Some(r) if r.get::<i64, _>("disabled") == 0 => {
                     (r.get::<String, _>("password_hash"), true)
@@ -405,11 +404,11 @@ async fn login(
                     .map_err(|e| ApiError::Internal(e.into()))?;
 
             let Some(row) = row.filter(|_| ok && found) else {
-                auth::record_failure(&state, &ip_key).await?;
-                auth::record_failure(&state, &pair_key).await?;
-                auth::record_failure(&state, &global_email_key).await?;
+                auth::record_failure(state, &ip_key).await?;
+                auth::record_failure(state, &pair_key).await?;
+                auth::record_failure(state, &global_email_key).await?;
                 auth::audit(
-                    &state,
+                    state,
                     AuditEvent {
                         org_id: None,
                         user_id: None,
@@ -434,8 +433,6 @@ async fn login(
                 ));
             }
 
-            // The password was right. With a second factor on, issue a short-lived
-            // server-side challenge token (or verify an inline code if provided).
             if let Some(secret) = row.get::<Option<String>, _>("totp_secret") {
                 let Some(code) = req.code.as_deref().map(str::trim).filter(|c| !c.is_empty())
                 else {
@@ -454,7 +451,7 @@ async fn login(
                     .execute(&state.db)
                     .await?;
                     auth::audit(
-                        &state,
+                        state,
                         AuditEvent {
                             org_id: None,
                             user_id: Some(&user_id),
@@ -469,12 +466,12 @@ async fn login(
                     return Err(ApiError::SecondFactorRequired(Some(challenge_token)));
                 };
                 let totp_key = format!("totp:user:{user_id}");
-                auth::check_rate(&state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
-                if !super::account::check_code(&state, &user_id, &secret, code).await? {
-                    auth::record_failure(&state, &ip_key).await?;
-                    auth::record_failure(&state, &totp_key).await?;
+                auth::check_rate(state, &totp_key, MAX_LOGIN_FAILURES_PER_PAIR).await?;
+                if !super::account::check_code(state, &user_id, &secret, code).await? {
+                    auth::record_failure(state, &ip_key).await?;
+                    auth::record_failure(state, &totp_key).await?;
                     auth::audit(
-                        &state,
+                        state,
                         AuditEvent {
                             org_id: None,
                             user_id: Some(&user_id),
@@ -488,9 +485,9 @@ async fn login(
                     .await?;
                     return Err(ApiError::Unauthorized);
                 }
-                auth::clear_failures(&state, &totp_key).await?;
+                auth::clear_failures(state, &totp_key).await?;
             }
-            auth::clear_failures(&state, &pair_key).await?;
+            auth::clear_failures(state, &pair_key).await?;
             (
                 user_id,
                 email,
@@ -528,42 +525,65 @@ async fn login(
         .bind(&user_id)
         .execute(&state.db)
         .await?;
+
+    Ok(VerifiedLogin {
+        user: User {
+            id: user_id,
+            email,
+            name,
+            avatar_url,
+        },
+        org,
+        role,
+        must_change_password,
+        ip,
+    })
+}
+
+/// Sign in with email and password. Sets the session cookie.
+#[utoipa::path(post, path = "/api/v1/auth/login", tag = "auth", request_body = LoginRequest,
+    responses((status = 200, body = Me), (status = 401, body = ErrorBody),
+              (status = 429, body = ErrorBody)))]
+async fn login(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    jar: CookieJar,
+    Json(req): Json<LoginRequest>,
+) -> ApiResult<(CookieJar, Json<Me>)> {
+    auth::check_origin(&state, &headers, Some(addr.ip()))?;
+    let verified = verify_login_credentials(&state, addr, &headers, req).await?;
     auth::audit(
         &state,
         AuditEvent {
-            org_id: Some(&org.id),
-            user_id: Some(&user_id),
-            actor: &email,
+            org_id: Some(&verified.org.id),
+            user_id: Some(&verified.user.id),
+            actor: &verified.user.email,
             action: "auth.login",
             target: None,
             detail: None,
-            ip: Some(&ip),
+            ip: Some(&verified.ip),
         },
     )
     .await?;
 
     let (cookie, csrf_token) = auth::create_session(
         &state,
-        &user_id,
-        &org.id,
+        &verified.user.id,
+        &verified.org.id,
         user_agent(&headers),
-        Some(&ip),
+        Some(&verified.ip),
         auth::is_https(&state, &headers, Some(addr.ip())),
     )
     .await?;
     Ok((
         jar.add(cookie),
         Json(Me {
-            user: User {
-                id: user_id,
-                email,
-                name,
-                avatar_url,
-            },
-            org,
-            role,
+            user: verified.user,
+            org: verified.org,
+            role: verified.role,
             csrf_token,
-            must_change_password,
+            must_change_password: verified.must_change_password,
         }),
     ))
 }
@@ -633,6 +653,8 @@ fn token_from_row(r: &sqlx::sqlite::SqliteRow) -> ApiToken {
         name: r.get("name"),
         prefix: r.get("prefix"),
         role: Role::parse(r.get("role")).unwrap_or(Role::Viewer),
+        kind: TokenKind::parse(r.get("kind")),
+        last_ip: r.get("last_ip"),
         last_used_at: r.get("last_used_at"),
         expires_at: r.get("expires_at"),
         created_at: r.get("created_at"),
@@ -647,8 +669,8 @@ async fn list_tokens(
     auth: Auth<Viewer>,
 ) -> ApiResult<Json<Vec<ApiToken>>> {
     let rows = sqlx::query(
-        "SELECT id, name, prefix, role, last_used_at, expires_at, created_at
-         FROM api_tokens WHERE org_id = ? AND user_id = ? ORDER BY created_at DESC",
+        "SELECT id, name, prefix, role, kind, last_ip, last_used_at, expires_at, created_at
+         FROM api_tokens WHERE org_id = ? AND user_id = ? AND kind = 'api' ORDER BY created_at DESC",
     )
     .bind(&auth.org_id)
     .bind(&auth.user_id)
@@ -717,6 +739,8 @@ async fn create_token(
             name,
             prefix,
             role: req.role,
+            kind: TokenKind::Api,
+            last_ip: None,
             last_used_at: None,
             expires_at,
             created_at,

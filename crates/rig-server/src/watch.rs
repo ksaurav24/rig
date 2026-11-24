@@ -455,12 +455,14 @@ mod tests {
                 allow_private_alerts: false,
                 allow_private_git: false,
                 enable_api_docs: false,
+                mode: rig_api::ServerMode::Full,
             }),
             runtime: Arc::new(PortShiftRuntime),
             proxy: Arc::new(RecordingProxy(applied_routes.clone())),
             deploys: Arc::new(crate::deploy::Deployer::new().unwrap()),
             access: crate::access::DashboardAccess::default(),
             caches: Arc::new(crate::state::RuntimeCaches::default()),
+            events: Arc::new(crate::events::EventBus::new()),
         };
 
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ('org1', 'Acme', 'acme')")

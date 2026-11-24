@@ -9,14 +9,14 @@ use axum::{
     http::HeaderMap,
 };
 use rig_api::{
-    Access, DashboardAccessRequest, DashboardDomainRequest, ErrorBody, NetworkInfo, SystemInfo,
-    TailscaleInfo, TlsMode,
+    Access, DashboardAccessRequest, DashboardDomainRequest, ErrorBody, NetworkInfo, ServerMeta,
+    SystemInfo, TailscaleInfo, TlsMode,
 };
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     access,
-    auth::{Auth, Owner, Viewer, real_ip},
+    auth::{self, Auth, Owner, Viewer, real_ip},
     error::{ApiError, ApiResult},
     metrics::cached_system_snapshot,
     proxy,
@@ -24,13 +24,41 @@ use crate::{
 };
 
 const NETWORK_CACHE_TTL: Duration = Duration::from_secs(30);
+pub const API_VERSION: u32 = 1;
+
+const CAPABILITIES: &[&str] = &[
+    "events_sse",
+    "device_pairing",
+    "local_deploy",
+    "terminal_ws",
+    "env_bulk",
+];
 
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
+        .routes(routes!(server_meta))
         .routes(routes!(system_info))
         .routes(routes!(network_info))
         .routes(routes!(set_dashboard_access))
         .routes(routes!(set_dashboard_domain))
+}
+
+/// Server version and capability negotiation. Returns minimal info without auth;
+/// includes `mode` and `access` when authenticated.
+#[utoipa::path(get, path = "/api/v1/meta", tag = "system",
+    responses((status = 200, body = ServerMeta)))]
+async fn server_meta(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<ServerMeta> {
+    let authed = auth::is_authenticated_request(&state, &headers).await;
+    Json(ServerMeta {
+        server_version: env!("CARGO_PKG_VERSION").into(),
+        api_version: API_VERSION,
+        mode: authed.then_some(state.config.mode),
+        access: authed.then(|| state.access.get()),
+        capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
+    })
 }
 
 /// Health of the server Rig runs on: engine, proxy and resource usage.
@@ -196,17 +224,30 @@ async fn set_dashboard_access(
     Json(req): Json<DashboardAccessRequest>,
 ) -> ApiResult<Json<NetworkInfo>> {
     auth.require_session("sign in to the dashboard to change network access settings")?;
-    let you = real_ip(&headers, addr.ip());
+    let you = if req.access == Access::Local {
+        addr.ip()
+    } else {
+        real_ip(&headers, addr.ip())
+    };
     if !access::allows(req.access, you) {
         return Err(ApiError::validation(match req.access {
             Access::Tailscale => {
                 "you are not connected over Tailscale, so this would lock you out; open the dashboard on its tailnet address first"
             }
+            Access::Local => {
+                "you are not connected over loopback (127.0.0.1 / ::1), so local mode would lock you out"
+            }
             _ => "you are not on the local network, so this would lock you out",
         }));
     }
+    let prev = state.access.get();
     access::store(&state.db, req.access).await?;
     state.access.set(req.access);
+    if prev == Access::Local || req.access == Access::Local {
+        if let Err(e) = proxy::sync(&state).await {
+            tracing::warn!("proxy not updated after switching local access mode: {e:#}");
+        }
+    }
     auth.audit(
         &state,
         "system.dashboard_access",

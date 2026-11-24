@@ -11,6 +11,7 @@ pub mod context;
 pub mod databases;
 pub mod deploy;
 pub mod deployments;
+pub mod devices;
 pub mod domains;
 pub mod env;
 pub mod exec;
@@ -21,6 +22,7 @@ pub mod members;
 pub mod metrics;
 pub mod open;
 pub mod projects;
+pub mod setup;
 pub mod status;
 pub mod tokens;
 pub mod up;
@@ -30,6 +32,8 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Initialize a freshly installed (or headless) Rig server without a browser.
+    Setup(setup::SetupArgs),
     /// Save a server and API token as a context, and switch to it.
     Login(auth::LoginArgs),
     /// Remove a context and its stored token (optionally revoking it on the server).
@@ -82,6 +86,8 @@ pub enum Command {
     Top(metrics::TopArgs),
     /// Manage your API tokens (`ls`, `create`, `revoke`).
     Tokens(tokens::TokensArgs),
+    /// Pair and manage Rig Desktop / mobile devices (`pair`, `ls`, `revoke`).
+    Devices(devices::DevicesArgs),
     /// Manage organization members and roles (`ls`, `add`, `role`, `rm`, `reset-password`).
     Members(members::MembersArgs),
     /// View the organization's audit log.

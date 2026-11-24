@@ -42,7 +42,7 @@ Options:
   --podman                         Use rootless Podman as the container engine
   --docker                         Use Docker as the container engine
   --engine <podman|docker>         Explicit container engine (env: RIG_ENGINE)
-  --mode <full|headless>           Install mode: full (default), headless (coming soon)
+  --mode <full|headless>           Install mode: full (default) or headless (API only)
   --headless                       Shorthand for --mode headless
   --domain <host>                  Dashboard domain or IP (env: RIG_DOMAIN)
   --tls <auto|internal|tailscale|off>
@@ -51,7 +51,8 @@ Options:
                                      tailscale Tailscale cert (requires Tailscale)
                                      internal  Self-signed Private CA (IP or LAN host)
                                      off       Plain HTTP (not recommended)
-  --access <public|lan|tailscale>  Who may reach the dashboard (env: RIG_ACCESS)
+  --access <public|lan|tailscale|local>
+                                   Who may reach the API/dashboard (env: RIG_ACCESS)
   -y, --yes, --non-interactive     Skip interactive wizard; use flags & defaults (env: RIG_YES=1)
   --version <ver>                  Release version to download, e.g. 0.1.0 (env: RIG_VERSION)
   --repo <owner/repo>              GitHub repo for releases (default: ksaurav24/rig, env: RIG_REPO)
@@ -128,8 +129,7 @@ OPT_REPO=${OPT_REPO:-${RIG_REPO:-$DEFAULT_REPO}}
 [ "${RIG_YES:-0}" = 1 ] && NON_INTERACTIVE=1
 
 case "$OPT_MODE" in
-  full) ;;
-  headless) die "headless mode is coming soon and is not available yet" ;;
+  full | headless) ;;
   *) die "invalid mode '$OPT_MODE' (expected full or headless)" ;;
 esac
 if [ -n "$OPT_ENGINE" ]; then
@@ -139,7 +139,7 @@ if [ -n "$OPT_TLS" ]; then
   case "$OPT_TLS" in auto | internal | tailscale | off) ;; *) die "invalid --tls '$OPT_TLS' (expected auto, internal, tailscale or off)" ;; esac
 fi
 if [ -n "$OPT_ACCESS" ]; then
-  case "$OPT_ACCESS" in public | lan | tailscale) ;; *) die "invalid --access '$OPT_ACCESS' (expected public, lan or tailscale)" ;; esac
+  case "$OPT_ACCESS" in public | lan | tailscale | local) ;; *) die "invalid --access '$OPT_ACCESS' (expected public, lan, tailscale or local)" ;; esac
 fi
 
 # Temp resource cleanup.
@@ -384,6 +384,7 @@ else
       --podman-candidate "$podman_cand"
     )
     [ -n "$OPT_ENGINE" ] && wizard_args+=(--engine "$OPT_ENGINE")
+    [ -n "$OPT_MODE" ] && wizard_args+=(--mode "$OPT_MODE")
     [ -n "$OPT_DOMAIN" ] && wizard_args+=(--domain "$OPT_DOMAIN")
     [ -n "$OPT_TLS" ] && wizard_args+=(--tls "$OPT_TLS")
     [ -n "$OPT_ACCESS" ] && wizard_args+=(--access "$OPT_ACCESS")
@@ -425,6 +426,7 @@ else
       PLAN_TLS=off
     fi
 
+    PLAN_MODE=$OPT_MODE
     PLAN_DOMAIN=$OPT_DOMAIN
     case "$PLAN_TLS" in
       auto)
@@ -613,6 +615,7 @@ if [ ! -f "$ENV_FILE" ]; then
 # Rig settings. Restart after editing: systemctl restart rig
 RIG_DATA_DIR=$DATA_DIR
 RIG_LISTEN=$LISTEN
+RIG_MODE=${PLAN_MODE:-full}
 RIG_CADDY_ADMIN=http://127.0.0.1:2019
 RIG_PROXY_DASHBOARD=true
 RIG_PUBLIC_URL=$PLAN_PUBLIC_URL

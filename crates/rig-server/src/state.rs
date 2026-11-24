@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rig_api::TailscaleInfo;
+use rig_api::{ServerMode, TailscaleInfo};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -15,6 +15,7 @@ use sqlx::{
 use crate::{
     crypto::Vault,
     deploy::Deployer,
+    events::EventBus,
     proxy::Proxy,
     runtime::{EngineInfo, Runtime},
 };
@@ -65,6 +66,8 @@ pub struct Config {
     pub allow_private_git: bool,
     /// Serve the interactive Scalar API docs at `/api/docs` (authenticated).
     pub enable_api_docs: bool,
+    /// `full` serves the embedded dashboard alongside the API; `headless` serves the API only.
+    pub mode: ServerMode,
 }
 
 #[derive(Clone)]
@@ -78,6 +81,8 @@ pub struct AppState {
     /// Who may open the dashboard; see `access::guard`.
     pub access: crate::access::DashboardAccess,
     pub caches: Arc<RuntimeCaches>,
+    /// Process-local org-scoped event bus for `GET /api/v1/events`.
+    pub events: Arc<EventBus>,
 }
 
 pub async fn open_db(url: &str) -> Result<SqlitePool> {

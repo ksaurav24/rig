@@ -4,6 +4,8 @@ mod alerts;
 pub mod apps;
 pub mod auth;
 mod databases;
+pub mod devices;
+mod events;
 pub mod github;
 pub mod hooks;
 pub mod members;
@@ -74,7 +76,7 @@ async fn hsts_middleware(State(state): State<AppState>, req: Request, next: Next
 
 #[derive(OpenApi)]
 #[openapi(
-    components(schemas(rig_api::LogLine)),
+    components(schemas(rig_api::LogLine, rig_api::ServerEvent)),
     info(
         title = "Rig API",
         description = "Self-hosted deployment platform. Authenticate with the session cookie \
@@ -87,6 +89,8 @@ fn api() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(auth::router())
         .merge(account::router())
+        .merge(devices::router())
+        .merge(events::router())
         .merge(org::router())
         .merge(projects::router())
         .merge(apps::router())
@@ -152,8 +156,12 @@ pub fn app(state: AppState) -> Router {
             }),
         );
     }
+    let router = if state.config.mode == rig_api::ServerMode::Full {
+        router.fallback(crate::dashboard::serve)
+    } else {
+        router
+    };
     router
-        .fallback(crate::dashboard::serve)
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .merge(uploads::streaming_router())
         .layer(axum::middleware::from_fn_with_state(

@@ -13,3 +13,5 @@ master.key
 .DS_Store
 /.dev
 .codegraph/
+apps/desktop/src-tauri/gen/
+*.tsbuildinfo

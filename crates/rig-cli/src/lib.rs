@@ -90,6 +90,10 @@ pub async fn run(cli: Cli) -> CliResult<()> {
             })
             .await
         }
+        Command::Setup(args) => {
+            let mut config = Config::load()?;
+            commands::setup::run(&mut config, args, cli.insecure, verbose, out).await
+        }
         Command::Login(args) => {
             let mut config = Config::load()?;
             commands::auth::run_login(&mut config, args, cli.insecure, verbose, out).await
@@ -140,6 +144,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                 Command::Metrics(args) => commands::metrics::run_metrics(&api, args, out).await,
                 Command::Top(args) => commands::metrics::run_top(&api, args, out).await,
                 Command::Tokens(args) => commands::tokens::run(&api, args, out).await,
+                Command::Devices(args) => commands::devices::run(&api, args, out).await,
                 Command::Members(args) => commands::members::run(&api, args, out).await,
                 Command::Audit(args) => commands::audit::run(&api, args, out).await,
                 Command::Alerts(args) => commands::alerts::run(&api, args, out).await,
@@ -150,7 +155,8 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                     commands::link::run(&api, args, active_context, out).await
                 }
                 Command::Open(args) => commands::open::run(&api, args, out).await,
-                Command::Login(_)
+                Command::Setup(_)
+                | Command::Login(_)
                 | Command::Logout(_)
                 | Command::Context(_)
                 | Command::Completions(_)
