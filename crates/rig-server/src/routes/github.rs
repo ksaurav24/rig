@@ -1,24 +1,26 @@
 //! The organization's GitHub App: create it through GitHub's manifest flow,
 //! list the repositories it can read, and receive its push events.
 
+use std::net::SocketAddr;
+
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
 };
 use rig_api::{
-    ErrorBody, GithubAppInfo, GithubManifest, GithubManifestComplete, GithubManifestRequest,
-    GithubBranch, GithubPushResult, GithubRepo, GithubStatus,
+    ErrorBody, GithubAppInfo, GithubBranch, GithubManifest, GithubManifestComplete,
+    GithubManifestRequest, GithubPushResult, GithubRepo, GithubStatus, TlsMode,
 };
 use sqlx::Row;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
-    auth::{Admin, Auth, Developer, Viewer},
+    auth::{self, Admin, Auth, Developer, Viewer},
     crypto::random_token,
     error::{ApiError, ApiResult},
-    github,
+    github, proxy,
     routes::hooks::verify_hmac,
     state::{AppState, now},
 };
@@ -76,7 +78,7 @@ async fn load_status(state: &AppState, org_id: &str) -> ApiResult<GithubStatus> 
 #[utoipa::path(delete, path = "/api/v1/github", tag = "github",
     responses((status = 204), (status = 404, body = ErrorBody)))]
 async fn disconnect(State(state): State<AppState>, auth: Auth<Admin>) -> ApiResult<StatusCode> {
-    auth.require_session("sign in to the dashboard to disconnect the GitHub App")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to disconnect the GitHub App")?;
     let done = sqlx::query("DELETE FROM github_apps WHERE org_id = ?")
         .bind(&auth.org_id)
         .execute(&state.db)
@@ -96,8 +98,70 @@ fn valid_github_login(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// Validates an optional native-client loopback redirect URL for GitHub's manifest callback.
+fn validate_loopback_redirect_url(raw: &str) -> ApiResult<String> {
+    let trimmed = raw.trim();
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|_| ApiError::Validation("redirect_url is not a valid URL".into()))?;
+    if parsed.scheme() != "http"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_none()
+        || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+    {
+        return Err(ApiError::Validation(
+            "redirect_url must be a local loopback URL (http://127.0.0.1:<port>/callback)".into(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+async fn resolve_server_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: std::net::IpAddr,
+) -> ApiResult<String> {
+    if let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| o.starts_with("https://") || o.starts_with("http://"))
+    {
+        return Ok(origin.trim_end_matches('/').to_string());
+    }
+    if let Ok(Some(domain)) = proxy::dashboard_domain(&state.db).await {
+        let scheme = if domain.tls_mode == TlsMode::Off {
+            "http"
+        } else {
+            "https"
+        };
+        return Ok(format!("{scheme}://{}", domain.host));
+    }
+    let host = if peer.is_loopback() {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+    } else {
+        headers.get(header::HOST)
+    }
+    .and_then(|v| v.to_str().ok())
+    .map(str::trim)
+    .filter(|h| !h.is_empty());
+    let Some(host) = host else {
+        return Err(ApiError::Validation(
+            "could not determine server origin for GitHub App manifest".into(),
+        ));
+    };
+    let scheme = if auth::is_https(state, headers, Some(peer)) {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!("{scheme}://{host}"))
+}
+
 /// Start creating a GitHub App. The browser posts `manifest` to `post_url`;
-/// GitHub then redirects back to `/settings/github/callback`.
+/// GitHub then redirects back to `/settings/github/callback` (or the validated
+/// loopback `redirect_url` for Rig Desktop).
 #[utoipa::path(post, path = "/api/v1/github/manifest", tag = "github",
     request_body = GithubManifestRequest,
     responses((status = 200, body = GithubManifest), (status = 409, body = ErrorBody),
@@ -105,10 +169,11 @@ fn valid_github_login(s: &str) -> bool {
 async fn manifest(
     State(state): State<AppState>,
     auth: Auth<Admin>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<GithubManifestRequest>,
 ) -> ApiResult<Json<GithubManifest>> {
-    auth.require_session("sign in to the dashboard to connect a GitHub App")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to connect a GitHub App")?;
     let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM github_apps WHERE org_id = ?")
         .bind(&auth.org_id)
         .fetch_optional(&state.db)
@@ -118,15 +183,16 @@ async fn manifest(
             "a GitHub App is already connected; disconnect it first".into(),
         ));
     }
-    // The dashboard's own address, as the browser sees it. Session writes are
-    // already origin-checked, so this is the server's real public address.
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .filter(|o| o.starts_with("https://") || o.starts_with("http://"))
-        .ok_or_else(|| ApiError::Validation("start this from the dashboard".into()))?
-        .trim_end_matches('/')
-        .to_string();
+    let origin = resolve_server_origin(&state, &headers, addr.ip()).await?;
+    let redirect_url = match req
+        .redirect_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(custom) => validate_loopback_redirect_url(custom)?,
+        None => format!("{origin}/settings/github/callback"),
+    };
     let organization = req
         .organization
         .map(|o| o.trim().to_string())
@@ -142,7 +208,7 @@ async fn manifest(
         "name": format!("Rig {}", &random_token(4)[..6]),
         "url": origin,
         "hook_attributes": { "url": format!("{origin}{}", hook_path(&auth.org_id)), "active": true },
-        "redirect_url": format!("{origin}/settings/github/callback"),
+        "redirect_url": redirect_url,
         "public": false,
         "default_permissions": { "contents": "read", "metadata": "read" },
         "default_events": ["push"],
@@ -169,7 +235,7 @@ async fn complete(
     auth: Auth<Admin>,
     Json(req): Json<GithubManifestComplete>,
 ) -> ApiResult<Json<GithubStatus>> {
-    auth.require_session("sign in to the dashboard to connect a GitHub App")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to connect a GitHub App")?;
     if !github::take_state(&req.state, &auth.org_id, &auth.user_id) {
         return Err(ApiError::Validation(
             "this GitHub link expired or was not started by you; start again".into(),
@@ -327,4 +393,19 @@ async fn push_hook(
             deployment_ids: ids,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_redirect_url_validation() {
+        assert!(validate_loopback_redirect_url("http://127.0.0.1:45123/callback").is_ok());
+        assert!(validate_loopback_redirect_url("http://localhost:8080/callback").is_ok());
+        assert!(validate_loopback_redirect_url("https://evil.example.com/callback").is_err());
+        assert!(validate_loopback_redirect_url("http://127.0.0.1/callback").is_err());
+        assert!(validate_loopback_redirect_url("http://user:pass@127.0.0.1:8080/cb").is_err());
+        assert!(validate_loopback_redirect_url("https://127.0.0.1:8080/cb").is_err());
+    }
 }

@@ -24,7 +24,7 @@ import { BackupsSheet } from '@/components/app/backups-sheet'
 import { CopyButton } from '@/components/app/copy-button'
 import { NewAppDialog } from '@/components/app/new-app-dialog'
 import { NewDatabaseDialog } from '@/components/app/new-database-dialog'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { DeleteProjectDialog, EditProjectDialog } from '@/components/app/project-dialogs'
 import { EngineMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
@@ -34,15 +34,15 @@ import {
   DropdownSeparator,
   DropdownTrigger,
   MenuItem,
-} from '@/components/fluid/dropdown'
-import { Tooltip } from '@/components/fluid/tooltip'
+} from '@rig/ui/dropdown'
+import { Tooltip } from '@rig/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { timeAgo } from '@/lib/format'
 import { hasRole } from '@/lib/nav'
 import { usePreferences } from '@/lib/preferences'
 import { APP_STATUS, DATABASE_STATUS } from '@/lib/status'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 import { ConnectionDialog } from '@/routes/_app/databases/index'
 
 type App = Schemas['App']

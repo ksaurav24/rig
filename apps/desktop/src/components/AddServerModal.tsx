@@ -1,5 +1,4 @@
 import {
-  AlertTriangle,
   ArrowRight,
   KeyRound,
   Lock,
@@ -7,10 +6,23 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
-  X,
 } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
+import { Badge } from '@rig/ui/badge'
+import { Banner, BannerDescription, BannerTitle } from '@rig/ui/banner'
+import { Button } from '@rig/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
 import { desktopApi } from '@/lib/ipc'
 import type { ProbeServerResult, ServerView } from '@/lib/types'
 
@@ -21,6 +33,7 @@ interface AddServerModalProps {
 }
 
 type AuthTab = 'pair' | 'password' | 'setup'
+const AUTH_TABS: AuthTab[] = ['pair', 'password', 'setup']
 
 export function AddServerModal({ open, onClose, onAdded }: AddServerModalProps) {
   const [step, setStep] = useState<'url' | 'tls' | 'auth'>('url')
@@ -32,21 +45,15 @@ export function AddServerModal({ open, onClose, onAdded }: AddServerModalProps) 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Pair code state
   const [pairCode, setPairCode] = useState('')
-
-  // Password + TOTP state
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [totpCode, setTotpCode] = useState('')
   const [challengeToken, setChallengeToken] = useState<string | null>(null)
 
-  // First-run headless setup state
   const [setupToken, setSetupToken] = useState('')
   const [orgName, setOrgName] = useState('')
   const [ownerName, setOwnerName] = useState('')
-
-  if (!open) return null
 
   function reset() {
     setStep('url')
@@ -56,6 +63,11 @@ export function AddServerModal({ open, onClose, onAdded }: AddServerModalProps) 
     setPairCode('')
     setTotpCode('')
     setChallengeToken(null)
+  }
+
+  function handleClose() {
+    reset()
+    onClose()
   }
 
   async function runProbe(acceptFingerprint?: string) {
@@ -179,385 +191,304 @@ export function AddServerModal({ open, onClose, onAdded }: AddServerModalProps) 
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-line bg-surface shadow-2xl">
-        <div className="flex items-center justify-between border-b border-line px-5 py-4">
-          <div className="flex items-center gap-2.5">
-            <div className="flex size-8 items-center justify-center rounded-lg bg-emerald-500/15 text-emerald-400">
-              <Server className="size-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold text-fg">Add Rig Server</h2>
-              <p className="text-xs text-muted">
-                Connect public HTTPS, LAN (internal CA), or Tailscale servers
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              reset()
-              onClose()
-            }}
-            className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-fg"
-          >
-            <X className="size-4" />
-          </button>
-        </div>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) handleClose()
+      }}
+    >
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2.5">
+            <Server className="size-4.5 text-primary" />
+            Add Rig Server
+          </DialogTitle>
+          <DialogDescription>
+            Connect public HTTPS, LAN (internal CA), or Tailscale servers.
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="p-5">
+        <div className="space-y-4">
           {error && (
-            <div className="mb-4 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-300">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              <span>{error}</span>
-            </div>
+            <Banner role="alert" status="error" contrast="high" size="compact">
+              <BannerDescription>{error}</BannerDescription>
+            </Banner>
           )}
 
           {step === 'url' && (
             <form onSubmit={handleUrlSubmit} className="space-y-4">
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-fg">Server URL</label>
-                <input
+              <Field>
+                <FieldLabel htmlFor="srv-url">Server URL</FieldLabel>
+                <Input
+                  id="srv-url"
                   type="text"
                   autoFocus
                   required
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   placeholder="https://rig.example.com or http://127.0.0.1:7460"
-                  className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-emerald-500"
+                  className="font-mono"
                 />
-                <p className="mt-1.5 text-[11px] text-muted">
+                <FieldDescription>
                   Supports domain HTTPS, LAN internal CA (with fingerprint pinning), and Tailscale
                   MagicDNS.
-                </p>
-              </div>
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-fg">
-                  Display name <span className="text-muted">(optional)</span>
-                </label>
-                <input
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="srv-name">
+                  Display Name <span className="opacity-70">(optional)</span>
+                </FieldLabel>
+                <Input
+                  id="srv-name"
                   type="text"
                   value={serverName}
                   onChange={(e) => setServerName(e.target.value)}
                   placeholder="Production EU, Homelab, Staging…"
-                  className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
                 />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="rounded-lg px-3 py-2 text-xs text-muted hover:bg-surface-2 hover:text-fg"
-                >
+              </Field>
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={handleClose}>
                   Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                >
-                  {busy ? 'Checking server…' : 'Continue'}
-                  <ArrowRight className="size-3.5" />
-                </button>
-              </div>
+                </Button>
+                <Button type="submit" variant="primary" trailingIcon={ArrowRight} loading={busy}>
+                  Continue
+                </Button>
+              </DialogFooter>
             </form>
           )}
 
           {step === 'tls' && probe && (
             <div className="space-y-4">
-              <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5">
-                <ShieldAlert className="mt-0.5 size-5 shrink-0 text-amber-400" />
-                <div className="space-y-1 text-xs">
-                  <div className="font-semibold text-amber-200">
-                    Self-signed / Internal CA Certificate
-                  </div>
-                  <p className="text-amber-200/80">
-                    Verify this SHA-256 fingerprint matches your LAN server before pinning it. All
-                    future requests, SSE streams, and terminals will require this exact certificate.
-                  </p>
-                </div>
-              </div>
+              <Banner status="warning" contrast="high" icon={ShieldAlert}>
+                <BannerTitle>Self-signed / Internal CA Certificate</BannerTitle>
+                <BannerDescription>
+                  Verify this SHA-256 fingerprint matches your LAN server before pinning it. All
+                  future requests, SSE streams, and terminals will require this exact certificate.
+                </BannerDescription>
+              </Banner>
 
-              <div className="rounded-lg border border-line bg-bg p-3">
-                <div className="mb-1 text-[10px] font-medium tracking-wider text-muted uppercase">
+              <div className="rounded-lg border border-border bg-surface p-3.5">
+                <div className="mb-1.5 text-[11.5px] font-medium tracking-wider text-muted-foreground uppercase">
                   Leaf Certificate SHA-256
                 </div>
-                <code className="block break-all font-mono text-[11px] leading-relaxed text-emerald-300">
+                <code className="block break-all font-mono text-[12.5px] leading-relaxed text-ok">
                   {probe.tls.fingerprint_sha256 ?? 'Unavailable'}
                 </code>
               </div>
 
-              <div className="flex justify-between pt-2">
-                <button
-                  type="button"
-                  onClick={() => setStep('url')}
-                  className="rounded-lg px-3 py-2 text-xs text-muted hover:bg-surface-2 hover:text-fg"
-                >
+              <DialogFooter className="justify-between">
+                <Button type="button" variant="ghost" onClick={() => setStep('url')}>
                   Back
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  disabled={busy}
+                  variant="primary"
+                  leadingIcon={ShieldCheck}
+                  loading={busy}
                   onClick={handleTrustFingerprint}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                 >
-                  <ShieldCheck className="size-3.5" />
-                  {busy ? 'Pinning…' : 'Trust & Pin Certificate'}
-                </button>
-              </div>
+                  Trust & Pin Certificate
+                </Button>
+              </DialogFooter>
             </div>
           )}
 
           {step === 'auth' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg border border-line bg-bg px-3 py-2 text-xs">
-                <div className="min-w-0 truncate font-mono text-fg">{url}</div>
-                <div className="flex shrink-0 items-center gap-2">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3.5 py-2.5 text-[13px]">
+                <div className="min-w-0 truncate font-mono text-foreground">{url}</div>
+                <div className="flex shrink-0 items-center gap-1.5">
                   {pinnedFp && (
-                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                    <Badge variant="solid" color="emerald" size="compact">
                       TLS Pinned
-                    </span>
+                    </Badge>
                   )}
                   {probe?.meta && (
-                    <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-muted">
+                    <Badge variant="solid" color="gray" size="compact" className="font-mono">
                       v{probe.meta.server_version}
-                    </span>
+                    </Badge>
                   )}
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-1 rounded-lg bg-bg p-1 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTab('pair')
+              <div className="rounded-xl border border-border/80 bg-surface p-1">
+                <Tabs
+                  className="mx-0 my-0 w-full max-w-full px-0 py-0"
+                  selectedIndex={AUTH_TABS.indexOf(tab)}
+                  onSelect={(idx) => {
+                    setTab(AUTH_TABS[idx] ?? 'pair')
                     setError(null)
                   }}
-                  className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-medium transition-colors ${
-                    tab === 'pair' ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
-                  }`}
                 >
-                  <KeyRound className="size-3.5" />
-                  Pair Code
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTab('password')
-                    setError(null)
-                  }}
-                  className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-medium transition-colors ${
-                    tab === 'password' ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  <Lock className="size-3.5" />
-                  Password
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTab('setup')
-                    setError(null)
-                  }}
-                  className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-medium transition-colors ${
-                    tab === 'setup' ? 'bg-surface-2 text-fg' : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  <Sparkles className="size-3.5" />
-                  Initialize
-                </button>
+                  <TabsItem index={0} icon={KeyRound} label="Pair Code" className="flex-1 justify-center" />
+                  <TabsItem index={1} icon={Lock} label="Password" className="flex-1 justify-center" />
+                  <TabsItem index={2} icon={Sparkles} label="Initialize" className="flex-1 justify-center" />
+                </Tabs>
               </div>
 
               {tab === 'pair' && (
                 <form onSubmit={handlePairSubmit} className="space-y-4">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-medium text-fg">
-                      One-time pairing code
-                    </label>
-                    <input
+                  <Field>
+                    <FieldLabel htmlFor="pair-code">One-time Pairing Code</FieldLabel>
+                    <Input
+                      id="pair-code"
                       type="text"
                       autoFocus
                       required
                       value={pairCode}
                       onChange={(e) => setPairCode(e.target.value.toUpperCase())}
                       placeholder="ABCD-EFGH"
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-2.5 text-center font-mono text-base tracking-[0.25em] text-fg uppercase outline-none focus:border-emerald-500"
+                      className="h-11 text-center font-mono text-base tracking-[0.25em] uppercase"
                     />
-                    <p className="mt-1.5 text-[11px] text-muted">
+                    <FieldDescription>
                       Generate on the server with{' '}
-                      <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-fg">
+                      <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-foreground">
                         rig devices pair
                       </code>{' '}
                       or{' '}
-                      <code className="rounded bg-surface-2 px-1 py-0.5 font-mono text-fg">
+                      <code className="rounded bg-surface px-1.5 py-0.5 font-mono text-foreground">
                         rig-server devices pair
                       </code>
                       . Token is stored in your OS keychain.
-                    </p>
-                  </div>
-                  <div className="flex justify-between pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setStep('url')}
-                      className="rounded-lg px-3 py-2 text-xs text-muted hover:bg-surface-2 hover:text-fg"
-                    >
+                    </FieldDescription>
+                  </Field>
+                  <DialogFooter className="justify-between">
+                    <Button type="button" variant="ghost" onClick={() => setStep('url')}>
                       Back
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={busy}
-                      className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                    >
-                      {busy ? 'Pairing…' : 'Pair Device'}
-                    </button>
-                  </div>
+                    </Button>
+                    <Button type="submit" variant="primary" loading={busy}>
+                      Pair Device
+                    </Button>
+                  </DialogFooter>
                 </form>
               )}
 
               {tab === 'password' && (
-                <form onSubmit={handleLoginSubmit} className="space-y-3">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-fg">Email</label>
-                    <input
+                <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+                  <Field>
+                    <FieldLabel htmlFor="login-email">Email</FieldLabel>
+                    <Input
+                      id="login-email"
                       type="email"
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
                     />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-fg">Password</label>
-                    <input
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="login-pass">Password</FieldLabel>
+                    <Input
+                      id="login-pass"
                       type="password"
                       required
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
                     />
-                  </div>
+                  </Field>
                   {challengeToken && (
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-fg">
-                        Authenticator / Recovery Code
-                      </label>
-                      <input
+                    <Field>
+                      <FieldLabel htmlFor="login-totp">Authenticator / Recovery Code</FieldLabel>
+                      <Input
+                        id="login-totp"
                         type="text"
                         autoFocus
                         required
                         value={totpCode}
                         onChange={(e) => setTotpCode(e.target.value)}
                         placeholder="123456"
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-emerald-500"
+                        className="font-mono"
                       />
-                    </div>
+                    </Field>
                   )}
-                  <div className="flex justify-between pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setStep('url')}
-                      className="rounded-lg px-3 py-2 text-xs text-muted hover:bg-surface-2 hover:text-fg"
-                    >
+                  <DialogFooter className="justify-between">
+                    <Button type="button" variant="ghost" onClick={() => setStep('url')}>
                       Back
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={busy}
-                      className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                    >
-                      {busy ? 'Signing in…' : 'Sign In & Pair'}
-                    </button>
-                  </div>
+                    </Button>
+                    <Button type="submit" variant="primary" loading={busy}>
+                      Sign In & Pair
+                    </Button>
+                  </DialogFooter>
                 </form>
               )}
 
               {tab === 'setup' && (
-                <form onSubmit={handleSetupSubmit} className="space-y-2.5">
-                  <p className="text-[11px] text-muted">
+                <form onSubmit={handleSetupSubmit} className="space-y-3.5">
+                  <p className="text-[13px] text-muted-foreground">
                     Initialize a brand-new or headless Rig server directly from Rig Desktop.
                   </p>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-fg">Setup token</label>
-                      <input
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="setup-tok">Setup Token</FieldLabel>
+                      <Input
+                        id="setup-tok"
                         type="text"
                         required
                         value={setupToken}
                         onChange={(e) => setSetupToken(e.target.value)}
                         placeholder="from rig-server setup-token"
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
+                        className="font-mono"
                       />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-fg">Organization</label>
-                      <input
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="setup-org">Organization</FieldLabel>
+                      <Input
+                        id="setup-org"
                         type="text"
                         required
                         value={orgName}
                         onChange={(e) => setOrgName(e.target.value)}
                         placeholder="Acme Corp"
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
                       />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-fg">Owner name</label>
-                      <input
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="setup-owner">Owner Name</FieldLabel>
+                      <Input
+                        id="setup-owner"
                         type="text"
                         required
                         value={ownerName}
                         onChange={(e) => setOwnerName(e.target.value)}
                         placeholder="Ada Lovelace"
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
                       />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-fg">Owner email</label>
-                      <input
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="setup-email">Owner Email</FieldLabel>
+                      <Input
+                        id="setup-email"
                         type="email"
                         required
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
                       />
-                    </div>
+                    </Field>
                   </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-fg">
-                      Owner password <span className="text-muted">(min 10 chars)</span>
-                    </label>
-                    <input
+                  <Field>
+                    <FieldLabel htmlFor="setup-pass">
+                      Owner Password <span className="opacity-70">(min 10 chars)</span>
+                    </FieldLabel>
+                    <Input
+                      id="setup-pass"
                       type="password"
                       required
                       minLength={10}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
                     />
-                  </div>
-                  <div className="flex justify-between pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setStep('url')}
-                      className="rounded-lg px-3 py-2 text-xs text-muted hover:bg-surface-2 hover:text-fg"
-                    >
+                  </Field>
+                  <DialogFooter className="justify-between">
+                    <Button type="button" variant="ghost" onClick={() => setStep('url')}>
                       Back
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={busy}
-                      className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                    >
-                      {busy ? 'Initializing…' : 'Initialize & Connect'}
-                    </button>
-                  </div>
+                    </Button>
+                    <Button type="submit" variant="primary" loading={busy}>
+                      Initialize & Connect
+                    </Button>
+                  </DialogFooter>
                 </form>
               )}
             </div>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

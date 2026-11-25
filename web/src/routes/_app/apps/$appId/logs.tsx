@@ -4,7 +4,7 @@ import { ScrollText } from 'lucide-react'
 
 import { appQuery } from '@/api/queries'
 import { LogViewer } from '@/components/app/log-viewer'
-import { Panel } from '@/components/app/page'
+import { Panel } from '@rig/ui/app/page'
 import { EmptyState, Status } from '@/components/app/state'
 import { useLogStream } from '@/hooks/use-log-stream'
 

@@ -10,9 +10,10 @@ use std::time::Instant;
 
 use rig_api::{
     AddDomainRequest, AddMemberRequest, AlertChannel, AlertTestResult, ApiToken, App, AuditEntry,
-    Backup, CreateAlertChannelRequest, CreateAppRequest, CreateDatabaseRequest,
-    CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel, Database, DatabaseCredentials,
-    DatabaseEngineInfo, Deployment, DeviceLoginRequest, Domain, EnvVar, ExchangePairingRequest,
+    Backup, CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest,
+    CreateDatabaseRequest, CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel,
+    CreatedApiToken, Database, DatabaseCredentials, DatabaseEngineInfo, Deployment,
+    DeviceLoginRequest, Domain, EnvVar, ExchangePairingRequest, GithubBranch, GithubRepo,
     GithubStatus, LogLine, Me, Member, MemberWithPassword, NetworkInfo, Organization, PairingCode,
     Project, RevealedEnvVar, ServerEvent, ServerMeta, SetEnvVarRequest, SetupRequest, SetupStatus,
     SystemInfo, UpdateAppRequest, UpdateMemberRequest, UpdateOrganizationRequest,
@@ -24,6 +25,7 @@ use tauri::{AppHandle, State, ipc::Channel};
 
 use crate::connection::ConnectionManager;
 use crate::env_diff::{EnvDiffItem, EnvDiffPreview, diff_env, to_bulk_request};
+use crate::github_oauth::{GithubConnectController, run_github_connect};
 use crate::keychain::TokenStore;
 use crate::local_git::{
     DiscoveredRepo, LocalGitStatus, deploy_local_checkout, discover_repos, inspect_repo,
@@ -43,6 +45,7 @@ pub struct DesktopState {
     pub connections: Arc<ConnectionManager>,
     pub logs: Arc<LogEngine>,
     pub terminals: Arc<TerminalManager>,
+    pub github_connect: Arc<GithubConnectController>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +108,40 @@ pub struct PerfDiagnostics {
     pub server_count: usize,
     pub log_buffers: Vec<LogBufferStats>,
     pub client_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CliInfo {
+    pub installed: bool,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub config_path: String,
+    pub config_exists: bool,
+    pub active_context: Option<String>,
+    pub contexts_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopAppInfo {
+    pub app_version: String,
+    pub client_version: String,
+    pub os: String,
+    pub arch: String,
+    pub registry_path: String,
+    pub repository_url: String,
+    pub cli: CliInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub release_url: String,
+    pub published_at: Option<String>,
+    pub notes: Option<String>,
+    pub checked_at: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -557,6 +594,41 @@ pub async fn reorder_servers(
         .await
         .reorder(&ordered_ids)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_server(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    name: Option<String>,
+    accent: Option<String>,
+) -> Result<ServerView, String> {
+    let updated = state
+        .registry
+        .write()
+        .await
+        .update_server(&server_id, name, accent)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Server not found".to_string())?;
+    let health_map = state.connections.health_map().await;
+    let (health, health_error) = health_map
+        .get(&updated.id)
+        .cloned()
+        .unwrap_or((ServerHealth::Connecting, None));
+    Ok(ServerView {
+        id: updated.id,
+        name: updated.name,
+        url: updated.url,
+        accent: updated.accent,
+        pinned_tls_sha256: updated.pinned_tls_sha256,
+        user_email: updated.user_email,
+        org_name: updated.org_name,
+        meta: updated.meta,
+        health,
+        health_error,
+        cache: updated.cache,
+        created_at: updated.created_at,
+    })
 }
 
 // ------------------------------------------------------------ workspace data
@@ -1054,6 +1126,16 @@ pub async fn delete_alert_channel(
 }
 
 #[tauri::command]
+pub async fn create_token(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: CreateApiTokenRequest,
+) -> Result<CreatedApiToken, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.create_token(&req).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn revoke_token(
     state: State<'_, DesktopState>,
     server_id: String,
@@ -1064,6 +1146,67 @@ pub async fn revoke_token(
         .delete_token(&token_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+// -------------------------------------------------------------------- github
+
+#[tauri::command]
+pub async fn get_github_status(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<GithubStatus, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.github_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_github_repos(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<Vec<GithubRepo>, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.github_repos().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_github_branches(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    owner: String,
+    repo: String,
+) -> Result<Vec<GithubBranch>, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .github_branches(&owner, &repo)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn connect_github_app(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    server_id: String,
+    organization: Option<String>,
+) -> Result<GithubStatus, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let cancel_rx = state.github_connect.start_new().await;
+    run_github_connect(&app, &client, organization, cancel_rx).await
+}
+
+#[tauri::command]
+pub async fn cancel_github_connect(state: State<'_, DesktopState>) -> Result<(), String> {
+    state.github_connect.cancel().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn disconnect_github(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<(), String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.github_disconnect().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1286,6 +1429,218 @@ pub async fn get_perf_diagnostics(state: State<'_, DesktopState>) -> Result<Perf
     })
 }
 
+fn find_cli_binary() -> Option<std::path::PathBuf> {
+    let bin_name = if cfg!(windows) { "rig.exe" } else { "rig" };
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(bin_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let mut extras = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        extras.push(home.join(".local/bin").join(bin_name));
+        extras.push(home.join(".cargo/bin").join(bin_name));
+    }
+    extras.push(std::path::PathBuf::from("/usr/local/bin").join(bin_name));
+    extras.push(std::path::PathBuf::from("/opt/homebrew/bin").join(bin_name));
+    extras.into_iter().find(|p| p.is_file())
+}
+
+fn inspect_cli_config() -> (String, bool, Option<String>, usize) {
+    let path = std::env::var_os("RIG_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::config_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("rig")
+                .join("config.toml")
+        });
+    let path_str = path.display().to_string();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return (path_str, false, None, 0);
+    };
+    let mut active_context = None;
+    let mut contexts_count = 0usize;
+    for line in raw.lines() {
+        let t = line.trim();
+        if active_context.is_none()
+            && let Some(rest) = t.strip_prefix("current")
+            && let Some((_, val)) = rest.split_once('=')
+        {
+            let v = val.trim().trim_matches('"').trim_matches('\'');
+            if !v.is_empty() {
+                active_context = Some(v.to_owned());
+            }
+        }
+        if t.starts_with("[contexts.") && t.ends_with(']') {
+            contexts_count += 1;
+        }
+    }
+    (path_str, true, active_context, contexts_count)
+}
+
+fn detect_cli_info_sync() -> CliInfo {
+    let (config_path, config_exists, active_context, contexts_count) = inspect_cli_config();
+    let Some(bin) = find_cli_binary() else {
+        return CliInfo {
+            installed: false,
+            binary_path: None,
+            version: None,
+            config_path,
+            config_exists,
+            active_context,
+            contexts_count,
+        };
+    };
+    let version = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    CliInfo {
+        installed: true,
+        binary_path: Some(bin.display().to_string()),
+        version,
+        config_path,
+        config_exists,
+        active_context,
+        contexts_count,
+    }
+}
+
+#[tauri::command]
+pub async fn get_app_info(state: State<'_, DesktopState>) -> Result<DesktopAppInfo, String> {
+    let registry_path = state.registry.read().await.path().display().to_string();
+    let cli = tokio::task::spawn_blocking(detect_cli_info_sync)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(DesktopAppInfo {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
+        os: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+        registry_path,
+        repository_url: "https://github.com/ksaurav24/rig".to_owned(),
+        cli,
+    })
+}
+
+fn parse_semver(raw: &str) -> Option<(u64, u64, u64)> {
+    let clean = raw.trim().trim_start_matches('v').split('-').next()?;
+    let mut parts = clean.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+#[tauri::command]
+pub async fn check_desktop_updates() -> Result<UpdateCheckResult, String> {
+    let current = env!("CARGO_PKG_VERSION").to_owned();
+    let checked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fallback_url = "https://github.com/ksaurav24/rig/releases".to_owned();
+
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("rig-desktop/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = match http
+        .get("https://api.github.com/repos/ksaurav24/rig/releases/latest")
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(UpdateCheckResult {
+                current_version: current,
+                latest_version: None,
+                update_available: false,
+                release_url: fallback_url,
+                published_at: None,
+                notes: None,
+                checked_at,
+                error: Some(format!("Could not reach GitHub Releases: {}", e.without_url())),
+            });
+        }
+    };
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(UpdateCheckResult {
+            current_version: current.clone(),
+            latest_version: Some(current),
+            update_available: false,
+            release_url: fallback_url,
+            published_at: None,
+            notes: None,
+            checked_at,
+            error: None,
+        });
+    }
+
+    if !resp.status().is_success() {
+        return Ok(UpdateCheckResult {
+            current_version: current,
+            latest_version: None,
+            update_available: false,
+            release_url: fallback_url,
+            published_at: None,
+            notes: None,
+            checked_at,
+            error: Some(format!("GitHub Releases returned HTTP {}", resp.status().as_u16())),
+        });
+    }
+
+    #[derive(Deserialize)]
+    struct GhRelease {
+        tag_name: String,
+        html_url: Option<String>,
+        published_at: Option<String>,
+        body: Option<String>,
+    }
+
+    let rel: GhRelease = match resp.json().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(UpdateCheckResult {
+                current_version: current,
+                latest_version: None,
+                update_available: false,
+                release_url: fallback_url,
+                published_at: None,
+                notes: None,
+                checked_at,
+                error: Some(format!("Unexpected release payload: {e}")),
+            });
+        }
+    };
+
+    let latest = rel.tag_name.trim_start_matches('v').to_owned();
+    let update_available = match (parse_semver(&current), parse_semver(&latest)) {
+        (Some(cur), Some(lat)) => lat > cur,
+        _ => latest != current,
+    };
+
+    Ok(UpdateCheckResult {
+        current_version: current,
+        latest_version: Some(latest),
+        update_available,
+        release_url: rel.html_url.unwrap_or(fallback_url),
+        published_at: rel.published_at,
+        notes: rel.body.map(|b| b.chars().take(600).collect()),
+        checked_at,
+        error: None,
+    })
+}
+
 // -------------------------------------------------- desktop-only features (§9)
 
 #[tauri::command]
@@ -1303,6 +1658,83 @@ pub async fn start_deploy_logs(
     tokio::spawn(async move {
         let _ = on_frame.send(LogChannelFrame::Status {
             stream_id: stream_id.clone(),
+            state: "connecting".into(),
+            message: None,
+        });
+
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<LogLine>(4096);
+        let flusher_engine = Arc::clone(&engine);
+        let flusher_sid = stream_id.clone();
+        let flusher_chan = on_frame.clone();
+        let flusher = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(FRAME_FLUSH_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut batch = Vec::with_capacity(256);
+            let mut last_buf = 0usize;
+            let mut last_drop = 0u64;
+            let mut seq_counter = 0u64;
+
+            loop {
+                tokio::select! {
+                    maybe = line_rx.recv() => {
+                        match maybe {
+                            Some(ll) => {
+                                seq_counter += 1;
+                                let seq = if ll.seq > 0 { ll.seq as u64 } else { seq_counter };
+                                let (parsed, buf, dropped) = flusher_engine.push_line(
+                                    &flusher_sid,
+                                    seq,
+                                    ll.ts,
+                                    ll.stream,
+                                    &ll.line,
+                                );
+                                last_buf = buf;
+                                last_drop = dropped;
+                                batch.push(parsed);
+                                if batch.len() >= MAX_LINES_PER_BATCH {
+                                    let send_batch = std::mem::take(&mut batch);
+                                    if flusher_chan.send(LogChannelFrame::Batch {
+                                        stream_id: flusher_sid.clone(),
+                                        lines: send_batch,
+                                        total_buffered: last_buf,
+                                        dropped_total: last_drop,
+                                    }).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            None => {
+                                if !batch.is_empty() {
+                                    let _ = flusher_chan.send(LogChannelFrame::Batch {
+                                        stream_id: flusher_sid.clone(),
+                                        lines: batch,
+                                        total_buffered: last_buf,
+                                        dropped_total: last_drop,
+                                    });
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if !batch.is_empty() {
+                            let send_batch = std::mem::take(&mut batch);
+                            if flusher_chan.send(LogChannelFrame::Batch {
+                                stream_id: flusher_sid.clone(),
+                                lines: send_batch,
+                                total_buffered: last_buf,
+                                dropped_total: last_drop,
+                            }).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let _ = on_frame.send(LogChannelFrame::Status {
+            stream_id: stream_id.clone(),
             state: "streaming".into(),
             message: None,
         });
@@ -1310,25 +1742,19 @@ pub async fn start_deploy_logs(
             "/api/v1/deployments/{}/logs",
             rig_client::segment(&deployment_id)
         );
-        let mut seq_counter = 0u64;
         let res = client
             .events_cancellable(&path, None, stop_rx, |ev| {
                 if ev.event == "log"
                     && let Ok(ll) = serde_json::from_str::<LogLine>(&ev.data)
                 {
-                    seq_counter += 1;
-                    let seq = if ll.seq > 0 { ll.seq as u64 } else { seq_counter };
-                    let (parsed, buf, dropped) =
-                        engine.push_line(&stream_id, seq, ll.ts, ll.stream, &ll.line);
-                    let _ = on_frame.send(LogChannelFrame::Batch {
-                        stream_id: stream_id.clone(),
-                        lines: vec![parsed],
-                        total_buffered: buf,
-                        dropped_total: dropped,
-                    });
+                    let _ = line_tx.try_send(ll);
                 }
             })
             .await;
+
+        drop(line_tx);
+        let _ = flusher.await;
+
         let (st, msg) = match res {
             Ok(()) => ("ended".into(), None),
             Err(e) => ("error".into(), Some(e.to_string())),

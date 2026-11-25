@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { api, unwrap } from '@/api/client'
 import { appQuery, meQuery } from '@/api/queries'
 import { ErrorState, Status } from '@/components/app/state'
-import { Tabs, TabsItem } from '@/components/fluid/tabs'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
 import {
   AlertDialog,
   AlertDialogAction,

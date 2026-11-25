@@ -3,7 +3,7 @@ export type ServerMode = 'full' | 'headless'
 export type AccessMode = 'public' | 'lan' | 'tailscale' | 'local'
 export type Role = 'viewer' | 'developer' | 'admin' | 'owner'
 export type SourceKind = 'image' | 'git' | 'local'
-export type DatabaseEngine = 'postgres' | 'mysql' | 'redis' | 'mongodb'
+export type DatabaseEngine = 'postgres' | 'mysql' | 'mariadb' | 'redis' | 'mongodb'
 export type AlertEvent = 'deploy_failed' | 'app_crashed' | 'app_down' | 'disk_low' | 'backup_failed'
 
 export interface ServerMeta {
@@ -223,6 +223,17 @@ export interface ApiToken {
   created_at: string
 }
 
+export interface CreateApiTokenRequest {
+  name: string
+  role: Role
+  expires_in_days?: number | null
+}
+
+export interface CreatedApiToken {
+  token: ApiToken
+  secret: string
+}
+
 export interface PairingCode {
   id: string
   code: string
@@ -269,6 +280,7 @@ export interface AuditEntry {
 }
 
 export interface NetworkInfo {
+  public_ip?: string | null
   lan_addresses: string[]
   tailscale?: {
     dns_name?: string | null
@@ -282,10 +294,32 @@ export interface NetworkInfo {
   } | null
 }
 
+export interface GithubAppInfo {
+  name: string
+  slug: string
+  html_url: string
+  owner: string
+  install_url: string
+  created_at: string
+}
+
 export interface GithubStatus {
-  connected: boolean
-  app_slug?: string | null
-  account_login?: string | null
+  app?: GithubAppInfo | null
+  poll_interval: number
+  webhook_url: string
+}
+
+export interface GithubRepo {
+  full_name: string
+  clone_url: string
+  default_branch: string
+  private: boolean
+}
+
+export interface GithubBranch {
+  name: string
+  default: boolean
+  protected: boolean
 }
 
 export interface ServerSettingsSnapshot {
@@ -483,4 +517,35 @@ export interface PerfDiagnostics {
     dropped_lines: number
   }[]
   client_version: string
+}
+
+export interface CliInfo {
+  installed: boolean
+  binary_path?: string | null
+  version?: string | null
+  config_path: string
+  config_exists: boolean
+  active_context?: string | null
+  contexts_count: number
+}
+
+export interface DesktopAppInfo {
+  app_version: string
+  client_version: string
+  os: string
+  arch: string
+  registry_path: string
+  repository_url: string
+  cli: CliInfo
+}
+
+export interface UpdateCheckResult {
+  current_version: string
+  latest_version?: string | null
+  update_available: boolean
+  release_url: string
+  published_at?: string | null
+  notes?: string | null
+  checked_at: string
+  error?: string | null
 }

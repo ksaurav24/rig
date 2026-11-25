@@ -9,10 +9,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
+} from '@rig/ui/dialog'
+import { Field, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,7 +24,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 type Project = Schemas['Project']
 type Database = Schemas['Database']

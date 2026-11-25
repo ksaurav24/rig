@@ -2,11 +2,11 @@ import { ArrowUpRight, CheckCircle2, Database, GitBranch, Lock, ShieldCheck, Ter
 import { motion, useReducedMotion } from 'motion/react'
 import type { ReactNode } from 'react'
 import type { Schemas } from '@/api/client'
-import { OrgMark } from '@/components/app/logo'
+import { OrgMark } from '@rig/ui/app/logo'
 import { ThemeToggle } from '@/components/app/theme-toggle'
-import { Badge } from '@/components/fluid/badge'
+import { Badge } from '@rig/ui/badge'
 import { isEnvBadgeColor } from '@/lib/preferences'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 export interface AuthLayoutProps {
   mode: 'login' | 'setup'

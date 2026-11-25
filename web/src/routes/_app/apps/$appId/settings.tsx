@@ -6,11 +6,11 @@ import { api, unwrap, type Schemas } from '@/api/client'
 import { appQuery, githubQuery, githubReposQuery, meQuery } from '@/api/queries'
 import { CopyButton } from '@/components/app/copy-button'
 import { BranchField, GithubSource } from '@/components/app/new-app-dialog'
-import { Panel } from '@/components/app/page'
+import { Panel } from '@rig/ui/app/page'
 import { ErrorState } from '@/components/app/state'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Switch } from '@/components/fluid/switch'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Switch } from '@rig/ui/switch'
 import {
   AlertDialog,
   AlertDialogAction,

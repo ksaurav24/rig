@@ -11,6 +11,7 @@
 pub mod commands;
 pub mod connection;
 pub mod env_diff;
+pub mod github_oauth;
 pub mod keychain;
 pub mod local_git;
 pub mod log_engine;
@@ -29,6 +30,7 @@ use tokio::sync::RwLock;
 
 use crate::commands::DesktopState;
 use crate::connection::ConnectionManager;
+use crate::github_oauth::GithubConnectController;
 use crate::keychain::TokenStore;
 use crate::log_engine::LogEngine;
 use crate::registry::ServerRegistry;
@@ -57,6 +59,7 @@ pub fn run() {
     let connections = ConnectionManager::new();
     let logs = LogEngine::new();
     let terminals = TerminalManager::new();
+    let github_connect = Arc::new(GithubConnectController::new());
 
     let boot_registry = Arc::clone(&registry);
     let boot_tokens = Arc::clone(&tokens);
@@ -73,6 +76,7 @@ pub fn run() {
             connections,
             logs,
             terminals,
+            github_connect,
         })
         .setup(move |app| {
             // System tray / menu-bar icon with Show & Quit actions (§8).
@@ -140,6 +144,7 @@ pub fn run() {
             commands::select_server,
             commands::remove_server,
             commands::reorder_servers,
+            commands::update_server,
             commands::get_server_snapshot,
             commands::get_app_detail,
             commands::create_project,
@@ -171,7 +176,14 @@ pub fn run() {
             commands::create_alert_channel,
             commands::test_alert_channel,
             commands::delete_alert_channel,
+            commands::create_token,
             commands::revoke_token,
+            commands::get_github_status,
+            commands::list_github_repos,
+            commands::list_github_branches,
+            commands::connect_github_app,
+            commands::cancel_github_connect,
+            commands::disconnect_github,
             commands::list_devices,
             commands::create_pairing_code,
             commands::revoke_device,
@@ -181,6 +193,8 @@ pub fn run() {
             commands::stop_log_stream,
             commands::query_log_buffer,
             commands::get_perf_diagnostics,
+            commands::get_app_info,
+            commands::check_desktop_updates,
             commands::set_env_var,
             commands::reveal_env_var,
             commands::delete_env_var,

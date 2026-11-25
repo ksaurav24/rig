@@ -6,10 +6,10 @@ import { toast } from 'sonner'
 import { api, ApiError, unwrap, type Schemas } from '@/api/client'
 import { githubBranchesQuery, githubQuery, githubReposQuery, meQuery } from '@/api/queries'
 import { BrandMark } from '@/components/app/service-icons'
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/fluid/accordion'
-import { Banner, BannerDescription, BannerTitle } from '@/components/fluid/banner'
-import { Checkbox } from '@/components/fluid/checkbox'
-import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from '@/components/fluid/combobox'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@rig/ui/accordion'
+import { Banner, BannerDescription, BannerTitle } from '@rig/ui/banner'
+import { Checkbox } from '@rig/ui/checkbox'
+import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from '@rig/ui/combobox'
 import {
   Dialog,
   DialogContent,
@@ -17,15 +17,15 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Switch } from '@/components/fluid/switch'
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Switch } from '@rig/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { keepComboboxEnter } from '@/lib/forms'
 import { hasRole } from '@/lib/nav'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 type Provider = 'github' | 'git' | 'image'
 type Build = 'auto' | 'dockerfile'

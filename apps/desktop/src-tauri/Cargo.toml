@@ -30,6 +30,7 @@ futures-util = "0.3.34"
 hex = "0.4.3"
 ignore = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "gzip"] }
 rig-api = { version = "0.1.0", path = "../../../crates/rig-api" }
 rig-client = { version = "0.1.0", path = "../../../crates/rig-client" }
 serde = { version = "1.0.229", features = ["derive"] }

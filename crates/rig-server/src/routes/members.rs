@@ -159,7 +159,7 @@ async fn add_member(
     auth: Auth<Admin>,
     Json(req): Json<AddMemberRequest>,
 ) -> ApiResult<Json<MemberWithPassword>> {
-    auth.require_session("sign in to the dashboard to manage team members")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to manage team members")?;
     let name = validate_name("name", &req.name, 80)?;
     let email = validate_email(&req.email)?;
     check_can_grant(auth.role, req.role)?;
@@ -222,7 +222,7 @@ async fn update_member(
     Path(user_id): Path<String>,
     Json(req): Json<UpdateMemberRequest>,
 ) -> ApiResult<Json<Member>> {
-    auth.require_session("sign in to the dashboard to manage team members")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to manage team members")?;
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
@@ -298,7 +298,7 @@ async fn remove_member(
     auth: Auth<Admin>,
     Path(user_id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    auth.require_session("sign in to the dashboard to manage team members")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to manage team members")?;
 
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     let actor_role = actor_role_tx(&mut tx, &auth.org_id, &auth.user_id).await?;
@@ -348,7 +348,7 @@ async fn reset_password(
     auth: Auth<Admin>,
     Path(user_id): Path<String>,
 ) -> ApiResult<Json<MemberWithPassword>> {
-    auth.require_session("sign in to the dashboard to reset member passwords")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to reset member passwords")?;
 
     let temporary_password = crypto::random_token(15);
     let password_hash = hash(temporary_password.clone()).await?;

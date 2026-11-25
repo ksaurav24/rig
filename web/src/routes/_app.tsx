@@ -14,15 +14,15 @@ import {
   BreadcrumbLink,
   BreadcrumbList,
   BreadcrumbPage,
-} from '@/components/fluid/breadcrumb'
-import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
+} from '@rig/ui/breadcrumb'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
 import {
   SIDEBAR_COOKIE_NAME,
   SidebarInset,
   SidebarProvider,
   SidebarTrigger,
-} from '@/components/fluid/sidebar'
+} from '@rig/ui/sidebar'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { useSyncBranding } from '@/lib/branding'

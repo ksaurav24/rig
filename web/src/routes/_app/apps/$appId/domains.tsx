@@ -5,9 +5,9 @@ import { useState, type FormEvent } from 'react'
 
 import { api, unwrap, type Schemas } from '@/api/client'
 import { domainsQuery, meQuery, networkQuery } from '@/api/queries'
-import { Panel } from '@/components/app/page'
+import { Panel } from '@rig/ui/app/page'
 import { EmptyState, ErrorState } from '@/components/app/state'
-import { Badge } from '@/components/fluid/badge'
+import { Badge } from '@rig/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -15,11 +15,11 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@rig/ui/table'
 import {
   AlertDialog,
   AlertDialogAction,

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { HardDrive } from 'lucide-react'
 import { systemQuery } from '@/api/queries'
-import { Banner, BannerDescription, BannerTitle } from '@/components/fluid/banner'
+import { Banner, BannerDescription, BannerTitle } from '@rig/ui/banner'
 import { bytes } from '@/lib/format'
 
 /** Deploys and backups refuse to start below 1 GiB free (see the server's `MIN_FREE_DISK`). */

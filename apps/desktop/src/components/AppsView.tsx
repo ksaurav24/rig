@@ -2,8 +2,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   Box,
+  Copy,
+  ExternalLink,
   FolderGit2,
   FolderPlus,
+  GitBranch,
   Globe,
   KeyRound,
   Play,
@@ -12,17 +15,39 @@ import {
   RotateCcw,
   Save,
   ScrollText,
+  Search,
   Settings,
+  ShieldCheck,
   Square,
   Terminal,
   Trash2,
   X,
 } from 'lucide-react'
-import { lazy, Suspense, useEffect, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState, type ComponentType, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { EnvDiffPanel } from './EnvDiffPanel'
 import { LocalGitPanel } from './LocalGitPanel'
 import { LogStreamView } from './LogStreamView'
+import { Page, Panel } from '@rig/ui/app/page'
+import { EmptyState, Status, statusTone } from '@rig/ui/app/state'
+import { Badge } from '@rig/ui/badge'
+import { Banner, BannerDescription } from '@rig/ui/banner'
+import { Button } from '@rig/ui/button'
+import { Card, CardContent, CardFooter, CardGroup, CardHeader, CardTitle } from '@rig/ui/card'
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from '@rig/ui/combobox'
+import { ConfirmDialog } from '@rig/ui/confirm-dialog'
+import { Field, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
+import { Switch } from '@rig/ui/switch'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
 import { relativeTime } from '@/lib/format'
 import { desktopApi } from '@/lib/ipc'
 import type { App, Project } from '@/lib/types'
@@ -64,10 +89,20 @@ export function AppsView({
   onDeployNew,
 }: AppsViewProps) {
   const [projectFilter, setProjectFilter] = useState<string>('all')
+  const [appSearch, setAppSearch] = useState('')
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDesc, setNewProjectDesc] = useState('')
   const [creatingProject, setCreatingProject] = useState(false)
+
+  const [confirmState, setConfirmState] = useState<{
+    title: string
+    description: string
+    target?: string
+    confirmLabel: string
+    tone: 'danger' | 'warning'
+    action: () => Promise<void>
+  } | null>(null)
 
   const [newDomainHost, setNewDomainHost] = useState('')
   const [newDomainTls, setNewDomainTls] = useState('auto')
@@ -82,7 +117,6 @@ export function AppsView({
     enabled: Boolean(selectedAppId),
   })
 
-  // App Settings form state
   const detail = detailQuery.data
   const selectedApp = detail?.app ?? apps.find((a) => a.id === selectedAppId)
   const [editName, setEditName] = useState('')
@@ -95,6 +129,35 @@ export function AppsView({
   const [editHealthPath, setEditHealthPath] = useState('')
   const [editAutoDeploy, setEditAutoDeploy] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
+
+  const parsedGithubRepo = useMemo(() => {
+    const raw = (editGitUrl || selectedApp?.git_url || '').trim()
+    const m = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(raw)
+    return m ? { owner: m[1], repo: m[2] } : null
+  }, [editGitUrl, selectedApp?.git_url])
+
+  const appBranchesQuery = useQuery({
+    queryKey: ['desktop', serverId, 'app-gh-branches', parsedGithubRepo?.owner, parsedGithubRepo?.repo],
+    queryFn: () =>
+      desktopApi.listGithubBranches(serverId, parsedGithubRepo!.owner, parsedGithubRepo!.repo),
+    enabled: Boolean(
+      selectedAppId &&
+        activeTab === 'settings' &&
+        selectedApp?.source_kind === 'git' &&
+        parsedGithubRepo,
+    ),
+    retry: false,
+  })
+
+  const appBranchItems = useMemo(
+    () =>
+      (appBranchesQuery.data ?? []).map((b) => ({
+        value: b.name,
+        label: b.name,
+        branch: b,
+      })),
+    [appBranchesQuery.data],
+  )
 
   useEffect(() => {
     setInspectDeployId(null)
@@ -113,7 +176,11 @@ export function AppsView({
     setEditAutoDeploy(selectedApp.auto_deploy)
   }, [selectedApp])
 
-  async function runAction(appId: string, appName: string, action: 'deploy' | 'start' | 'restart' | 'stop') {
+  async function runAction(
+    appId: string,
+    appName: string,
+    action: 'deploy' | 'start' | 'restart' | 'stop',
+  ) {
     setBusyActionId(`${appId}:${action}`)
     try {
       await desktopApi.appAction(serverId, appId, action)
@@ -206,51 +273,57 @@ export function AppsView({
       }
     }
 
-    const tabs: { id: AppDetailTab; label: string; icon: React.ReactNode }[] = [
-      { id: 'deployments', label: 'Deployments', icon: <Box className="size-3.5" /> },
-      { id: 'logs', label: 'Logs', icon: <ScrollText className="size-3.5" /> },
-      { id: 'env', label: `Env (${detail?.env.length ?? 0})`, icon: <KeyRound className="size-3.5" /> },
-      { id: 'local-git', label: 'Local Git', icon: <FolderGit2 className="size-3.5" /> },
-      { id: 'domains', label: `Domains (${detail?.domains.length ?? 0})`, icon: <Globe className="size-3.5" /> },
-      { id: 'terminal', label: 'Terminal', icon: <Terminal className="size-3.5" /> },
-      { id: 'settings', label: 'Settings', icon: <Settings className="size-3.5" /> },
+    const tabs: {
+      id: AppDetailTab
+      label: string
+      icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
+    }[] = [
+      { id: 'deployments', label: 'Deployments', icon: Box },
+      { id: 'logs', label: 'Logs', icon: ScrollText },
+      { id: 'env', label: `Env (${detail?.env.length ?? 0})`, icon: KeyRound },
+      ...(app?.source_kind !== 'image'
+        ? [{ id: 'local-git' as const, label: 'Local Git', icon: FolderGit2 }]
+        : []),
+      { id: 'domains', label: `Domains (${detail?.domains.length ?? 0})`, icon: Globe },
+      { id: 'terminal', label: 'Terminal', icon: Terminal },
+      { id: 'settings', label: 'Settings', icon: Settings },
     ]
+    const activeTabIndex = Math.max(
+      0,
+      tabs.findIndex((t) => t.id === activeTab),
+    )
 
     return (
-      <div className="flex h-full min-h-0 flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <button
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-6xl flex-col gap-5 px-4 py-6 md:px-8 md:py-8">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <Button
               type="button"
+              variant="tertiary"
+              size="icon"
               onClick={() => onSelectApp(null)}
-              className="rounded-lg border border-line bg-surface p-1.5 text-muted hover:bg-surface-2 hover:text-fg"
+              aria-label="Back to applications"
             >
-              <ArrowLeft className="size-4" />
-            </button>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-semibold text-fg">{app?.name ?? 'Loading…'}</h1>
+              <ArrowLeft />
+            </Button>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h1 className="truncate text-[20px] font-semibold tracking-tight text-foreground">
+                  {app?.name ?? 'Loading…'}
+                </h1>
                 {app && (
-                  <span
-                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] uppercase ${
-                      app.status === 'running'
-                        ? 'bg-emerald-500/15 text-emerald-300'
-                        : app.status === 'failed' || app.status === 'crashed'
-                          ? 'bg-rose-500/15 text-rose-300'
-                          : 'bg-surface-2 text-muted'
-                    }`}
-                  >
+                  <Status tone={statusTone(app.status)} variant="dot">
                     {app.status}
-                  </span>
+                  </Status>
                 )}
                 {app?.project_name && (
-                  <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted">
+                  <Badge variant="solid" color="gray" size="compact">
                     {app.project_name}
-                  </span>
+                  </Badge>
                 )}
               </div>
               {app && (
-                <div className="font-mono text-[11px] text-muted">
+                <div className="mt-0.5 truncate font-mono text-[12.5px] text-muted-foreground">
                   {app.source_kind} · port {app.port}
                   {app.host_port ? ` → :${app.host_port}` : ''}
                   {app.image ? ` · ${app.image}` : ''}
@@ -260,96 +333,106 @@ export function AppsView({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             {app?.source_kind === 'local' ? (
-              <button
+              <Button
                 type="button"
+                variant="primary"
+                leadingIcon={Rocket}
                 onClick={() => onSelectTab('local-git')}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
               >
-                <Rocket className="size-3.5" />
                 Deploy Local Folder
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
+                variant="primary"
+                leadingIcon={Play}
+                loading={busyActionId === `${app?.id}:deploy`}
                 disabled={busyActionId !== null}
                 onClick={() => app && void runAction(app.id, app.name, 'deploy')}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
               >
-                <Play className="size-3.5" />
                 Deploy
-              </button>
+              </Button>
             )}
-            <button
+            <Button
               type="button"
+              variant="tertiary"
+              leadingIcon={RotateCcw}
+              loading={busyActionId === `${app?.id}:restart`}
               disabled={busyActionId !== null}
               onClick={() => app && void runAction(app.id, app.name, 'restart')}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-fg hover:bg-surface-2 disabled:opacity-50"
             >
-              <RotateCcw className="size-3.5" />
               Restart
-            </button>
+            </Button>
             {app?.status === 'stopped' ? (
-              <button
+              <Button
                 type="button"
+                variant="secondary"
+                leadingIcon={Play}
                 disabled={busyActionId !== null}
                 onClick={() => app && void runAction(app.id, app.name, 'start')}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50"
               >
-                <Play className="size-3.5" />
                 Start
-              </button>
+              </Button>
             ) : (
-              <button
+              <Button
                 type="button"
+                variant="destructive"
+                leadingIcon={Square}
                 disabled={busyActionId !== null}
-                onClick={() => app && void runAction(app.id, app.name, 'stop')}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-rose-300 hover:bg-rose-500/10 disabled:opacity-50"
+                onClick={() =>
+                  app &&
+                  setConfirmState({
+                    title: 'Stop Application',
+                    description:
+                      'Stops the running container immediately. Traffic routed to this application will fail until you start or deploy it again.',
+                    target: app.name,
+                    confirmLabel: 'Stop App',
+                    tone: 'warning',
+                    action: () => runAction(app.id, app.name, 'stop'),
+                  })
+                }
               >
-                <Square className="size-3.5" />
                 Stop
-              </button>
+              </Button>
             )}
           </div>
         </div>
 
-        {/* App Sub-Navigation */}
-        <div className="flex flex-wrap gap-1 border-b border-line pb-2">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => onSelectTab(t.id)}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                activeTab === t.id
-                  ? 'bg-surface-2 text-fg ring-1 ring-line'
-                  : 'text-muted hover:bg-surface hover:text-fg'
-              }`}
-            >
-              {t.icon}
-              {t.label}
-            </button>
-          ))}
+        {/* Fluid App Sub-Navigation Tabs */}
+        <div className="border-b border-border/80 pb-2.5">
+          <Tabs
+            selectedIndex={activeTabIndex}
+            onSelect={(idx) => {
+              const target = tabs[idx]
+              if (target) onSelectTab(target.id)
+            }}
+          >
+            {tabs.map((t, idx) => (
+              <TabsItem key={t.id} index={idx} label={t.label} icon={t.icon} />
+            ))}
+          </Tabs>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
           {activeTab === 'deployments' && (
-            <div className="flex min-h-0 flex-1 flex-col gap-4">
+            <div className="flex min-h-0 flex-1 flex-col gap-5">
               {inspectDeployId && (
-                <div className="flex h-72 flex-col gap-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-mono text-muted">
+                <div className="flex h-80 flex-col gap-2">
+                  <div className="flex items-center justify-between text-[13px]">
+                    <span className="font-mono text-muted-foreground">
                       Build & Deploy Logs · {inspectDeployId.slice(-8)}
                     </span>
-                    <button
+                    <Button
                       type="button"
+                      variant="ghost"
+                      size="compact"
+                      leadingIcon={X}
                       onClick={() => setInspectDeployId(null)}
-                      className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-muted hover:bg-surface-2 hover:text-fg"
                     >
-                      <X className="size-3" />
                       Close Logs
-                    </button>
+                    </Button>
                   </div>
                   <LogStreamView
                     mode="deploy"
@@ -360,11 +443,13 @@ export function AppsView({
                 </div>
               )}
 
-              <div className="overflow-hidden rounded-xl border border-line bg-surface">
-                <div className="divide-y divide-line">
+              <Panel flush>
+                <div className="divide-y divide-border/80">
                   {(detail?.deployments ?? []).length === 0 ? (
-                    <div className="px-4 py-8 text-center text-xs text-muted">
-                      No deployments yet. Click Deploy or use the Local Git tab.
+                    <div className="p-6">
+                      <EmptyState icon={Box} title="No deployments yet">
+                        Click Deploy above or upload directly from the Local Git tab.
+                      </EmptyState>
                     </div>
                   ) : (
                     (detail?.deployments ?? []).map((dep) => {
@@ -375,85 +460,105 @@ export function AppsView({
                       return (
                         <div
                           key={dep.id}
-                          className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-xs"
+                          className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 text-[13.5px]"
                         >
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2 font-mono">
-                              <span className="font-semibold text-fg">{dep.id.slice(-8)}</span>
-                              <span
-                                className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${
-                                  dep.status === 'running'
-                                    ? 'bg-emerald-500/15 text-emerald-300'
-                                    : dep.status === 'failed'
-                                      ? 'bg-rose-500/15 text-rose-300'
-                                      : inProgress
-                                        ? 'bg-amber-500/15 text-amber-300'
-                                        : 'bg-surface-2 text-muted'
-                                }`}
-                              >
-                                {dep.status}
+                            <div className="flex flex-wrap items-center gap-2.5">
+                              <span className="font-mono font-semibold text-foreground">
+                                {dep.id.slice(-8)}
                               </span>
-                              <span className="text-[11px] text-muted">{dep.trigger}</span>
+                              <Status tone={statusTone(dep.status)} size="compact">
+                                {dep.status}
+                              </Status>
+                              <Badge variant="solid" color="gray" size="compact">
+                                {dep.trigger}
+                              </Badge>
                               {dep.commit_sha && (
-                                <span className="text-muted">{dep.commit_sha.slice(0, 8)}</span>
+                                <span className="font-mono text-[12px] text-muted-foreground">
+                                  {dep.commit_sha.slice(0, 8)}
+                                </span>
                               )}
                             </div>
                             {dep.commit_msg && (
-                              <div className="mt-0.5 truncate text-[11px] text-muted">
+                              <div className="mt-1 truncate text-[13px] text-muted-foreground">
                                 {dep.commit_msg}
                               </div>
                             )}
                             {dep.error && (
-                              <div className="mt-1 text-[11px] text-rose-300">{dep.error}</div>
+                              <div className="mt-1.5 text-[12.5px] text-fail">{dep.error}</div>
                             )}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[11px] text-muted">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-[12px] text-muted-foreground tabular-nums">
                               {relativeTime(dep.created_at)}
                             </span>
-                            <button
+                            <Button
                               type="button"
+                              variant="tertiary"
+                              size="compact"
+                              leadingIcon={ScrollText}
+                              active={inspectDeployId === dep.id}
                               onClick={() =>
                                 setInspectDeployId((cur) => (cur === dep.id ? null : dep.id))
                               }
-                              className="inline-flex items-center gap-1 rounded-md border border-line bg-surface-2 px-2 py-1 text-[11px] text-fg hover:bg-bg"
                             >
-                              <ScrollText className="size-3" />
                               Build Logs
-                            </button>
+                            </Button>
                             {inProgress && (
-                              <button
+                              <Button
                                 type="button"
-                                onClick={async () => {
-                                  try {
-                                    await desktopApi.cancelDeployment(serverId, dep.id)
-                                    toast.success('Deployment cancelled')
-                                    void detailQuery.refetch()
-                                  } catch (e) {
-                                    toast.error(String(e))
-                                  }
-                                }}
-                                className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-300 hover:bg-rose-500/20"
+                                variant="destructive"
+                                size="compact"
+                                onClick={() =>
+                                  setConfirmState({
+                                    title: 'Cancel Deployment',
+                                    description:
+                                      'Aborts this in-progress build and deployment. The previous release will remain active.',
+                                    target: `Deployment ${dep.id.slice(-8)}`,
+                                    confirmLabel: 'Cancel Deployment',
+                                    tone: 'danger',
+                                    action: async () => {
+                                      try {
+                                        await desktopApi.cancelDeployment(serverId, dep.id)
+                                        toast.success('Deployment cancelled')
+                                        void detailQuery.refetch()
+                                      } catch (e) {
+                                        toast.error(String(e))
+                                      }
+                                    },
+                                  })
+                                }
                               >
                                 Cancel
-                              </button>
+                              </Button>
                             )}
                             {dep.status === 'superseded' && (
-                              <button
+                              <Button
                                 type="button"
-                                onClick={async () => {
-                                  try {
-                                    await desktopApi.rollbackDeployment(serverId, dep.id)
-                                    toast.success('Rollback started')
-                                    void detailQuery.refetch()
-                                  } catch (e) {
-                                    toast.error(String(e))
-                                  }
-                                }}
-                                className="rounded-md border border-line bg-surface-2 px-2 py-1 text-[11px] text-fg hover:bg-bg"
+                                variant="secondary"
+                                size="compact"
+                                onClick={() =>
+                                  setConfirmState({
+                                    title: 'Rollback Deployment',
+                                    description:
+                                      'Replaces the current live container with this earlier deployment artifact.',
+                                    target: `Deployment ${dep.id.slice(-8)}`,
+                                    confirmLabel: 'Rollback',
+                                    tone: 'warning',
+                                    action: async () => {
+                                      try {
+                                        await desktopApi.rollbackDeployment(serverId, dep.id)
+                                        toast.success('Rollback started')
+                                        void detailQuery.refetch()
+                                      } catch (e) {
+                                        toast.error(String(e))
+                                      }
+                                    },
+                                  })
+                                }
                               >
                                 Rollback
-                              </button>
+                              </Button>
                             )}
                           </div>
                         </div>
@@ -461,7 +566,7 @@ export function AppsView({
                     })
                   )}
                 </div>
-              </div>
+              </Panel>
             </div>
           )}
 
@@ -497,93 +602,133 @@ export function AppsView({
           )}
 
           {activeTab === 'domains' && (
-            <div className="space-y-4">
-              <form
-                onSubmit={handleAddDomain}
-                className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3.5 text-xs"
-              >
-                <input
-                  type="text"
-                  required
-                  value={newDomainHost}
-                  onChange={(e) => setNewDomainHost(e.target.value)}
-                  placeholder="app.example.com"
-                  className="min-w-[200px] flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                />
-                <select
-                  value={newDomainTls}
-                  onChange={(e) => setNewDomainTls(e.target.value)}
-                  className="rounded-lg border border-line bg-bg px-2.5 py-1.5 text-xs text-fg"
-                >
-                  <option value="auto">TLS: Auto</option>
-                  <option value="internal">TLS: Internal CA</option>
-                  <option value="tailscale">TLS: Tailscale</option>
-                  <option value="off">TLS: Off</option>
-                </select>
-                <select
-                  value={newDomainAccess}
-                  onChange={(e) => setNewDomainAccess(e.target.value)}
-                  className="rounded-lg border border-line bg-bg px-2.5 py-1.5 text-xs text-fg"
-                >
-                  <option value="public">Public</option>
-                  <option value="lan">LAN</option>
-                  <option value="tailscale">Tailscale</option>
-                </select>
-                <button
-                  type="submit"
-                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                >
-                  <Plus className="size-3.5" />
-                  Add Domain
-                </button>
-              </form>
+            <div className="space-y-5">
+              <Panel>
+                <form onSubmit={handleAddDomain} className="flex flex-wrap items-center gap-2.5">
+                  <Input
+                    type="text"
+                    required
+                    value={newDomainHost}
+                    onChange={(e) => setNewDomainHost(e.target.value)}
+                    placeholder="app.example.com"
+                    className="min-w-[220px] flex-1 font-mono"
+                  />
+                  <Select value={newDomainTls} onValueChange={setNewDomainTls}>
+                    <SelectTrigger className="w-[175px]" placeholder="TLS Mode" />
+                    <SelectContent>
+                      <SelectItem index={0} value="auto">TLS: Auto</SelectItem>
+                      <SelectItem index={1} value="internal">TLS: Internal CA</SelectItem>
+                      <SelectItem index={2} value="tailscale">TLS: Tailscale</SelectItem>
+                      <SelectItem index={3} value="off">TLS: Off</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={newDomainAccess} onValueChange={setNewDomainAccess}>
+                    <SelectTrigger className="w-[140px]" placeholder="Access" />
+                    <SelectContent>
+                      <SelectItem index={0} value="public">Public</SelectItem>
+                      <SelectItem index={1} value="lan">LAN</SelectItem>
+                      <SelectItem index={2} value="tailscale">Tailscale</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button type="submit" variant="primary" leadingIcon={Plus}>
+                    Add Domain
+                  </Button>
+                </form>
+              </Panel>
 
-              <div className="divide-y divide-line overflow-hidden rounded-xl border border-line bg-surface">
+              <Panel flush>
                 {(detail?.domains ?? []).length === 0 ? (
-                  <div className="px-4 py-8 text-center text-xs text-muted">
-                    No domains attached yet.
+                  <div className="p-6">
+                    <EmptyState icon={Globe} title="No domains attached yet">
+                      Attach a custom domain or internal hostname routed via Caddy.
+                    </EmptyState>
                   </div>
                 ) : (
-                  (detail?.domains ?? []).map((dom) => (
-                    <div
-                      key={dom.id}
-                      className="flex items-center justify-between px-4 py-2.5 text-xs"
-                    >
-                      <div>
-                        <div className="font-mono font-medium text-fg">{dom.host}</div>
-                        <div className="text-[11px] text-muted">
-                          TLS: {dom.tls_mode} · Access: {dom.access}
-                          {dom.port ? ` · Port ${dom.port}` : ''}
+                  <div className="divide-y divide-border/80">
+                    {(detail?.domains ?? []).map((dom) => {
+                      const url = `${dom.tls_mode === 'off' ? 'http' : 'https'}://${dom.host}${dom.port ? `:${dom.port}` : ''}`
+                      return (
+                        <div
+                          key={dom.id}
+                          className="flex items-center justify-between gap-3 px-5 py-3.5"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate font-mono text-[14px] font-medium text-foreground">
+                              {dom.host}
+                            </div>
+                            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+                              TLS: {dom.tls_mode} · Access: {dom.access}
+                              {dom.port ? ` · Port ${dom.port}` : ''}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-compact"
+                              aria-label={`Open ${dom.host}`}
+                              title={`Open ${url}`}
+                              onClick={() => void desktopApi.openExternalUrl(url)}
+                            >
+                              <ExternalLink />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-compact"
+                              aria-label={`Copy ${dom.host}`}
+                              title="Copy domain URL"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(url)
+                                toast.success(`Copied ${url}`)
+                              }}
+                            >
+                              <Copy />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-compact"
+                              aria-label={`Remove ${dom.host}`}
+                              onClick={() =>
+                                setConfirmState({
+                                  title: 'Remove Domain',
+                                  description:
+                                    'Detaches this hostname from Caddy routing and removes its TLS configuration.',
+                                  target: dom.host,
+                                  confirmLabel: 'Remove Domain',
+                                  tone: 'danger',
+                                  action: async () => {
+                                    try {
+                                      await desktopApi.deleteDomain(serverId, selectedAppId, dom.id)
+                                      toast.success(`Removed ${dom.host}`)
+                                      void detailQuery.refetch()
+                                    } catch (e) {
+                                      toast.error(String(e))
+                                    }
+                                  },
+                                })
+                              }
+                              className="text-muted-foreground hover:text-fail"
+                            >
+                              <Trash2 />
+                            </Button>
+                          </div>
                         </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            await desktopApi.deleteDomain(serverId, selectedAppId, dom.id)
-                            toast.success(`Removed ${dom.host}`)
-                            void detailQuery.refetch()
-                          } catch (e) {
-                            toast.error(String(e))
-                          }
-                        }}
-                        className="rounded-md p-1.5 text-muted hover:bg-rose-500/15 hover:text-rose-300"
-                      >
-                        <Trash2 className="size-3.5" />
-                      </button>
-                    </div>
-                  ))
+                      )
+                    })}
+                  </div>
                 )}
-              </div>
+              </Panel>
             </div>
           )}
 
           {activeTab === 'terminal' && (
             <Suspense
               fallback={
-                <div className="flex flex-1 items-center justify-center rounded-xl border border-line bg-surface p-8 text-xs text-muted">
-                  Loading terminal…
-                </div>
+                <Panel className="flex flex-1 items-center justify-center py-12 text-[14px] text-muted-foreground">
+                  Loading container terminal…
+                </Panel>
               }
             >
               <TerminalTabs
@@ -597,323 +742,407 @@ export function AppsView({
 
           {activeTab === 'settings' && app && (
             <div className="max-w-2xl space-y-5">
-              <form
-                onSubmit={handleSaveSettings}
-                className="space-y-4 rounded-xl border border-line bg-surface p-4 text-xs"
-              >
-                <div className="text-sm font-semibold text-fg">Application Configuration</div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-muted">App Name</label>
-                    <input
-                      type="text"
-                      required
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-muted">Container Port</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={65535}
-                      value={editPort}
-                      onChange={(e) => setEditPort(Number(e.target.value))}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-muted">Memory Limit (MB)</label>
-                    <input
-                      type="number"
-                      min={64}
-                      max={65536}
-                      value={editMemoryMb}
-                      onChange={(e) => setEditMemoryMb(Number(e.target.value))}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-muted">Health Check Path</label>
-                    <input
-                      type="text"
-                      value={editHealthPath}
-                      onChange={(e) => setEditHealthPath(e.target.value)}
-                      placeholder="/healthz"
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                </div>
-
-                {app.source_kind === 'image' && (
-                  <div>
-                    <label className="mb-1 block text-muted">Container Image</label>
-                    <input
-                      type="text"
-                      value={editImage}
-                      onChange={(e) => setEditImage(e.target.value)}
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                )}
-
-                {app.source_kind === 'git' && (
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <div className="sm:col-span-2">
-                      <label className="mb-1 block text-muted">Git Repository URL</label>
-                      <input
+              <Panel title="Application Configuration">
+                <form onSubmit={handleSaveSettings} className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-name">App Name</FieldLabel>
+                      <Input
+                        id="app-edit-name"
                         type="text"
-                        value={editGitUrl}
-                        onChange={(e) => setEditGitUrl(e.target.value)}
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
+                        required
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
                       />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-muted">Branch</label>
-                      <input
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-port">Container Port</FieldLabel>
+                      <Input
+                        id="app-edit-port"
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={editPort}
+                        onChange={(e) => setEditPort(Number(e.target.value))}
+                        className="font-mono"
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-mem">Memory Limit (MB)</FieldLabel>
+                      <Input
+                        id="app-edit-mem"
+                        type="number"
+                        min={64}
+                        max={65536}
+                        value={editMemoryMb}
+                        onChange={(e) => setEditMemoryMb(Number(e.target.value))}
+                        className="font-mono"
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-health">Health Check Path</FieldLabel>
+                      <Input
+                        id="app-edit-health"
                         type="text"
-                        value={editGitBranch}
-                        onChange={(e) => setEditGitBranch(e.target.value)}
-                        className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
+                        value={editHealthPath}
+                        onChange={(e) => setEditHealthPath(e.target.value)}
+                        placeholder="/healthz"
+                        className="font-mono"
                       />
+                    </Field>
+                  </div>
+
+                  {app.source_kind === 'image' && (
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-image">Container Image</FieldLabel>
+                      <Input
+                        id="app-edit-image"
+                        type="text"
+                        value={editImage}
+                        onChange={(e) => setEditImage(e.target.value)}
+                        className="font-mono"
+                      />
+                    </Field>
+                  )}
+
+                  {app.source_kind === 'git' && (
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                      <Field className="sm:col-span-2">
+                        <FieldLabel htmlFor="app-edit-git-url">Git Repository URL</FieldLabel>
+                        <Input
+                          id="app-edit-git-url"
+                          type="text"
+                          value={editGitUrl}
+                          onChange={(e) => setEditGitUrl(e.target.value)}
+                          className="font-mono"
+                        />
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor="app-edit-git-branch">Branch</FieldLabel>
+                        {appBranchesQuery.isSuccess && appBranchItems.length > 0 ? (
+                          <Combobox
+                            items={appBranchItems}
+                            value={
+                              appBranchItems.some((i) => i.value === editGitBranch)
+                                ? editGitBranch
+                                : ''
+                            }
+                            onValueChange={(v) => {
+                              if (v) setEditGitBranch(String(v))
+                            }}
+                          >
+                            <ComboboxInput
+                              id="app-edit-git-branch"
+                              placeholder="Select branch…"
+                            />
+                            <ComboboxContent>
+                              <ComboboxEmpty>No branch matches.</ComboboxEmpty>
+                              <ComboboxList>
+                                {(item) => {
+                                  const b = (item as (typeof appBranchItems)[number]).branch
+                                  return (
+                                    <ComboboxItem key={b.name} value={b.name}>
+                                      <span className="flex w-full min-w-0 items-center gap-2">
+                                        <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+                                        <span className="min-w-0 flex-1 truncate font-mono text-[13px]">
+                                          {b.name}
+                                        </span>
+                                        {b.default && (
+                                          <Badge variant="solid" color="gray" size="compact">
+                                            default
+                                          </Badge>
+                                        )}
+                                        {b.protected && (
+                                          <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" />
+                                        )}
+                                      </span>
+                                    </ComboboxItem>
+                                  )
+                                }}
+                              </ComboboxList>
+                            </ComboboxContent>
+                          </Combobox>
+                        ) : (
+                          <Input
+                            id="app-edit-git-branch"
+                            type="text"
+                            value={editGitBranch}
+                            onChange={(e) => setEditGitBranch(e.target.value)}
+                            className="font-mono"
+                          />
+                        )}
+                      </Field>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {app.source_kind !== 'image' && (
-                  <div>
-                    <label className="mb-1 block text-muted">
-                      Dockerfile Path <span className="opacity-70">(empty = Railpack)</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={editDockerfile}
-                      onChange={(e) => setEditDockerfile(e.target.value)}
-                      placeholder="Dockerfile"
-                      className="w-full rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                    />
-                  </div>
-                )}
+                  {app.source_kind !== 'image' && (
+                    <Field>
+                      <FieldLabel htmlFor="app-edit-dockerfile">
+                        Dockerfile Path <span className="opacity-70">(empty = Railpack)</span>
+                      </FieldLabel>
+                      <Input
+                        id="app-edit-dockerfile"
+                        type="text"
+                        value={editDockerfile}
+                        onChange={(e) => setEditDockerfile(e.target.value)}
+                        placeholder="Dockerfile"
+                        className="font-mono"
+                      />
+                    </Field>
+                  )}
 
-                {app.source_kind === 'git' && (
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-fg">
-                    <input
-                      type="checkbox"
+                  {app.source_kind === 'git' && (
+                    <Switch
+                      label="Auto-deploy on Git push webhook"
                       checked={editAutoDeploy}
-                      onChange={(e) => setEditAutoDeploy(e.target.checked)}
-                      className="accent-emerald-500"
+                      onToggle={() => setEditAutoDeploy((v) => !v)}
                     />
-                    Auto-deploy on Git push webhook
-                  </label>
-                )}
+                  )}
 
-                <div className="flex justify-end border-t border-line pt-3">
-                  <button
-                    type="submit"
-                    disabled={savingSettings}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                  >
-                    <Save className="size-3.5" />
-                    {savingSettings ? 'Saving…' : 'Save Changes'}
-                  </button>
-                </div>
-              </form>
-
-              <div className="flex items-center justify-between rounded-xl border border-rose-500/25 bg-rose-500/5 px-4 py-3 text-xs">
-                <div>
-                  <div className="font-semibold text-rose-300">Delete Application</div>
-                  <div className="text-muted">
-                    Stops containers and permanently removes {app.name}, its deployments, and domains.
+                  <div className="flex justify-end border-t border-border/80 pt-4">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      leadingIcon={Save}
+                      loading={savingSettings}
+                    >
+                      Save Changes
+                    </Button>
                   </div>
-                </div>
-                <button
-                  type="button"
-                  disabled={savingSettings}
-                  onClick={() => void handleDeleteApp()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 font-medium text-white hover:bg-rose-500 disabled:opacity-50"
-                >
-                  <Trash2 className="size-3.5" />
-                  Delete App
-                </button>
-              </div>
+                </form>
+              </Panel>
+
+              <Panel
+                tone="danger"
+                title="Delete Application"
+                description={`Stops containers and permanently removes ${app.name}, its deployments, and domains.`}
+                actions={
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    leadingIcon={Trash2}
+                    disabled={savingSettings}
+                    onClick={() =>
+                      setConfirmState({
+                        title: 'Delete Application',
+                        description:
+                          'This permanently stops the container and deletes all deployments, environment variables, and domains for this app. This cannot be undone.',
+                        target: app.name,
+                        confirmLabel: 'Delete App',
+                        tone: 'danger',
+                        action: handleDeleteApp,
+                      })
+                    }
+                  >
+                    Delete App
+                  </Button>
+                }
+              >
+                <p className="text-[13px] text-muted-foreground">
+                  This action cannot be undone.
+                </p>
+              </Panel>
             </div>
           )}
         </div>
+
+        <ConfirmDialog
+          open={Boolean(confirmState)}
+          onOpenChange={(open) => {
+            if (!open) setConfirmState(null)
+          }}
+          title={confirmState?.title ?? ''}
+          description={confirmState?.description ?? ''}
+          target={confirmState?.target}
+          confirmLabel={confirmState?.confirmLabel}
+          tone={confirmState?.tone}
+          onConfirm={async () => {
+            await confirmState?.action()
+          }}
+        />
       </div>
     )
   }
 
-  const filteredApps =
-    projectFilter === 'all' ? apps : apps.filter((a) => a.project_id === projectFilter)
+  const query = appSearch.trim().toLowerCase()
+  const filteredApps = apps.filter((a) => {
+    if (projectFilter !== 'all' && a.project_id !== projectFilter) return false
+    if (!query) return true
+    return (
+      a.name.toLowerCase().includes(query) ||
+      a.project_name.toLowerCase().includes(query) ||
+      a.source_kind.toLowerCase().includes(query) ||
+      a.domains.some((d) => d.toLowerCase().includes(query))
+    )
+  })
+
+  const projectTabs = [
+    { id: 'all', label: `All (${apps.length})` },
+    ...projects.map((p) => ({ id: p.id, label: `${p.name} (${p.app_count})` })),
+  ]
+  const selectedProjectIdx = Math.max(
+    0,
+    projectTabs.findIndex((t) => t.id === projectFilter),
+  )
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold tracking-tight text-fg">Applications</h1>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
+    <Page
+      title="Applications"
+      description="Manage deployed containers, inspect live logs, sync .env secrets, and attach domains."
+      actions={
+        <>
+          <Button
             type="button"
+            variant="tertiary"
+            leadingIcon={FolderPlus}
             onClick={() => setNewProjectOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-fg hover:bg-surface-2"
           >
-            <FolderPlus className="size-3.5" />
             New Project
-          </button>
-          <button
-            type="button"
-            onClick={onDeployNew}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-          >
-            <Rocket className="size-3.5" />
+          </Button>
+          <Button type="button" variant="primary" leadingIcon={Rocket} onClick={onDeployNew}>
             Deploy App
-          </button>
-        </div>
-      </div>
-
+          </Button>
+        </>
+      }
+    >
       {newProjectOpen && (
-        <form
-          onSubmit={handleCreateProject}
-          className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/30 bg-surface p-3.5 text-xs"
-        >
-          <input
-            type="text"
-            required
-            value={newProjectName}
-            onChange={(e) => setNewProjectName(e.target.value)}
-            placeholder="Project name (e.g. Production, Side Projects)"
-            className="w-60 rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
-            autoFocus
-          />
-          <input
-            type="text"
-            value={newProjectDesc}
-            onChange={(e) => setNewProjectDesc(e.target.value)}
-            placeholder="Description (optional)"
-            className="min-w-[200px] flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 text-xs text-fg outline-none focus:border-emerald-500"
-          />
-          <button
-            type="submit"
-            disabled={creatingProject || !newProjectName.trim()}
-            className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            <Plus className="size-3.5" />
-            {creatingProject ? 'Creating…' : 'Create Project'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setNewProjectOpen(false)}
-            className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-fg"
-          >
-            <X className="size-3.5" />
-          </button>
-        </form>
+        <Panel>
+          <form onSubmit={handleCreateProject} className="flex flex-wrap items-center gap-2.5">
+            <Input
+              type="text"
+              required
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              placeholder="Project name (e.g. Production, Homelab)"
+              className="w-64"
+              autoFocus
+            />
+            <Input
+              type="text"
+              value={newProjectDesc}
+              onChange={(e) => setNewProjectDesc(e.target.value)}
+              placeholder="Description (optional)"
+              className="min-w-[200px] flex-1"
+            />
+            <Button
+              type="submit"
+              variant="primary"
+              leadingIcon={Plus}
+              loading={creatingProject}
+              disabled={!newProjectName.trim()}
+            >
+              Create Project
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => setNewProjectOpen(false)}
+              aria-label="Close new project form"
+            >
+              <X />
+            </Button>
+          </form>
+        </Panel>
       )}
 
-      {/* Project Filter Pills */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => setProjectFilter('all')}
-          className={`rounded-lg px-2.5 py-1 text-xs ${
-            projectFilter === 'all'
-              ? 'bg-surface-2 text-fg ring-1 ring-line'
-              : 'text-muted hover:text-fg'
-          }`}
-        >
-          All ({apps.length})
-        </button>
-        {projects.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => setProjectFilter(p.id)}
-            className={`rounded-lg px-2.5 py-1 text-xs ${
-              projectFilter === p.id
-                ? 'bg-surface-2 text-fg ring-1 ring-line'
-                : 'text-muted hover:text-fg'
-            }`}
-          >
-            {p.name} ({p.app_count})
-          </button>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {filteredApps.length === 0 ? (
-          <div className="col-span-full flex flex-col items-center justify-center rounded-xl border border-line bg-surface p-10 text-center">
-            <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-400">
-              <Rocket className="size-5" />
-            </div>
-            <div className="text-sm font-medium text-fg">No applications yet</div>
-            <p className="mt-1 max-w-sm text-xs text-muted">
-              Deploy a local repository from this laptop, a Docker image, or a Git repository.
-            </p>
-            <button
-              type="button"
-              onClick={onDeployNew}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500"
+      {/* Fluid Project Filter Tabs + Search */}
+      {apps.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 pb-3">
+          {projectTabs.length > 1 ? (
+            <Tabs
+              size="compact"
+              selectedIndex={selectedProjectIdx}
+              onSelect={(idx) => {
+                const target = projectTabs[idx]
+                if (target) setProjectFilter(target.id)
+              }}
             >
-              <Plus className="size-3.5" />
-              Deploy Your First App
-            </button>
+              {projectTabs.map((t, idx) => (
+                <TabsItem key={t.id} index={idx} label={t.label} />
+              ))}
+            </Tabs>
+          ) : (
+            <span className="text-[13px] text-muted-foreground">
+              {apps.length} {apps.length === 1 ? 'application' : 'applications'}
+            </span>
+          )}
+          <div className="relative w-full sm:w-64">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              size="compact"
+              type="text"
+              value={appSearch}
+              onChange={(e) => setAppSearch(e.target.value)}
+              placeholder="Filter apps or domains…"
+              className="pl-8"
+            />
           </div>
-        ) : (
-          filteredApps.map((app) => (
-            <div
+        </div>
+      )}
+
+      {filteredApps.length === 0 ? (
+        <EmptyState
+          icon={Rocket}
+          title="No applications yet"
+          action={
+            <Button type="button" variant="primary" leadingIcon={Plus} onClick={onDeployNew}>
+              Deploy Your First App
+            </Button>
+          }
+        >
+          Deploy a local repository from this machine, a Docker image, or a Git repository.
+        </EmptyState>
+      ) : (
+        <CardGroup columns={2} border="outlined" separated className="grid-cols-1 md:grid-cols-2 gap-3.5">
+          {filteredApps.map((app) => (
+            <Card
               key={app.id}
-              className="flex flex-col justify-between rounded-xl border border-line bg-surface p-4 transition-colors hover:border-emerald-500/40"
+              onClick={() => onSelectApp(app.id)}
+              label={`Open ${app.name}`}
+              className="bg-card shadow-[var(--shadow-2)]"
             >
-              <button
-                type="button"
-                onClick={() => onSelectApp(app.id)}
-                className="text-left"
-              >
+              <CardHeader>
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`size-2 rounded-full ${
-                        app.status === 'running'
-                          ? 'bg-green-400'
-                          : app.status === 'failed' || app.status === 'crashed'
-                            ? 'bg-rose-500'
-                            : 'bg-amber-400'
-                      }`}
-                    />
-                    <span className="text-sm font-semibold text-fg">{app.name}</span>
-                  </div>
-                  <span className="rounded bg-bg px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
+                  <CardTitle className="truncate font-semibold">{app.name}</CardTitle>
+                  <Status tone={statusTone(app.status)} size="compact" variant="dot">
                     {app.status}
-                  </span>
+                  </Status>
                 </div>
-                <div className="mt-1.5 font-mono text-[11px] text-muted">
+                <div className="font-mono text-[12px] text-muted-foreground">
                   {app.project_name} · {app.source_kind} · port {app.port}
                   {app.git_branch ? ` · ${app.git_branch}` : ''}
                 </div>
-                {app.domains.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {app.domains.slice(0, 2).map((d) => (
-                      <span
-                        key={d}
-                        className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300"
-                      >
-                        {d}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {app.last_crash?.reason && (
-                  <div className="mt-2 truncate rounded bg-rose-500/10 px-2 py-1 text-[11px] text-rose-300">
-                    {app.last_crash.reason}
-                  </div>
-                )}
-              </button>
+              </CardHeader>
 
-              {/* Quick Actions Bar */}
-              <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5 text-[11px]">
-                <button
+              {(app.domains.length > 0 || app.last_crash?.reason) && (
+                <CardContent className="space-y-2">
+                  {app.domains.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {app.domains.slice(0, 2).map((d) => (
+                        <Badge key={d} variant="solid" color="emerald" size="compact" className="font-mono">
+                          {d}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                  {app.last_crash?.reason && (
+                    <Banner status="error" contrast="high" size="compact">
+                      <BannerDescription className="truncate text-[12px]">
+                        {app.last_crash.reason}
+                      </BannerDescription>
+                    </Banner>
+                  )}
+                </CardContent>
+              )}
+
+              <CardFooter className="mt-auto border-t border-border/70 pt-3 gap-1.5">
+                <Button
                   type="button"
+                  variant="primary"
+                  size="compact"
+                  leadingIcon={Play}
+                  loading={busyActionId === `${app.id}:deploy`}
                   disabled={busyActionId !== null}
                   onClick={() => {
                     if (app.source_kind === 'local') {
@@ -923,60 +1152,64 @@ export function AppsView({
                       void runAction(app.id, app.name, 'deploy')
                     }
                   }}
-                  className="inline-flex items-center gap-1 rounded-md bg-emerald-600/90 px-2 py-1 font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                 >
-                  <Play className="size-3" />
                   Deploy
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
+                  variant="tertiary"
+                  size="compact"
+                  leadingIcon={RotateCcw}
+                  loading={busyActionId === `${app.id}:restart`}
                   disabled={busyActionId !== null}
                   onClick={() => void runAction(app.id, app.name, 'restart')}
-                  className="inline-flex items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-fg hover:bg-surface-2 disabled:opacity-50"
                 >
-                  <RotateCcw className="size-3" />
                   Restart
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="compact"
+                  leadingIcon={ScrollText}
                   onClick={() => {
                     onSelectApp(app.id)
                     onSelectTab('logs')
                   }}
-                  className="inline-flex items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-fg hover:bg-surface-2"
                 >
-                  <ScrollText className="size-3" />
                   Logs
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="compact"
+                  leadingIcon={KeyRound}
                   onClick={() => {
                     onSelectApp(app.id)
                     onSelectTab('env')
                   }}
-                  className="inline-flex items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-fg hover:bg-surface-2"
                 >
-                  <KeyRound className="size-3" />
                   Env
-                </button>
+                </Button>
                 {app.status === 'running' && (
-                  <button
+                  <Button
                     type="button"
+                    variant="secondary"
+                    size="compact"
+                    leadingIcon={Terminal}
+                    className="ml-auto"
                     onClick={() => {
                       onSelectApp(app.id)
                       onSelectTab('terminal')
                     }}
-                    className="ml-auto inline-flex items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-sky-300 hover:bg-surface-2"
                   >
-                    <Terminal className="size-3" />
                     Shell
-                  </button>
+                  </Button>
                 )}
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-    </div>
+              </CardFooter>
+            </Card>
+          ))}
+        </CardGroup>
+      )}
+    </Page>
   )
 }

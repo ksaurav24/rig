@@ -6,13 +6,13 @@ import { toast } from 'sonner'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { githubQuery, githubReposQuery, meQuery } from '@/api/queries'
 import { CopyButton } from '@/components/app/copy-button'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { BrandMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState } from '@/components/app/state'
-import { Banner, BannerDescription, BannerTitle } from '@/components/fluid/banner'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { InputCopy } from '@/components/fluid/input-copy'
+import { Banner, BannerDescription, BannerTitle } from '@rig/ui/banner'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { InputCopy } from '@rig/ui/input-copy'
 import {
   AlertDialog,
   AlertDialogAction,

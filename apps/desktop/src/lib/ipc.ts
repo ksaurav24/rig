@@ -7,24 +7,31 @@
  */
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import type {
   AlertEvent,
   ApiToken,
   App,
   AppDetailSnapshot,
   Backup,
+  CreateApiTokenRequest,
   CreateAppRequest,
   CreateDatabaseRequest,
+  CreatedApiToken,
   Database,
   DatabaseCredentials,
   DatabaseEngineInfo,
   Deployment,
+  DesktopAppInfo,
   DeviceLoginResult,
   DiscoveredRepo,
   Domain,
   EnvDiffItem,
   EnvDiffPreview,
   EnvVar,
+  GithubBranch,
+  GithubRepo,
+  GithubStatus,
   LocalGitStatus,
   LogChannelFrame,
   LogQueryResult,
@@ -46,6 +53,7 @@ import type {
   SetEnvVarRequest,
   TerminalFrame,
   UpdateAppRequest,
+  UpdateCheckResult,
 } from './types'
 
 export const desktopApi = {
@@ -84,6 +92,12 @@ export const desktopApi = {
   selectServer: (serverId: string) => invoke<boolean>('select_server', { serverId }),
   removeServer: (serverId: string) => invoke<boolean>('remove_server', { serverId }),
   reorderServers: (orderedIds: string[]) => invoke<void>('reorder_servers', { orderedIds }),
+  updateServer: (serverId: string, args: { name?: string; accent?: string }) =>
+    invoke<ServerView>('update_server', {
+      serverId,
+      name: args.name ?? null,
+      accent: args.accent ?? null,
+    }),
 
   // ---- Projects & Apps ----
   getServerSnapshot: (serverId: string) =>
@@ -159,8 +173,24 @@ export const desktopApi = {
     invoke<{ ok: boolean; error?: string | null }>('test_alert_channel', { serverId, id }),
   deleteAlertChannel: (serverId: string, id: string) =>
     invoke<void>('delete_alert_channel', { serverId, id }),
+  createToken: (serverId: string, req: CreateApiTokenRequest) =>
+    invoke<CreatedApiToken>('create_token', { serverId, req }),
   revokeToken: (serverId: string, tokenId: string) =>
     invoke<void>('revoke_token', { serverId, tokenId }),
+  getGithubStatus: (serverId: string) =>
+    invoke<GithubStatus>('get_github_status', { serverId }),
+  listGithubRepos: (serverId: string) =>
+    invoke<GithubRepo[]>('list_github_repos', { serverId }),
+  listGithubBranches: (serverId: string, owner: string, repo: string) =>
+    invoke<GithubBranch[]>('list_github_branches', { serverId, owner, repo }),
+  connectGithubApp: (serverId: string, organization?: string) =>
+    invoke<GithubStatus>('connect_github_app', {
+      serverId,
+      organization: organization?.trim() || null,
+    }),
+  cancelGithubConnect: () => invoke<void>('cancel_github_connect'),
+  disconnectGithub: (serverId: string) =>
+    invoke<void>('disconnect_github', { serverId }),
   listDevices: (serverId: string) => invoke<ApiToken[]>('list_devices', { serverId }),
   createPairingCode: (serverId: string) =>
     invoke<PairingCode>('create_pairing_code', { serverId }),
@@ -224,6 +254,15 @@ export const desktopApi = {
     limit: number
   }) => invoke<LogQueryResult>('query_log_buffer', args),
   getPerfDiagnostics: () => invoke<PerfDiagnostics>('get_perf_diagnostics'),
+  getAppInfo: () => invoke<DesktopAppInfo>('get_app_info'),
+  checkDesktopUpdates: () => invoke<UpdateCheckResult>('check_desktop_updates'),
+  openExternalUrl: async (url: string) => {
+    try {
+      await openUrl(url)
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  },
 
   // ---- Env Vars (Full CRUD + Local .env Diff) ----
   setEnvVar: (serverId: string, appId: string, req: SetEnvVarRequest) =>

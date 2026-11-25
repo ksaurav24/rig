@@ -6,6 +6,7 @@
 - `crates/rig-client` — Shared typed HTTP, resumable SSE, WebSocket, and TLS-pinning client used by `rig-cli` (CLI + MCP) and `apps/desktop`.
 - `crates/rig-server` — Rust + Axum + SQLite + Caddy control plane. Supports `--mode full|headless` and `--access public|lan|tailscale|local`.
 - `crates/rig-cli` — `rig` CLI and `rig mcp` stdio MCP server, thin adapter over `rig-client`.
+- `packages/ui` — Shared `@rig/ui` Fluid Functionalism component library, hooks, app primitives (`Logo`, `Page`, `Panel`, `Status`), and warm-graphite design tokens used by both `web` and `apps/desktop`.
 - `apps/desktop` — Tauri 2 native multi-server desktop app (`src-tauri/` Rust core + `src/` React/Tailwind/TanStack Virtual/xterm.js shell). See `apps/desktop/AGENTS.md`.
 - `web` — Embedded single-server React dashboard compiled into `rig-server` for `--mode full`.
 

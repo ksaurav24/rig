@@ -689,7 +689,7 @@ async fn create_token(
     auth: Auth<Viewer>,
     Json(req): Json<CreateApiTokenRequest>,
 ) -> ApiResult<Json<CreatedApiToken>> {
-    auth.require_session("sign in to the dashboard to create API tokens")?;
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to create API tokens")?;
     let name = validate_name("token name", &req.name, 60)?;
     if req.role > auth.role {
         return Err(ApiError::Forbidden(
@@ -759,9 +759,12 @@ async fn delete_token(
     auth: Auth<Viewer>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    if auth.via == auth::Via::ApiToken && auth.token_id.as_deref() != Some(id.as_str()) {
+    if auth.via == auth::Via::ApiToken
+        && auth.token_kind != Some(TokenKind::Device)
+        && auth.token_id.as_deref() != Some(id.as_str())
+    {
         return Err(ApiError::Forbidden(
-            "sign in to the dashboard to revoke other API tokens",
+            "sign in to the dashboard or Rig Desktop to revoke other API tokens",
         ));
     }
     let n = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND org_id = ? AND user_id = ?")

@@ -76,10 +76,40 @@ export const ACCENT_COLORS: Record<string, string> = {
   cyan: '#06b6d4',
   indigo: '#6366f1',
   teal: '#14b8a6',
+  graphite: '#71717a',
 }
 
 export function accentHex(name?: string | null): string {
   if (!name) return '#10b981'
   if (name.startsWith('#')) return name
   return ACCENT_COLORS[name] ?? '#10b981'
+}
+
+/** Suggests a valid Rig app name (lowercase, dash-separated) from a repo, path, or image string. */
+export function suggestAppName(source: string): string {
+  const base = source.split('/').filter(Boolean).pop()?.replace(/\.git$/, '').split(':')[0] ?? ''
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+}
+
+/** Docker / container bridge subnets (172.16.0.0/12) often crowd LAN interface lists. */
+export function isContainerBridge(ip: string): boolean {
+  const m = /^172\.(\d+)\./.exec(ip)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 16 && second <= 31
+}
+
+export function formatDurationMs(ms: number): string {
+  const secs = Math.max(0, Math.floor(ms / 1000))
+  if (secs < 60) return `${secs}s`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `${mins}m ${secs % 60}s`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs}h ${mins % 60}m`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ${hrs % 24}h`
 }

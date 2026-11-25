@@ -5,11 +5,11 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { meQuery, setupStatusQuery } from '@/api/queries'
 import { ImagePicker } from '@/components/app/image-picker'
-import { OrgMark } from '@/components/app/logo'
-import { Page, Panel } from '@/components/app/page'
-import { Badge } from '@/components/fluid/badge'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
+import { OrgMark } from '@rig/ui/app/logo'
+import { Page, Panel } from '@rig/ui/app/page'
+import { Badge } from '@rig/ui/badge'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import {
@@ -20,7 +20,7 @@ import {
   type EnvBadgeColor,
 } from '@/lib/preferences'
 import { useTheme } from '@/lib/theme'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 export const Route = createFileRoute('/_app/settings/general')({
   staticData: { crumb: 'General' },

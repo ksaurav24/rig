@@ -7,7 +7,7 @@ import { databaseEnginesQuery, databasesQuery, meQuery, projectsQuery } from '@/
 import { BackupsSheet } from '@/components/app/backups-sheet'
 import { CopyButton } from '@/components/app/copy-button'
 import { NewDatabaseDialog } from '@/components/app/new-database-dialog'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { EngineMark } from '@/components/app/service-icons'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
 import {
@@ -17,17 +17,17 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
+} from '@rig/ui/dialog'
 import {
   DropdownContent,
   DropdownMenu,
   DropdownSeparator,
   DropdownTrigger,
   MenuItem,
-} from '@/components/fluid/dropdown'
-import { Field, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
+} from '@rig/ui/dropdown'
+import { Field, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@rig/ui/table'
 import {
   AlertDialog,
   AlertDialogAction,

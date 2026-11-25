@@ -1,6 +1,6 @@
+import { Status, statusTone, type Tone } from '@rig/ui/app/state'
 import { CircleAlert, RotateCw, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Badge } from '@/components/fluid/badge'
 import { Button } from '@/components/ui/button'
 import {
   Empty,
@@ -10,45 +10,8 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from '@/components/ui/empty'
-import { cn } from '@/lib/utils'
 
-export type Tone = 'ok' | 'busy' | 'warn' | 'fail' | 'idle'
-
-const BADGE_COLOR: Record<Tone, 'emerald' | 'blue' | 'amber' | 'red' | 'gray'> = {
-  ok: 'emerald',
-  busy: 'blue',
-  warn: 'amber',
-  fail: 'red',
-  idle: 'gray',
-}
-
-/** A state dot with its label, built on Fluid's Badge. Colour never carries meaning alone. */
-export function Status({
-  tone,
-  children,
-  className,
-  variant = 'ghost',
-}: {
-  tone: Tone
-  children: ReactNode
-  className?: string
-  variant?: 'ghost' | 'dot' | 'solid'
-}) {
-  return (
-    <Badge
-      variant={variant}
-      color={BADGE_COLOR[tone]}
-      size="default"
-      className={cn(
-        'text-[13px] font-normal',
-        tone === 'busy' && '[&>span:first-child]:animate-pulse',
-        className,
-      )}
-    >
-      {children}
-    </Badge>
-  )
-}
+export { Status, statusTone, type Tone }
 
 export function EmptyState({
   icon: Icon,

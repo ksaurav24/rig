@@ -5,10 +5,10 @@ import { useDeferredValue, useMemo, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { meQuery, projectsQuery } from '@/api/queries'
-import { Page } from '@/components/app/page'
+import { Page } from '@rig/ui/app/page'
 import { EmptyState } from '@/components/app/state'
-import { Badge } from '@/components/fluid/badge'
-import { Card, CardGroup } from '@/components/fluid/card'
+import { Badge } from '@rig/ui/badge'
+import { Card, CardGroup } from '@rig/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -16,12 +16,12 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
-import { Tabs, TabsItem } from '@/components/fluid/tabs'
-import { Tooltip } from '@/components/fluid/tooltip'
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
+import { Tooltip } from '@rig/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { CATALOG, CATALOG_CATEGORIES, type CatalogCategory, type CatalogTemplate } from '@/lib/catalog'

@@ -854,6 +854,9 @@ impl Access {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
 pub struct NetworkInfo {
+    /// Public IP address of this server, when detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<String>,
     /// Private addresses of this machine's interfaces.
     pub lan_addresses: Vec<String>,
     pub tailscale: Option<TailscaleInfo>,
@@ -1187,6 +1190,9 @@ pub struct GithubManifestRequest {
     /// Create the App under this GitHub organization instead of your account.
     #[serde(default)]
     pub organization: Option<String>,
+    /// Optional loopback callback URL (e.g. `http://127.0.0.1:<port>/callback`) for native desktop clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
 }
 
 /// POST `manifest` as a form field to `post_url` from the browser.

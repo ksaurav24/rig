@@ -2,26 +2,33 @@ import {
   Box,
   Database,
   FolderGit2,
+  Info,
   LayoutDashboard,
+  Moon,
   Palette,
   Plus,
   Rocket,
-  Search,
+  RotateCcw,
   Server,
   Settings,
+  Sliders,
+  Sun,
   Terminal,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMemo } from 'react'
+import {
+  CommandMenu,
+  CommandMenuDialog,
+  CommandMenuFooter,
+  CommandMenuInput,
+  CommandMenuList,
+  type CommandMenuItemData,
+} from '@rig/ui/command-menu'
+import type { DesktopSettingsTab } from './DesktopSettingsView'
+import { usePreferences } from '@/lib/preferences'
 import type { App, Database as DbType, ServerView } from '@/lib/types'
-
-export interface PaletteAction {
-  id: string
-  group: string
-  label: string
-  hint?: string
-  icon: ReactNode
-  run: () => void
-}
 
 interface CommandPaletteProps {
   open: boolean
@@ -39,7 +46,7 @@ interface CommandPaletteProps {
   onAddServer: () => void
   onDeployApp: () => void
   onCreateDatabase: () => void
-  onOpenAppearance: () => void
+  onOpenAppSettings: (tab?: DesktopSettingsTab) => void
 }
 
 export function CommandPalette({
@@ -54,235 +61,247 @@ export function CommandPalette({
   onAddServer,
   onDeployApp,
   onCreateDatabase,
-  onOpenAppearance,
+  onOpenAppSettings,
 }: CommandPaletteProps) {
-  const [query, setQuery] = useState('')
-  const [selected, setSelected] = useState(0)
+  const { prefs, resolvedTheme, updatePrefs, zoomIn, zoomOut, resetZoom } = usePreferences()
 
-  const items = useMemo<PaletteAction[]>(() => {
-    const out: PaletteAction[] = []
+  const items = useMemo<CommandMenuItemData[]>(() => {
+    const out: CommandMenuItemData[] = []
 
     if (activeServer) {
       out.push(
         {
-          id: 'act-deploy-app',
+          value: 'act-deploy-app',
           group: 'Quick Actions',
           label: 'Deploy New Application…',
-          hint: 'Local repo, Docker image, or Git URL',
-          icon: <Rocket className="size-3.5 text-emerald-400" />,
-          run: onDeployApp,
+          description: 'GitHub repo, local folder, Docker image, or Git URL',
+          icon: Rocket,
+          keywords: ['deploy', 'create', 'app', 'new', 'github'],
+          onSelect: onDeployApp,
         },
         {
-          id: 'act-create-db',
+          value: 'act-create-db',
           group: 'Quick Actions',
           label: 'Create Managed Database…',
-          hint: 'PostgreSQL, Redis, MySQL, MongoDB',
-          icon: <Database className="size-3.5 text-sky-400" />,
-          run: onCreateDatabase,
+          description: 'PostgreSQL, MySQL, MariaDB, Redis, MongoDB',
+          icon: Database,
+          keywords: ['database', 'postgres', 'redis', 'mysql', 'mariadb', 'mongo'],
+          onSelect: onCreateDatabase,
         },
         {
-          id: 'nav-local',
-          group: activeServer.name,
-          label: 'Local Repositories',
-          hint: 'Auto-discovered projects on this laptop',
-          icon: <FolderGit2 className="size-3.5 text-emerald-400" />,
-          run: () => onNavigate('local'),
-        },
-        {
-          id: 'nav-overview',
+          value: 'nav-overview',
           group: activeServer.name,
           label: 'Overview',
-          hint: 'Host metrics & events',
-          icon: <LayoutDashboard className="size-3.5" />,
-          run: () => onNavigate('overview'),
+          description: 'Host metrics & live events',
+          icon: LayoutDashboard,
+          onSelect: () => onNavigate('overview'),
         },
         {
-          id: 'nav-apps',
+          value: 'nav-apps',
           group: activeServer.name,
           label: 'Applications',
-          hint: `${apps.length} apps`,
-          icon: <Box className="size-3.5" />,
-          run: () => onNavigate('apps'),
+          description: `${apps.length} apps`,
+          icon: Box,
+          onSelect: () => onNavigate('apps'),
         },
         {
-          id: 'nav-dbs',
+          value: 'nav-local',
+          group: activeServer.name,
+          label: 'Local Repositories',
+          description: 'Auto-discovered projects on this machine',
+          icon: FolderGit2,
+          onSelect: () => onNavigate('local'),
+        },
+        {
+          value: 'nav-dbs',
           group: activeServer.name,
           label: 'Databases',
-          hint: `${databases.length} databases`,
-          icon: <Database className="size-3.5" />,
-          run: () => onNavigate('databases'),
+          description: `${databases.length} managed databases`,
+          icon: Database,
+          onSelect: () => onNavigate('databases'),
         },
         {
-          id: 'nav-settings',
+          value: 'nav-settings',
           group: activeServer.name,
           label: 'Server Settings',
-          hint: 'Org, Appearance, Team, Devices, Alerts, Audit Log',
-          icon: <Settings className="size-3.5" />,
-          run: () => onNavigate('settings'),
+          description: 'Org, Network, GitHub, Team, Devices, Alerts, Audit Log',
+          icon: Settings,
+          onSelect: () => onNavigate('settings'),
         },
       )
 
       for (const app of apps) {
         out.push({
-          id: `app-${app.id}`,
-          group: 'Apps',
+          value: `app-${app.id}`,
+          group: 'Applications',
           label: app.name,
-          hint: app.status,
-          icon: <Box className="size-3.5 text-emerald-400" />,
-          run: () => onNavigate('apps', app.id, 'deployments'),
+          description: `${app.project_name} · ${app.status}`,
+          icon: Box,
+          keywords: [app.project_name, app.status, app.source_kind],
+          onSelect: () => onNavigate('apps', app.id, 'deployments'),
         })
         if (app.status === 'running') {
           out.push({
-            id: `term-${app.id}`,
+            value: `term-${app.id}`,
             group: 'Terminals',
             label: `Terminal: ${app.name}`,
-            hint: 'Open container shell',
-            icon: <Terminal className="size-3.5 text-sky-400" />,
-            run: () => onNavigate('apps', app.id, 'terminal'),
+            description: 'Open interactive container shell',
+            icon: Terminal,
+            keywords: ['shell', 'exec', 'ssh', app.name],
+            onSelect: () => onNavigate('apps', app.id, 'terminal'),
           })
         }
       }
     }
 
-    for (const s of servers) {
+    servers.forEach((s, idx) => {
       out.push({
-        id: `srv-${s.id}`,
+        value: `srv-${s.id}`,
         group: 'Switch Server',
         label: s.name,
-        hint: s.url,
-        icon: <Server className="size-3.5" />,
-        run: () => onSelectServer(s.id),
+        description: s.url,
+        icon: Server,
+        shortcut: idx < 9 ? `mod+${idx + 1}` : undefined,
+        onSelect: () => onSelectServer(s.id),
       })
-    }
+    })
 
     out.push(
       {
-        id: 'act-add-server',
-        group: 'Actions',
+        value: 'act-add-server',
+        group: 'Servers',
         label: 'Add Rig Server…',
-        hint: 'Pair code, password, or initialize',
-        icon: <Plus className="size-3.5 text-emerald-400" />,
-        run: onAddServer,
+        description: 'Pair code, password, or initialize',
+        icon: Plus,
+        shortcut: 'mod+n',
+        onSelect: onAddServer,
       },
       {
-        id: 'act-appearance',
-        group: 'Preferences',
-        label: 'Customize Appearance & UI…',
-        hint: 'Theme, surface, accent, density, corners, logs',
-        icon: <Palette className="size-3.5 text-emerald-400" />,
-        run: onOpenAppearance,
+        value: 'act-zoom-in',
+        group: 'Interface',
+        label: 'Zoom In',
+        description: `Currently ${Math.round(prefs.zoom * 100)}%`,
+        icon: ZoomIn,
+        shortcut: 'mod++',
+        keywords: ['scale', 'larger', 'bigger', 'font', 'size'],
+        onSelect: zoomIn,
+      },
+      {
+        value: 'act-zoom-out',
+        group: 'Interface',
+        label: 'Zoom Out',
+        description: `Currently ${Math.round(prefs.zoom * 100)}%`,
+        icon: ZoomOut,
+        shortcut: 'mod+-',
+        keywords: ['scale', 'smaller', 'font', 'size'],
+        onSelect: zoomOut,
+      },
+      {
+        value: 'act-zoom-reset',
+        group: 'Interface',
+        label: 'Reset Zoom to 100%',
+        icon: RotateCcw,
+        shortcut: 'mod+0',
+        keywords: ['scale', 'default', 'reset'],
+        onSelect: resetZoom,
+      },
+      {
+        value: 'act-theme',
+        group: 'Interface',
+        label: resolvedTheme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode',
+        icon: resolvedTheme === 'dark' ? Sun : Moon,
+        keywords: ['theme', 'dark', 'light'],
+        onSelect: () => updatePrefs({ theme: resolvedTheme === 'dark' ? 'light' : 'dark' }),
+      },
+      {
+        value: 'act-app-settings',
+        group: 'App Settings',
+        label: 'App Settings (General)',
+        description: 'Landing view, sidebar, logs, timestamps, notifications',
+        icon: Sliders,
+        shortcut: 'mod+,',
+        keywords: ['preferences', 'settings', 'general', 'desktop'],
+        onSelect: () => onOpenAppSettings('general'),
+      },
+      {
+        value: 'act-appearance',
+        group: 'App Settings',
+        label: 'Appearance & Zoom',
+        description: 'Theme, surface, accent, zoom, density, corners',
+        icon: Palette,
+        keywords: ['theme', 'color', 'zoom', 'appearance'],
+        onSelect: () => onOpenAppSettings('appearance'),
+      },
+      {
+        value: 'act-manage-servers',
+        group: 'App Settings',
+        label: 'Manage Paired Servers',
+        description: 'Rename, reorder, accent colors, or disconnect servers',
+        icon: Server,
+        keywords: ['servers', 'manage', 'rename', 'reorder'],
+        onSelect: () => onOpenAppSettings('servers'),
+      },
+      {
+        value: 'act-cli',
+        group: 'App Settings',
+        label: 'CLI & MCP Setup',
+        description: 'Detect rig CLI binary, config, and MCP JSON snippet',
+        icon: Terminal,
+        keywords: ['cli', 'mcp', 'command line'],
+        onSelect: () => onOpenAppSettings('cli'),
+      },
+      {
+        value: 'act-updates',
+        group: 'App Settings',
+        label: 'Versions & Updates',
+        description: 'Check for updates and view server version matrix',
+        icon: Info,
+        keywords: ['version', 'update', 'diagnostics', 'about'],
+        onSelect: () => onOpenAppSettings('updates'),
       },
     )
 
-    const q = query.trim().toLowerCase()
-    if (!q) return out
-    return out.filter(
-      (i) =>
-        i.label.toLowerCase().includes(q) ||
-        i.group.toLowerCase().includes(q) ||
-        (i.hint && i.hint.toLowerCase().includes(q)),
-    )
+    return out
   }, [
     activeServer,
     apps,
-    databases,
+    databases.length,
     onAddServer,
     onCreateDatabase,
     onDeployApp,
     onNavigate,
-    onOpenAppearance,
+    onOpenAppSettings,
     onSelectServer,
-    query,
+    prefs.zoom,
+    resetZoom,
+    resolvedTheme,
     servers,
+    updatePrefs,
+    zoomIn,
+    zoomOut,
   ])
 
-  useEffect(() => {
-    setSelected(0)
-  }, [query, open])
-
-  useEffect(() => {
-    if (!open) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        setSelected((s) => Math.min(items.length - 1, s + 1))
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        setSelected((s) => Math.max(0, s - 1))
-      } else if (e.key === 'Enter' && items[selected]) {
-        e.preventDefault()
-        items[selected].run()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [items, onClose, open, selected])
-
-  if (!open) return null
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/65 pt-[14vh] p-4"
-      onClick={onClose}
+    <CommandMenuDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose()
+      }}
+      shortcut={null}
+      title="Command Menu"
+      description="Jump to servers, apps, databases, terminals, or adjust UI settings"
     >
-      <div
-        className="w-full max-w-lg overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2.5 border-b border-line px-4 py-3">
-          <Search className="size-4 text-muted" />
-          <input
-            type="text"
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={
-              activeServer
-                ? `Search ${activeServer.name} apps, deploy, databases, servers…`
-                : 'Search servers and actions…'
-            }
-            className="flex-1 bg-transparent text-sm text-fg outline-none placeholder:text-muted"
-          />
-          <kbd className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-muted ring-1 ring-line">
-            ESC
-          </kbd>
-        </div>
-        <div className="max-h-80 overflow-y-auto p-1.5">
-          {items.length === 0 ? (
-            <div className="py-8 text-center text-xs text-muted">No matching commands</div>
-          ) : (
-            items.map((item, idx) => (
-              <button
-                key={item.id}
-                type="button"
-                onMouseEnter={() => setSelected(idx)}
-                onClick={() => {
-                  item.run()
-                  onClose()
-                }}
-                className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-xs ${
-                  idx === selected ? 'bg-surface-2 text-fg' : 'text-fg/80 hover:bg-surface-2/60'
-                }`}
-              >
-                <span className="shrink-0 text-muted">{item.icon}</span>
-                <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
-                {item.hint && (
-                  <span className="max-w-[180px] truncate font-mono text-[10px] text-muted">
-                    {item.hint}
-                  </span>
-                )}
-                <span className="rounded bg-bg px-1.5 py-0.5 text-[10px] text-muted">
-                  {item.group}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-    </div>
+      <CommandMenu items={items}>
+        <CommandMenuInput
+          placeholder={
+            activeServer
+              ? `Search ${activeServer.name} apps, deploy, zoom, servers…`
+              : 'Search servers and actions…'
+          }
+        />
+        <CommandMenuList />
+        <CommandMenuFooter />
+      </CommandMenu>
+    </CommandMenuDialog>
   )
 }

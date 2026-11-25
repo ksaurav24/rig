@@ -11,9 +11,9 @@ import {
   CommandMenuInput,
   CommandMenuList,
   type CommandMenuItemData,
-} from '@/components/fluid/command-menu'
+} from '@rig/ui/command-menu'
 import { Button } from '@/components/ui/button'
-import { KeyCaps } from '@/lib/key-cap'
+import { KeyCaps } from '@rig/ui/lib/key-cap'
 import { navFor } from '@/lib/nav'
 import { useTheme } from '@/lib/theme'
 

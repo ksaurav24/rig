@@ -1,6 +1,6 @@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { initials } from '@/lib/format'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 export interface AvatarPreset {
   id: string

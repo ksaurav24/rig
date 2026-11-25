@@ -4,10 +4,10 @@ import { KeyRound, Trash2, UserPlus } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { membersQuery, meQuery } from '@/api/queries'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { ErrorState } from '@/components/app/state'
 import { UserAvatar } from '@/components/app/user-avatar'
-import { Badge } from '@/components/fluid/badge'
+import { Badge } from '@rig/ui/badge'
 import {
   Dialog,
   DialogContent,
@@ -15,13 +15,13 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { InputCopy } from '@/components/fluid/input-copy'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/fluid/select'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/fluid/table'
-import { Tooltip } from '@/components/fluid/tooltip'
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { InputCopy } from '@rig/ui/input-copy'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@rig/ui/table'
+import { Tooltip } from '@rig/ui/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,

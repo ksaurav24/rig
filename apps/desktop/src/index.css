@@ -1,181 +1,106 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 @import "@fontsource-variable/schibsted-grotesk";
 @import "@fontsource-variable/jetbrains-mono";
+@import "@rig/ui/styles.css";
+
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: 'Schibsted Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
-  --color-bg: var(--bg);
   --color-rail: var(--rail);
-  --color-surface: var(--surface);
-  --color-surface-2: var(--surface-2);
-  --color-fg: var(--fg);
-  --color-muted: var(--muted);
-  --color-line: var(--line);
-  --color-accent: var(--accent);
 }
 
+/* Desktop-specific extensions on top of @rig/ui/styles.css:
+   - Multi-server rail surface token
+   - Slightly larger default type scale for desktop HiDPI readability
+   - Extra dark surface tone presets (obsidian, oled, slate)
+   - Viewport-locked shell layout */
 :root {
-  --bg: #0c0d10;
-  --rail: #090a0d;
-  --surface: #13151a;
-  --surface-2: #191c23;
-  --fg: #f4f4f6;
-  --muted: #8b91a0;
-  --line: rgba(255, 255, 255, 0.08);
-  --accent: #10b981;
+  --rail: oklch(0.942 0.004 75);
+  --fs-display: 28px; --lh-display: 34px; --fs-display-compact: 24px; --lh-display-compact: 30px;
+  --fs-title: 17px; --lh-title: 24px; --fs-title-compact: 15px; --lh-title-compact: 20px;
+  --fs-subtitle: 15px; --lh-subtitle: 22px; --fs-subtitle-compact: 13.5px; --lh-subtitle-compact: 19px;
+  --fs-body: 14px; --lh-body: 20px; --fs-body-compact: 12.5px; --lh-body-compact: 18px;
+  --fs-caption: 12.5px; --lh-caption: 17px; --fs-caption-compact: 11.5px; --lh-caption-compact: 15px;
+  --fs-micro: 11.5px; --lh-micro: 15px; --fs-micro-compact: 10.5px; --lh-micro-compact: 13px;
 }
 
-/* Dark surface presets */
-:root.dark[data-surface="oled"] {
-  --bg: #000000;
-  --rail: #000000;
-  --surface: #0a0b0e;
-  --surface-2: #13151b;
-  --line: rgba(255, 255, 255, 0.09);
+.dark {
+  --rail: oklch(0.112 0.004 70);
 }
 
-:root.dark[data-surface="slate"] {
-  --bg: #0b1120;
-  --rail: #080d18;
-  --surface: #111a2e;
-  --surface-2: #18233c;
-  --muted: #94a3b8;
-  --line: rgba(148, 163, 184, 0.14);
+.dark[data-surface="obsidian"] {
+  --background: oklch(0.13 0.005 260);
+  --surface: oklch(0.105 0.005 260);
+  --rail: oklch(0.09 0.005 260);
+  --card: oklch(0.165 0.006 260);
+  --popover: oklch(0.195 0.007 260);
+  --sidebar: oklch(0.105 0.005 260);
+  --surface-1: oklch(0.13 0.005 260);
+  --surface-2: oklch(0.155 0.006 260);
+  --surface-3: oklch(0.18 0.006 260);
+  --surface-4: oklch(0.205 0.007 260);
+  --surface-5: oklch(0.23 0.007 260);
+  --surface-6: oklch(0.255 0.008 260);
+  --surface-7: oklch(0.28 0.008 260);
+  --surface-8: oklch(0.305 0.008 260);
 }
 
-:root.dark[data-surface="warm"] {
-  --bg: #111110;
-  --rail: #0c0c0b;
-  --surface: #191816;
-  --surface-2: #22201d;
-  --muted: #9c978e;
-  --line: rgba(255, 248, 235, 0.09);
+.dark[data-surface="oled"] {
+  --background: oklch(0.04 0 0);
+  --surface: oklch(0.02 0 0);
+  --rail: oklch(0.01 0 0);
+  --card: oklch(0.11 0.002 70);
+  --popover: oklch(0.145 0.003 70);
+  --sidebar: oklch(0.03 0 0);
+  --border: oklch(0.24 0.003 70);
+  --surface-1: oklch(0.04 0 0);
+  --surface-2: oklch(0.09 0.002 70);
+  --surface-3: oklch(0.13 0.003 70);
+  --surface-4: oklch(0.165 0.003 70);
+  --surface-5: oklch(0.195 0.004 70);
+  --surface-6: oklch(0.225 0.004 70);
+  --surface-7: oklch(0.255 0.004 70);
+  --surface-8: oklch(0.285 0.004 70);
 }
 
-:root.light {
-  --bg: #f7f7f8;
-  --rail: #efeff2;
-  --surface: #ffffff;
-  --surface-2: #f2f3f6;
-  --fg: #111318;
-  --muted: #5f6675;
-  --line: rgba(17, 19, 24, 0.09);
-  --accent: #059669;
-}
-
-/* Accent color presets (remaps primary emerald interactive tokens live) */
-:root[data-accent="indigo"] {
-  --accent: #6366f1;
-  --color-emerald-100: #e0e7ff;
-  --color-emerald-200: #c7d2fe;
-  --color-emerald-300: #a5b4fc;
-  --color-emerald-400: #818cf8;
-  --color-emerald-500: #6366f1;
-  --color-emerald-600: #4f46e5;
-}
-
-:root[data-accent="sky"] {
-  --accent: #0ea5e9;
-  --color-emerald-100: #e0f2fe;
-  --color-emerald-200: #bae6fd;
-  --color-emerald-300: #7dd3fc;
-  --color-emerald-400: #38bdf8;
-  --color-emerald-500: #0ea5e9;
-  --color-emerald-600: #0284c7;
-}
-
-:root[data-accent="violet"] {
-  --accent: #8b5cf6;
-  --color-emerald-100: #ede9fe;
-  --color-emerald-200: #ddd6fe;
-  --color-emerald-300: #c4b5fd;
-  --color-emerald-400: #a78bfa;
-  --color-emerald-500: #8b5cf6;
-  --color-emerald-600: #7c3aed;
-}
-
-:root[data-accent="amber"] {
-  --accent: #f59e0b;
-  --color-emerald-100: #fef3c7;
-  --color-emerald-200: #fde68a;
-  --color-emerald-300: #fcd34d;
-  --color-emerald-400: #fbbf24;
-  --color-emerald-500: #f59e0b;
-  --color-emerald-600: #d97706;
-}
-
-:root[data-accent="rose"] {
-  --accent: #f43f5e;
-  --color-emerald-100: #ffe4e6;
-  --color-emerald-200: #fecdd3;
-  --color-emerald-300: #fda4af;
-  --color-emerald-400: #fb7185;
-  --color-emerald-500: #f43f5e;
-  --color-emerald-600: #e11d48;
-}
-
-:root[data-accent="graphite"] {
-  --accent: #71717a;
-  --color-emerald-100: #f4f4f5;
-  --color-emerald-200: #e4e4e7;
-  --color-emerald-300: #d4d4d8;
-  --color-emerald-400: #a1a1aa;
-  --color-emerald-500: #71717a;
-  --color-emerald-600: #52525b;
-}
-
-/* Corner radius styles */
-:root[data-radius="sharp"] {
-  --radius-md: 0.125rem;
-  --radius-lg: 0.2rem;
-  --radius-xl: 0.25rem;
-  --radius-2xl: 0.35rem;
-}
-
-:root[data-radius="soft"] {
-  --radius-md: 0.55rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-  --radius-2xl: 1.35rem;
-}
-
-/* UI density scaling */
-:root[data-density="compact"] {
-  font-size: 14.5px;
+.dark[data-surface="slate"] {
+  --background: oklch(0.155 0.024 258);
+  --surface: oklch(0.13 0.022 258);
+  --rail: oklch(0.112 0.02 258);
+  --card: oklch(0.19 0.026 258);
+  --popover: oklch(0.22 0.028 258);
+  --sidebar: oklch(0.13 0.022 258);
+  --border: oklch(0.31 0.025 258);
+  --input: oklch(0.36 0.028 258);
+  --surface-1: oklch(0.155 0.024 258);
+  --surface-2: oklch(0.18 0.025 258);
+  --surface-3: oklch(0.205 0.027 258);
+  --surface-4: oklch(0.23 0.028 258);
+  --surface-5: oklch(0.255 0.028 258);
+  --surface-6: oklch(0.28 0.028 258);
+  --surface-7: oklch(0.305 0.028 258);
+  --surface-8: oklch(0.33 0.028 258);
 }
 
 :root[data-density="comfortable"] {
-  font-size: 17px;
+  font-size: 17.5px;
+  --fs-display: 30px; --lh-display: 36px;
+  --fs-title: 18px; --lh-title: 25px;
+  --fs-subtitle: 15.5px; --lh-subtitle: 23px;
+  --fs-body: 14.5px; --lh-body: 21px;
+  --fs-caption: 13px; --lh-caption: 18px;
 }
 
-html,
-body,
-#root {
-  height: 100%;
-  margin: 0;
-  overflow: hidden;
-  font-family: var(--font-sans);
-  background: var(--bg);
-  color: var(--fg);
-}
-
-/* WebKitGTK performance discipline (§7): crisp scrollbars, no expensive blur on scrolling containers */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.22);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.38);
-}
-
-.tabular-nums {
-  font-variant-numeric: tabular-nums;
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+  body {
+    font-size: 0.9375rem;
+  }
 }

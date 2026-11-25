@@ -24,7 +24,8 @@ use rig_api::{
     CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest, CreateDatabaseRequest,
     CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel, CreatedApiToken, Database,
     DatabaseCredentials, DatabaseEngineInfo, Deployment, DeviceLoginRequest, DiscoveredContainer,
-    Domain, EnvVar, ErrorBody, ExchangePairingRequest, GithubBranch, GithubRepo, GithubStatus,
+    Domain, EnvVar, ErrorBody, ExchangePairingRequest, GithubBranch, GithubManifest,
+    GithubManifestComplete, GithubManifestRequest, GithubRepo, GithubStatus,
     LocalImageDeployRequest, LocalSourceDeployRequest, Me, Member, MemberWithPassword, MetricRange,
     MetricSeries, NetworkInfo, PairedDevice, PairingCode, Project, RevealedEnvVar, ServerEvent,
     ServerMeta, SetEnvVarRequest, SetupRequest, SetupStatus, StoredBlob, StoredBlobBatch,
@@ -1130,6 +1131,25 @@ impl Client {
 
     pub async fn github_status(&self) -> ClientResult<GithubStatus> {
         self.get("/api/v1/github").await
+    }
+
+    pub async fn github_manifest(
+        &self,
+        req: &GithubManifestRequest,
+    ) -> ClientResult<GithubManifest> {
+        self.post("/api/v1/github/manifest", Some(req)).await
+    }
+
+    pub async fn github_manifest_complete(
+        &self,
+        req: &GithubManifestComplete,
+    ) -> ClientResult<GithubStatus> {
+        self.post("/api/v1/github/manifest/complete", Some(req))
+            .await
+    }
+
+    pub async fn github_disconnect(&self) -> ClientResult<()> {
+        self.delete("/api/v1/github").await
     }
 
     pub async fn github_repos(&self) -> ClientResult<Vec<GithubRepo>> {

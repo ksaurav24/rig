@@ -1,18 +1,23 @@
 import {
   Activity,
   Box,
-  Cpu,
+  ChevronRight,
   Database,
   FolderGit2,
-  HardDrive,
-  MemoryStick,
   Plus,
   Radio,
   RefreshCw,
   Rocket,
 } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { Page, Panel } from '@rig/ui/app/page'
+import { EmptyState, Status, statusTone, type Tone } from '@rig/ui/app/state'
+import { Badge } from '@rig/ui/badge'
+import { Banner, BannerDescription } from '@rig/ui/banner'
+import { Button } from '@rig/ui/button'
 import { formatBytes, formatPercent, relativeTime } from '@/lib/format'
 import type { ServerSnapshot, ServerView } from '@/lib/types'
+import { cn } from '@rig/ui/lib/utils'
 
 interface OverviewViewProps {
   server: ServerView
@@ -22,7 +27,17 @@ interface OverviewViewProps {
   onOpenApp: (appId: string) => void
   onDeployApp: () => void
   onOpenLocalRepos: () => void
+  onOpenDatabases: () => void
   onCreateDatabase: () => void
+}
+
+const APP_ORDER: Record<string, number> = {
+  failed: 0,
+  crashed: 0,
+  deploying: 1,
+  building: 1,
+  running: 2,
+  stopped: 3,
 }
 
 export function OverviewView({
@@ -33,6 +48,7 @@ export function OverviewView({
   onOpenApp,
   onDeployApp,
   onOpenLocalRepos,
+  onOpenDatabases,
   onCreateDatabase,
 }: OverviewViewProps) {
   const sys = snapshot?.system
@@ -40,293 +56,335 @@ export function OverviewView({
   const diskPct = sys ? formatPercent(sys.disk_used, sys.disk_total) : 0
   const cpuPct = sys ? Math.round(sys.cpu_percent) : 0
 
+  const apps = snapshot?.apps ?? []
+  const sortedApps = [...apps].sort(
+    (a, b) => (APP_ORDER[a.status] ?? 4) - (APP_ORDER[b.status] ?? 4) || a.name.localeCompare(b.name),
+  )
+  const appsRunning = apps.filter((a) => a.status === 'running').length
+  const dbs = snapshot?.databases ?? []
+  const dbsRunning = dbs.filter((d) => d.status === 'running').length
+
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight text-fg">{server.name}</h1>
-          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="font-mono">{server.url}</span>
-            {snapshot?.meta?.mode && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-fg uppercase">
-                {snapshot.meta.mode}
-              </span>
-            )}
-            {snapshot?.meta?.access && (
-              <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
-                {snapshot.meta.access}
-              </span>
-            )}
-            {snapshot?.from_cache && (
-              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
-                Offline · Cached read-only view
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onDeployApp}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-          >
-            <Rocket className="size-3.5" />
-            Deploy App
-          </button>
-          <button
-            type="button"
-            onClick={onOpenLocalRepos}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-fg hover:bg-surface-2"
-          >
-            <FolderGit2 className="size-3.5 text-emerald-400" />
-            Local Repos
-          </button>
-          <button
-            type="button"
-            onClick={onCreateDatabase}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs text-fg hover:bg-surface-2"
-          >
-            <Database className="size-3.5 text-sky-400" />
-            New Database
-          </button>
-          {snapshot && (
-            <span className="font-mono text-[11px] text-muted tabular-nums">
-              {snapshot.fetch_ms}ms
+    <Page
+      title={server.name}
+      description={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[13px]">{server.url}</span>
+          {snapshot?.meta?.access && (
+            <Badge variant="dot" color="gray" size="compact" className="font-mono uppercase">
+              {snapshot.meta.access}
+            </Badge>
+          )}
+          {snapshot?.meta?.server_version && (
+            <span className="font-mono text-[12px] text-muted-foreground tabular-nums">
+              v{snapshot.meta.server_version}
             </span>
           )}
-          <button
+        </span>
+      }
+      actions={
+        <>
+          <Button type="button" variant="primary" leadingIcon={Rocket} onClick={onDeployApp}>
+            Deploy App
+          </Button>
+          <Button type="button" variant="tertiary" leadingIcon={FolderGit2} onClick={onOpenLocalRepos}>
+            Local Repos
+          </Button>
+          <Button type="button" variant="tertiary" leadingIcon={Database} onClick={onCreateDatabase}>
+            New Database
+          </Button>
+          <Button
             type="button"
+            variant="tertiary"
+            size="icon"
+            loading={loading}
             onClick={onRefresh}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs text-fg hover:bg-surface-2 disabled:opacity-50"
+            aria-label="Refresh server snapshot"
+            title="Refresh snapshot"
           >
-            <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-      </div>
+            <RefreshCw className="size-4" />
+          </Button>
+        </>
+      }
+    >
+      {snapshot?.from_cache && (
+        <Banner status="warning" contrast="high">
+          <BannerDescription>
+            Showing cached read-only snapshot while connecting to {server.name}.
+          </BannerDescription>
+        </Banner>
+      )}
 
-      {/* Host Metric Cards */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <MetricCard
-          icon={<Cpu className="size-4 text-emerald-400" />}
+      {sys && (!sys.engine || !sys.proxy_ready) && (
+        <Banner role="alert" status="error" contrast="high">
+          <BannerDescription>
+            {!sys.engine
+              ? 'Rig cannot reach the container engine. Check that Docker or Podman is running on this host.'
+              : 'Rig cannot reach Caddy, so domains are not being routed. Apps keep running until Caddy recovers.'}
+          </BannerDescription>
+        </Banner>
+      )}
+
+      {/* Unified Host Telemetry Strip (matches Rig web dashboard) */}
+      <dl className="grid overflow-hidden rounded-xl bg-card shadow-[var(--shadow-2)] sm:grid-cols-2 lg:grid-cols-4 [&>div]:border-b [&>div]:border-border/80 [&>div]:sm:border-r lg:[&>div]:border-b-0 lg:[&>div:last-child]:border-r-0">
+        <Gauge
           label="CPU"
-          value={sys ? `${cpuPct}%` : '—'}
-          sub={sys?.engine ? `${sys.engine} ${sys.engine_version ?? ''}` : 'Engine probing…'}
-          percent={cpuPct}
+          ready={Boolean(sys)}
+          used={cpuPct}
+          detail="all cores"
         />
-        <MetricCard
-          icon={<MemoryStick className="size-4 text-sky-400" />}
+        <Gauge
           label="Memory"
-          value={sys ? `${memPct}%` : '—'}
-          sub={sys ? `${formatBytes(sys.memory_used)} / ${formatBytes(sys.memory_total)}` : '—'}
-          percent={memPct}
+          ready={Boolean(sys)}
+          used={memPct}
+          detail={sys ? `${formatBytes(sys.memory_used)} / ${formatBytes(sys.memory_total)}` : ''}
         />
-        <MetricCard
-          icon={<HardDrive className="size-4 text-violet-400" />}
+        <Gauge
           label="Disk"
-          value={sys ? `${diskPct}%` : '—'}
-          sub={sys ? `${formatBytes(sys.disk_used)} / ${formatBytes(sys.disk_total)}` : '—'}
-          percent={diskPct}
-        />
-        <MetricCard
-          icon={<Box className="size-4 text-amber-400" />}
-          label="Workloads"
-          value={sys ? `${sys.apps_running} / ${sys.apps_total}` : '—'}
-          sub={
-            sys
-              ? `Proxy ${sys.proxy_ready ? 'ready' : 'offline'} · ${snapshot?.databases.length ?? 0} DBs`
-              : '—'
+          ready={Boolean(sys)}
+          used={diskPct}
+          detail={
+            sys && sys.disk_total > 0
+              ? `${formatBytes(sys.disk_total - sys.disk_used)} free`
+              : 'unavailable'
           }
-          percent={sys && sys.apps_total > 0 ? Math.round((sys.apps_running / sys.apps_total) * 100) : 0}
         />
-      </div>
+        <div className="flex flex-col justify-center gap-2.5 px-5 py-4 text-[13.5px]">
+          <Health tone={sys?.engine ? 'ok' : 'fail'} label="Engine">
+            {sys?.engine ? `${sys.engine} ${sys.engine_version ?? ''}`.trim() : 'Unreachable'}
+          </Health>
+          <Health tone={sys?.proxy_ready ? 'ok' : 'fail'} label="Proxy">
+            {sys?.proxy_ready ? 'Caddy serving' : 'Offline'}
+          </Health>
+          <Health tone={appsRunning > 0 ? 'ok' : 'idle'} label="Workloads">
+            {sys ? `${sys.apps_running}/${sys.apps_total} apps · ${dbs.length} DBs` : '—'}
+          </Health>
+        </div>
+      </dl>
 
       {/* Apps + Live Event Feed */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="rounded-xl border border-line bg-surface lg:col-span-2">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-fg">
-              <Activity className="size-3.5 text-emerald-400" />
-              Applications ({snapshot?.apps.length ?? 0})
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted">
-                {snapshot?.projects.length ?? 0} projects
-              </span>
-              <button
-                type="button"
-                onClick={onDeployApp}
-                className="inline-flex items-center gap-1 rounded-md bg-surface-2 px-2 py-1 text-[11px] font-medium text-fg hover:bg-bg"
-              >
-                <Plus className="size-3" />
-                Deploy
-              </button>
-            </div>
-          </div>
-          <div className="divide-y divide-line">
-            {(snapshot?.apps ?? []).length === 0 ? (
-              <div className="flex flex-col items-center px-4 py-8 text-center text-xs text-muted">
-                <p>No applications deployed on this server yet.</p>
-                <div className="mt-3 flex flex-wrap justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={onDeployApp}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                  >
-                    <Rocket className="size-3.5" />
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+        <Panel
+          title={
+            <>
+              <Activity className="size-4 text-primary" />
+              Applications
+            </>
+          }
+          description={`${appsRunning}/${apps.length} running · ${snapshot?.projects.length ?? 0} projects`}
+          actions={
+            <Button
+              type="button"
+              variant="secondary"
+              size="compact"
+              leadingIcon={Plus}
+              onClick={onDeployApp}
+            >
+              Deploy
+            </Button>
+          }
+          flush={sortedApps.length > 0}
+          className="lg:col-span-2"
+        >
+          {sortedApps.length === 0 ? (
+            <EmptyState
+              icon={Box}
+              title="No applications deployed yet"
+              action={
+                <>
+                  <Button type="button" variant="primary" leadingIcon={Rocket} onClick={onDeployApp}>
                     Deploy App
-                  </button>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="tertiary"
+                    leadingIcon={FolderGit2}
+                    onClick={onOpenLocalRepos}
+                  >
+                    Browse Local Repos
+                  </Button>
+                </>
+              }
+            >
+              Deploy a local repository from this machine, a Docker image, or a Git URL.
+            </EmptyState>
+          ) : (
+            <ul className="divide-y divide-border/80">
+              {sortedApps.map((app) => (
+                <li key={app.id}>
                   <button
                     type="button"
-                    onClick={onOpenLocalRepos}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg hover:bg-bg"
+                    onClick={() => onOpenApp(app.id)}
+                    className="group flex w-full items-center gap-4 px-5 py-3 text-left text-[14px] transition-colors duration-80 outline-none hover:bg-hover focus-visible:bg-hover"
                   >
-                    <FolderGit2 className="size-3.5" />
-                    Browse Local Repos
-                  </button>
-                </div>
-              </div>
-            ) : (
-              (snapshot?.apps ?? []).map((app) => (
-                <button
-                  key={app.id}
-                  type="button"
-                  onClick={() => onOpenApp(app.id)}
-                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-2/60"
-                >
-                  <span
-                    className={`size-2 shrink-0 rounded-full ${
-                      app.status === 'running'
-                        ? 'bg-green-400'
-                        : app.status === 'deploying' || app.status === 'building'
-                          ? 'bg-amber-400'
-                          : app.status === 'failed' || app.status === 'crashed'
-                            ? 'bg-rose-500'
-                            : 'bg-zinc-500'
-                    }`}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium text-fg">{app.name}</div>
-                    <div className="truncate font-mono text-[11px] text-muted">
-                      {app.project_name} · {app.source_kind} · port {app.port}
-                      {app.git_branch ? ` · ${app.git_branch}` : ''}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate">
+                        <span className="font-medium text-foreground">{app.name}</span>
+                        <span className="text-muted-foreground"> · {app.project_name}</span>
+                      </div>
+                      <div className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">
+                        {app.source_kind} · port {app.port}
+                        {app.git_branch ? ` · ${app.git_branch}` : ''}
+                        {app.domains[0] ? ` · ${app.domains[0]}` : ''}
+                      </div>
                     </div>
-                  </div>
-                  <span className="rounded bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-muted uppercase">
-                    {app.status}
-                  </span>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
+                    <Status tone={statusTone(app.status)} className="shrink-0">
+                      {app.status}
+                    </Status>
+                    <ChevronRight
+                      className="size-4 shrink-0 text-muted-foreground/60 transition-transform duration-100 group-hover:translate-x-0.5 group-hover:text-foreground"
+                      aria-hidden="true"
+                    />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
 
-        <div className="rounded-xl border border-line bg-surface">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-fg">
-              <Radio className="size-3.5 text-emerald-400" />
+        <Panel
+          title={
+            <>
+              <Radio className="size-4 text-primary" />
               Live Event Feed
-            </div>
-            <span className="font-mono text-[10px] text-muted">SSE /events</span>
-          </div>
-          <div className="max-h-80 divide-y divide-line overflow-y-auto">
+            </>
+          }
+          description="Real-time SSE stream"
+          actions={
+            <Badge variant="dot" color="emerald" size="compact" className="font-mono">
+              /events
+            </Badge>
+          }
+          flush
+        >
+          <div className="max-h-96 divide-y divide-border/80 overflow-y-auto">
             {(snapshot?.recent_events ?? []).length === 0 ? (
-              <div className="px-4 py-8 text-center text-xs text-muted">
+              <div className="px-5 py-10 text-center text-[13.5px] leading-relaxed text-muted-foreground">
                 Connected to live event stream. Deploys, crashes, and alerts appear here in real
                 time.
               </div>
             ) : (
               [...(snapshot?.recent_events ?? [])].reverse().map((ev) => (
-                <div key={ev.id} className="px-4 py-2.5 text-xs">
+                <div key={ev.id} className="px-5 py-3 text-[13.5px]">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-fg">{ev.title}</span>
-                    <span className="shrink-0 font-mono text-[10px] text-muted">
+                    <span className="font-medium text-foreground">{ev.title}</span>
+                    <span className="shrink-0 font-mono text-[11.5px] text-muted-foreground tabular-nums">
                       {relativeTime(ev.at)}
                     </span>
                   </div>
-                  {ev.detail && <p className="mt-0.5 line-clamp-2 text-[11px] text-muted">{ev.detail}</p>}
-                  <span className="mt-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-muted">
+                  {ev.detail && (
+                    <p className="mt-1 line-clamp-2 text-[12.5px] text-muted-foreground">
+                      {ev.detail}
+                    </p>
+                  )}
+                  <Badge variant="solid" color="gray" size="compact" className="mt-2 font-mono">
                     {ev.kind}
-                  </span>
+                  </Badge>
                 </div>
               ))
             )}
           </div>
-        </div>
+        </Panel>
       </div>
 
       {/* Databases quick summary */}
-      {(snapshot?.databases ?? []).length > 0 && (
-        <div className="rounded-xl border border-line bg-surface">
-          <div className="flex items-center justify-between border-b border-line px-4 py-2.5 text-xs font-semibold text-fg">
-            <div className="flex items-center gap-2">
-              <Database className="size-3.5 text-sky-400" />
-              Managed Databases ({snapshot?.databases.length ?? 0})
-            </div>
-            <button
+      {dbs.length > 0 && (
+        <Panel
+          title={
+            <>
+              <Database className="size-4 text-busy" />
+              Managed Databases
+            </>
+          }
+          description={`${dbsRunning}/${dbs.length} running`}
+          actions={
+            <Button
               type="button"
+              variant="secondary"
+              size="compact"
+              leadingIcon={Plus}
               onClick={onCreateDatabase}
-              className="inline-flex items-center gap-1 rounded-md bg-surface-2 px-2 py-1 text-[11px] font-medium text-fg hover:bg-bg"
             >
-              <Plus className="size-3" />
-              New
-            </button>
-          </div>
-          <div className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">
-            {(snapshot?.databases ?? []).map((db) => (
-              <div
+              New Database
+            </Button>
+          }
+        >
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {dbs.map((db) => (
+              <button
                 key={db.id}
-                className="flex items-center justify-between rounded-lg border border-line bg-bg px-3 py-2 text-xs"
+                type="button"
+                onClick={onOpenDatabases}
+                className="group flex items-center justify-between gap-3 rounded-lg border border-border/80 bg-surface/60 px-4 py-3 text-left transition-colors duration-80 hover:bg-hover"
               >
-                <div>
-                  <div className="font-medium text-fg">{db.name}</div>
-                  <div className="font-mono text-[11px] text-muted">
-                    {db.engine} {db.version}
+                <div className="min-w-0">
+                  <div className="truncate text-[14px] font-medium text-foreground">{db.name}</div>
+                  <div className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">
+                    {db.engine} {db.version} · :{db.port}
                   </div>
                 </div>
-                <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase">
-                  {db.status}
-                </span>
-              </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Status tone={statusTone(db.status)} size="compact">
+                    {db.status}
+                  </Status>
+                  <ChevronRight className="size-3.5 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+                </div>
+              </button>
             ))}
           </div>
-        </div>
+        </Panel>
       )}
+    </Page>
+  )
+}
+
+function Gauge({
+  label,
+  used,
+  detail,
+  ready,
+}: {
+  label: string
+  used: number
+  detail: string
+  ready: boolean
+}) {
+  const tone = used >= 90 ? 'bg-fail' : used >= 75 ? 'bg-warn' : 'bg-primary'
+  return (
+    <div className="flex flex-col gap-2 px-5 py-4">
+      <dt className="text-[13px] font-medium text-muted-foreground">{label}</dt>
+      <dd className="flex flex-col gap-2.5">
+        <span className="flex items-baseline gap-2.5">
+          <span className="font-mono text-[26px] leading-none font-semibold tracking-tight text-foreground tabular-nums">
+            {ready ? `${used}%` : '—'}
+          </span>
+          <span className="truncate text-[12.5px] text-muted-foreground">{ready ? detail : 'Loading…'}</span>
+        </span>
+        <span
+          role="meter"
+          aria-label={`${label} in use`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={used}
+          className="h-1.5 overflow-hidden rounded-full bg-muted"
+        >
+          <span
+            className={cn('block h-full rounded-full transition-[width] duration-500', tone)}
+            style={{ width: `${ready ? Math.min(100, Math.max(used, 2)) : 0}%` }}
+          />
+        </span>
+      </dd>
     </div>
   )
 }
 
-function MetricCard({
-  icon,
-  label,
-  value,
-  sub,
-  percent,
-}: {
-  icon: React.ReactNode
-  label: string
-  value: string
-  sub: string
-  percent: number
-}) {
+function Health({ tone, label, children }: { tone: Tone; label: string; children: ReactNode }) {
   return (
-    <div className="rounded-xl border border-line bg-surface p-4">
-      <div className="flex items-center justify-between text-xs text-muted">
-        <span>{label}</span>
-        {icon}
-      </div>
-      <div className="mt-2 font-mono text-2xl font-semibold tracking-tight text-fg tabular-nums">
-        {value}
-      </div>
-      <div className="mt-1 truncate text-[11px] text-muted">{sub}</div>
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-bg">
-        <div
-          className={`h-full rounded-full ${
-            percent >= 90 ? 'bg-rose-500' : percent >= 75 ? 'bg-amber-400' : 'bg-emerald-500'
-          }`}
-          style={{ width: `${Math.min(100, Math.max(2, percent))}%` }}
-        />
-      </div>
+    <div className="flex items-center justify-between gap-3">
+      <Status tone={tone} size="compact" className="text-muted-foreground">
+        {label}
+      </Status>
+      <span className="min-w-0 truncate text-[13px] font-medium text-foreground">{children}</span>
     </div>
   )
 }

@@ -11,10 +11,26 @@ import {
   RotateCcw,
   Square,
   Trash2,
-  X,
 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
+import { Page, Panel } from '@rig/ui/app/page'
+import { EmptyState, Status, statusTone } from '@rig/ui/app/state'
+import { Badge } from '@rig/ui/badge'
+import { Banner, BannerDescription } from '@rig/ui/banner'
+import { Button } from '@rig/ui/button'
+import { ConfirmDialog } from '@rig/ui/confirm-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@rig/ui/dialog'
+import { Field, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
 import { formatBytes, relativeTime } from '@/lib/format'
 import { desktopApi } from '@/lib/ipc'
 import type {
@@ -37,8 +53,9 @@ interface DatabasesViewProps {
 
 const FALLBACK_ENGINES: DatabaseEngineInfo[] = [
   { engine: 'postgres', label: 'PostgreSQL', versions: ['17', '16', '15'], port: 5432 },
-  { engine: 'redis', label: 'Redis', versions: ['7', '6'], port: 6379 },
   { engine: 'mysql', label: 'MySQL', versions: ['8.4', '8.0'], port: 3306 },
+  { engine: 'mariadb', label: 'MariaDB', versions: ['11.4', '10.11'], port: 3306 },
+  { engine: 'redis', label: 'Redis', versions: ['7', '6'], port: 6379 },
   { engine: 'mongodb', label: 'MongoDB', versions: ['7', '6'], port: 27017 },
 ]
 
@@ -55,6 +72,14 @@ export function DatabasesView({
   const [loadingBackupDb, setLoadingBackupDb] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [confirmState, setConfirmState] = useState<{
+    title: string
+    description: string
+    target?: string
+    confirmLabel: string
+    tone: 'danger' | 'warning'
+    action: () => Promise<void>
+  } | null>(null)
 
   // Create Database form state
   const [projectId, setProjectId] = useState<string>(projects[0]?.id ?? '__new__')
@@ -70,7 +95,8 @@ export function DatabasesView({
     enabled: createOpen,
   })
 
-  const engines = enginesQuery.data && enginesQuery.data.length > 0 ? enginesQuery.data : FALLBACK_ENGINES
+  const engines =
+    enginesQuery.data && enginesQuery.data.length > 0 ? enginesQuery.data : FALLBACK_ENGINES
   const activeEngine = engines.find((e) => e.engine === engine) ?? engines[0]
 
   useEffect(() => {
@@ -204,75 +230,56 @@ export function DatabasesView({
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight text-fg">Managed Databases</h1>
-          <p className="text-xs text-muted">
-            Provision PostgreSQL, Redis, MySQL, or MongoDB instances with automatic credentials and
-            backups.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-        >
-          <Plus className="size-3.5" />
+    <Page
+      title="Managed Databases"
+      description="Provision PostgreSQL, MySQL, MariaDB, Redis, or MongoDB instances with automatic credentials and one-click backups."
+      actions={
+        <Button type="button" variant="primary" leadingIcon={Plus} onClick={() => setCreateOpen(true)}>
           Create Database
-        </button>
-      </div>
-
+        </Button>
+      }
+    >
       {databases.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-line bg-surface p-10 text-center">
-          <div className="mb-3 flex size-10 items-center justify-center rounded-xl bg-sky-500/15 text-sky-400">
-            <DbIcon className="size-5" />
-          </div>
-          <div className="text-sm font-medium text-fg">No managed databases yet</div>
-          <p className="mt-1 max-w-sm text-xs text-muted">
-            Spin up a managed PostgreSQL, Redis, MySQL, or MongoDB instance on this server in one
-            click.
-          </p>
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-medium text-white hover:bg-emerald-500"
-          >
-            <Plus className="size-3.5" />
-            Create Your First Database
-          </button>
-        </div>
+        <EmptyState
+          icon={DbIcon}
+          title="No managed databases yet"
+          action={
+            <Button
+              type="button"
+              variant="primary"
+              leadingIcon={Plus}
+              onClick={() => setCreateOpen(true)}
+            >
+              Create Your First Database
+            </Button>
+          }
+        >
+          Spin up a managed PostgreSQL, MySQL, MariaDB, Redis, or MongoDB instance on this server in
+          one click.
+        </EmptyState>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {databases.map((db) => {
             const creds = revealed[db.id]
             const backups = expandedBackups[db.id]
             return (
-              <div key={db.id} className="rounded-xl border border-line bg-surface p-4 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="flex size-9 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400">
-                      <DbIcon className="size-4" />
+              <Panel key={db.id}>
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div className="flex size-10 items-center justify-center rounded-xl bg-hover text-busy">
+                      <DbIcon className="size-5" strokeWidth={1.7} />
                     </div>
                     <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-fg">{db.name}</span>
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] uppercase ${
-                            db.status === 'running'
-                              ? 'bg-emerald-500/15 text-emerald-300'
-                              : db.status === 'failed'
-                                ? 'bg-rose-500/15 text-rose-300'
-                                : 'bg-surface-2 text-muted'
-                          }`}
-                        >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[15px] font-semibold text-foreground">{db.name}</span>
+                        <Status tone={statusTone(db.status)} size="compact" variant="dot">
                           {db.status}
-                        </span>
-                        <span className="rounded bg-bg px-1.5 py-0.5 text-[10px] text-muted">
+                        </Status>
+                        <Badge variant="solid" color="gray" size="compact">
                           {db.project_name}
-                        </span>
+                        </Badge>
                       </div>
-                      <div className="mt-0.5 font-mono text-[11px] text-muted">
+                      <div className="mt-0.5 font-mono text-[12.5px] text-muted-foreground">
                         {db.engine} {db.version} · {db.host}:{db.port}
                         {db.db_name ? ` / ${db.db_name}` : ''}
                         {db.host_port ? ` · host:${db.host_port}` : ''}
@@ -280,94 +287,131 @@ export function DatabasesView({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
                       type="button"
+                      variant="tertiary"
+                      size="compact"
+                      leadingIcon={KeyRound}
+                      active={Boolean(creds)}
                       onClick={() => void reveal(db)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-fg hover:bg-bg"
                     >
-                      <KeyRound className="size-3.5" />
                       {creds ? 'Hide Credentials' : 'Credentials'}
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
+                      variant="tertiary"
+                      size="compact"
+                      leadingIcon={Archive}
+                      trailingIcon={backups ? ChevronUp : ChevronDown}
+                      active={Boolean(backups)}
                       onClick={() => void toggleBackups(db)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-fg hover:bg-bg"
                     >
-                      <Archive className="size-3.5" />
                       Backups
-                      {backups ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
-                    </button>
+                    </Button>
                     {db.status === 'running' ? (
-                      <button
+                      <Button
                         type="button"
-                        disabled={busyId === db.id}
-                        onClick={() => void toggleDb(db, 'stop')}
-                        className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-xs text-rose-300 hover:bg-rose-500/10"
+                        variant="destructive"
+                        size="compact"
+                        leadingIcon={Square}
+                        loading={busyId === db.id}
+                        disabled={busyId !== null}
+                        onClick={() =>
+                          setConfirmState({
+                            title: 'Stop Database',
+                            description:
+                              'Stops the database container immediately. Connected applications will lose database access until it is started again.',
+                            target: `${db.name} (${db.engine} ${db.version})`,
+                            confirmLabel: 'Stop Database',
+                            tone: 'warning',
+                            action: () => toggleDb(db, 'stop'),
+                          })
+                        }
                       >
-                        <Square className="size-3" />
                         Stop
-                      </button>
+                      </Button>
                     ) : (
-                      <button
+                      <Button
                         type="button"
-                        disabled={busyId === db.id}
+                        variant="primary"
+                        size="compact"
+                        leadingIcon={Play}
+                        loading={busyId === db.id}
+                        disabled={busyId !== null}
                         onClick={() => void toggleDb(db, 'start')}
-                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
                       >
-                        <Play className="size-3" />
                         Start
-                      </button>
+                      </Button>
                     )}
-                    <button
+                    <Button
                       type="button"
-                      disabled={busyId === db.id}
-                      onClick={() => void handleDeleteDb(db)}
+                      variant="ghost"
+                      size="icon-compact"
+                      disabled={busyId !== null}
+                      onClick={() =>
+                        setConfirmState({
+                          title: 'Delete Database',
+                          description:
+                            'Permanently stops and deletes this database container, its data volume, and all stored records. This cannot be undone.',
+                          target: `${db.name} (${db.engine} ${db.version})`,
+                          confirmLabel: 'Delete Database',
+                          tone: 'danger',
+                          action: () => handleDeleteDb(db),
+                        })
+                      }
+                      aria-label={`Delete ${db.name}`}
                       title="Delete database"
-                      className="rounded-lg border border-line bg-surface-2 p-1.5 text-muted hover:bg-rose-500/15 hover:text-rose-300"
+                      className="text-muted-foreground hover:text-fail"
                     >
-                      <Trash2 className="size-3.5" />
-                    </button>
+                      <Trash2 />
+                    </Button>
                   </div>
                 </div>
 
                 {db.error && (
-                  <div className="mt-2.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-[11px] text-rose-300">
-                    {db.error}
-                  </div>
+                  <Banner status="error" contrast="high" size="compact" className="mt-3.5">
+                    <BannerDescription>{db.error}</BannerDescription>
+                  </Banner>
                 )}
 
                 {creds && (
-                  <div className="mt-3 space-y-2 rounded-lg border border-line bg-bg p-3 font-mono text-[11px]">
-                    <div className="flex items-center gap-2">
-                      <span className="w-20 shrink-0 text-muted">URL</span>
-                      <span className="min-w-0 flex-1 truncate text-emerald-300">{creds.url}</span>
-                      <button
+                  <div className="mt-4 space-y-2.5 rounded-lg border border-border/80 bg-surface p-3.5 font-mono text-[12.5px]">
+                    <div className="flex items-center gap-3">
+                      <span className="w-20 shrink-0 text-muted-foreground">URL</span>
+                      <span className="min-w-0 flex-1 truncate text-ok">{creds.url}</span>
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="icon-compact"
+                        aria-label="Copy connection URL"
                         onClick={() => {
                           void navigator.clipboard.writeText(creds.url)
                           toast.success('Copied connection URL')
                         }}
-                        className="rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
                       >
-                        <Copy className="size-3.5" />
-                      </button>
+                        <Copy />
+                      </Button>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-20 shrink-0 text-muted">Password</span>
-                      <span className="min-w-0 flex-1 truncate text-fg">{creds.password}</span>
-                      <button
+                    <div className="flex items-center gap-3">
+                      <span className="w-20 shrink-0 text-muted-foreground">Password</span>
+                      <span className="min-w-0 flex-1 truncate text-foreground">
+                        {creds.password}
+                      </span>
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="icon-compact"
+                        aria-label="Copy password"
                         onClick={() => {
                           void navigator.clipboard.writeText(creds.password)
                           toast.success('Copied password')
                         }}
-                        className="rounded p-1 text-muted hover:bg-surface-2 hover:text-fg"
                       >
-                        <Copy className="size-3.5" />
-                      </button>
+                        <Copy />
+                      </Button>
                     </div>
-                    <div className="flex items-center gap-4 text-[10px] text-muted">
+                    <div className="flex flex-wrap items-center gap-4 border-t border-border/60 pt-2 text-[11.5px] text-muted-foreground">
                       <span>user: {db.username}</span>
                       <span>host: {db.host}</span>
                       <span>port: {db.port}</span>
@@ -377,82 +421,105 @@ export function DatabasesView({
                 )}
 
                 {backups && (
-                  <div className="mt-3 overflow-hidden rounded-lg border border-line bg-bg">
-                    <div className="flex items-center justify-between border-b border-line px-3 py-2">
-                      <span className="font-medium text-fg">Backups ({backups.length})</span>
-                      <button
+                  <div className="mt-4 overflow-hidden rounded-lg border border-border/80 bg-surface">
+                    <div className="flex items-center justify-between border-b border-border/80 px-4 py-2.5">
+                      <span className="text-[13px] font-medium text-foreground">
+                        Backups ({backups.length})
+                      </span>
+                      <Button
                         type="button"
-                        disabled={loadingBackupDb === db.id}
+                        variant="primary"
+                        size="compact"
+                        leadingIcon={Plus}
+                        loading={loadingBackupDb === db.id}
                         onClick={() => void triggerBackup(db)}
-                        className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
                       >
-                        <Plus className="size-3" />
-                        {loadingBackupDb === db.id ? 'Working…' : 'Create Backup Now'}
-                      </button>
+                        Create Backup Now
+                      </Button>
                     </div>
                     {backups.length === 0 ? (
-                      <div className="px-3 py-4 text-center text-[11px] text-muted">
+                      <div className="px-4 py-6 text-center text-[13px] text-muted-foreground">
                         No backups yet. Click &ldquo;Create Backup Now&rdquo; to snapshot this
                         database.
                       </div>
                     ) : (
-                      <div className="divide-y divide-line">
+                      <div className="divide-y divide-border/80">
                         {backups.map((b) => (
                           <div
                             key={b.id}
-                            className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-[11px]"
+                            className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-[13px]"
                           >
-                            <div className="flex items-center gap-2 font-mono">
-                              <span className="text-fg">{b.id.slice(-8)}</span>
-                              <span
-                                className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${
-                                  b.status === 'succeeded' || b.status === 'completed'
-                                    ? 'bg-emerald-500/15 text-emerald-300'
-                                    : b.status === 'failed'
-                                      ? 'bg-rose-500/15 text-rose-300'
-                                      : 'bg-surface-2 text-muted'
-                                }`}
-                              >
+                            <div className="flex flex-wrap items-center gap-2.5 font-mono">
+                              <span className="text-foreground">{b.id.slice(-8)}</span>
+                              <Status tone={statusTone(b.status)} size="compact">
                                 {b.status}
-                              </span>
+                              </Status>
                               {b.size_bytes != null && (
-                                <span className="text-muted">{formatBytes(b.size_bytes)}</span>
+                                <span className="text-[12px] text-muted-foreground">
+                                  {formatBytes(b.size_bytes)}
+                                </span>
                               )}
-                              <span className="text-muted">{relativeTime(b.created_at)}</span>
+                              <span className="text-[12px] text-muted-foreground tabular-nums">
+                                {relativeTime(b.created_at)}
+                              </span>
                             </div>
                             <div className="flex items-center gap-1.5">
                               {b.restorable && (
-                                <button
+                                <Button
                                   type="button"
-                                  onClick={async () => {
-                                    try {
-                                      await desktopApi.restoreBackup(serverId, b.id)
-                                      toast.success('Backup restored')
-                                    } catch (err) {
-                                      toast.error(String(err))
-                                    }
-                                  }}
-                                  className="inline-flex items-center gap-1 rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-fg hover:bg-surface"
-                                >
-                                  <RotateCcw className="size-3" />
-                                  Restore
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await desktopApi.deleteBackup(serverId, b.id)
-                                    toast.success('Backup deleted')
-                                    await reloadBackups(db.id)
-                                  } catch (err) {
-                                    toast.error(String(err))
+                                  variant="tertiary"
+                                  size="compact"
+                                  leadingIcon={RotateCcw}
+                                  onClick={() =>
+                                    setConfirmState({
+                                      title: 'Restore Database Backup',
+                                      description:
+                                        'Overwrites the current database contents with this backup snapshot. Any data written since this backup was created will be lost.',
+                                      target: `${db.name} ← backup ${b.id.slice(-8)}`,
+                                      confirmLabel: 'Restore Backup',
+                                      tone: 'warning',
+                                      action: async () => {
+                                        try {
+                                          await desktopApi.restoreBackup(serverId, b.id)
+                                          toast.success('Backup restored')
+                                        } catch (err) {
+                                          toast.error(String(err))
+                                        }
+                                      },
+                                    })
                                   }
-                                }}
-                                className="rounded p-1 text-muted hover:bg-rose-500/15 hover:text-rose-300"
+                                >
+                                  Restore
+                                </Button>
+                              )}
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-compact"
+                                aria-label="Delete backup"
+                                onClick={() =>
+                                  setConfirmState({
+                                    title: 'Delete Backup',
+                                    description:
+                                      'Permanently deletes this backup snapshot from the server. This cannot be undone.',
+                                    target: `Backup ${b.id.slice(-8)} (${db.name})`,
+                                    confirmLabel: 'Delete Backup',
+                                    tone: 'danger',
+                                    action: async () => {
+                                      try {
+                                        await desktopApi.deleteBackup(serverId, b.id)
+                                        toast.success('Backup deleted')
+                                        await reloadBackups(db.id)
+                                      } catch (err) {
+                                        toast.error(String(err))
+                                      }
+                                    },
+                                  })
+                                }
+                                className="text-muted-foreground hover:text-fail"
                               >
-                                <Trash2 className="size-3" />
-                              </button>
+                                <Trash2 />
+                              </Button>
                             </div>
                           </div>
                         ))}
@@ -460,141 +527,140 @@ export function DatabasesView({
                     )}
                   </div>
                 )}
-              </div>
+              </Panel>
             )
           })}
         </div>
       )}
 
-      {/* Create Database Modal */}
-      {createOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-          <div className="w-full max-w-md overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl">
-            <div className="flex items-center justify-between border-b border-line px-5 py-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex size-8 items-center justify-center rounded-lg bg-sky-500/15 text-sky-400">
-                  <DbIcon className="size-4" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-semibold text-fg">Create Managed Database</h2>
-                  <p className="text-xs text-muted">
-                    Runs isolated in a managed container on your server
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setCreateOpen(false)}
-                className="rounded-lg p-1.5 text-muted hover:bg-surface-2 hover:text-fg"
-              >
-                <X className="size-4" />
-              </button>
+      {/* Fluid Create Database Dialog */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent size="lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2.5">
+              <DbIcon className="size-4.5 text-busy" />
+              Create Managed Database
+            </DialogTitle>
+            <DialogDescription>
+              Runs isolated in a managed container on your server with generated credentials.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleCreate} className="space-y-4">
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+              <Field>
+                <FieldLabel>Engine</FieldLabel>
+                <Select
+                  value={engine}
+                  onValueChange={(v) => {
+                    const nextEngine = v as DatabaseEngine
+                    setEngine(nextEngine)
+                    const info = engines.find((e) => e.engine === nextEngine)
+                    if (info?.versions[0]) setVersion(info.versions[0])
+                  }}
+                >
+                  <SelectTrigger className="w-full" placeholder="Select engine" />
+                  <SelectContent>
+                    {engines.map((eng, idx) => (
+                      <SelectItem key={eng.engine} index={idx} value={eng.engine}>
+                        {`${eng.label} (:${eng.port})`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+
+              <Field>
+                <FieldLabel>Version</FieldLabel>
+                <Select value={version} onValueChange={setVersion}>
+                  <SelectTrigger className="w-full font-mono" placeholder="Select version" />
+                  <SelectContent>
+                    {(activeEngine?.versions ?? []).map((v, idx) => (
+                      <SelectItem key={v} index={idx} value={v} className="font-mono">
+                        {v}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
             </div>
 
-            <form onSubmit={handleCreate} className="space-y-4 p-5 text-xs">
-              <div>
-                <label className="mb-1.5 block font-medium text-fg">Engine</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {engines.map((eng) => (
-                    <button
-                      key={eng.engine}
-                      type="button"
-                      onClick={() => {
-                        setEngine(eng.engine)
-                        setVersion(eng.versions[0] ?? '')
-                      }}
-                      className={`flex items-center justify-between rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                        engine === eng.engine
-                          ? 'border-emerald-500 bg-emerald-500/10 text-fg'
-                          : 'border-line bg-bg text-muted hover:text-fg'
-                      }`}
-                    >
-                      <span className="font-medium">{eng.label}</span>
-                      <span className="font-mono text-[10px] opacity-75">:{eng.port}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <Field>
+              <FieldLabel htmlFor="db-create-name">Database Name</FieldLabel>
+              <Input
+                id="db-create-name"
+                type="text"
+                required
+                autoFocus
+                value={dbName}
+                onChange={(e) => setDbName(e.target.value)}
+                placeholder={`${engine}-main`}
+              />
+            </Field>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block font-medium text-fg">Database Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={dbName}
-                    onChange={(e) => setDbName(e.target.value)}
-                    placeholder="app-db, cache…"
-                    className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block font-medium text-fg">Version</label>
-                  <select
-                    value={version}
-                    onChange={(e) => setVersion(e.target.value)}
-                    className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-                  >
-                    {(activeEngine?.versions ?? []).map((v) => (
-                      <option key={v} value={v}>
-                        {v}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-1 block font-medium text-fg">Project</label>
-                <select
-                  value={projectId}
-                  onChange={(e) => setProjectId(e.target.value)}
-                  className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
-                >
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>
+            <Field>
+              <FieldLabel>Project</FieldLabel>
+              <Select value={projectId} onValueChange={setProjectId}>
+                <SelectTrigger className="w-full" placeholder="Select project" />
+                <SelectContent>
+                  {projects.map((p, idx) => (
+                    <SelectItem key={p.id} index={idx} value={p.id}>
                       {p.name}
-                    </option>
+                    </SelectItem>
                   ))}
-                  <option value="__new__">+ Create new project…</option>
-                </select>
-              </div>
+                  <SelectItem index={projects.length} value="__new__">
+                    + Create new project…
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
 
-              {projectId === '__new__' && (
-                <div>
-                  <label className="mb-1 block font-medium text-fg">New Project Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={newProjectName}
-                    onChange={(e) => setNewProjectName(e.target.value)}
-                    placeholder="Production"
-                    className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-xs text-fg outline-none focus:border-emerald-500"
-                  />
-                </div>
-              )}
+            {projectId === '__new__' && (
+              <Field>
+                <FieldLabel htmlFor="db-new-proj">New Project Name</FieldLabel>
+                <Input
+                  id="db-new-proj"
+                  type="text"
+                  required
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="Production"
+                />
+              </Field>
+            )}
 
-              <div className="flex items-center justify-end gap-2 border-t border-line pt-4">
-                <button
-                  type="button"
-                  onClick={() => setCreateOpen(false)}
-                  className="rounded-lg px-3 py-1.5 text-muted hover:bg-surface-2 hover:text-fg"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creating || !dbName.trim()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-                >
-                  <Plus className="size-3.5" />
-                  {creating ? 'Creating…' : 'Create Database'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setCreateOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                leadingIcon={Plus}
+                loading={creating}
+                disabled={!dbName.trim()}
+              >
+                Create Database
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={Boolean(confirmState)}
+        onOpenChange={(open) => {
+          if (!open) setConfirmState(null)
+        }}
+        title={confirmState?.title ?? ''}
+        description={confirmState?.description ?? ''}
+        target={confirmState?.target}
+        confirmLabel={confirmState?.confirmLabel}
+        tone={confirmState?.tone}
+        onConfirm={async () => {
+          await confirmState?.action()
+        }}
+      />
+    </Page>
   )
 }

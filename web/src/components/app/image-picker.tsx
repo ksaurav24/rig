@@ -1,12 +1,12 @@
 import { Link2, Sparkles, Trash2, Upload } from 'lucide-react'
 import { useRef, useState, type ChangeEvent, type DragEvent } from 'react'
 import { AVATAR_PRESETS } from '@/components/app/user-avatar'
-import { Field, FieldDescription, FieldError, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Tabs, TabsItem } from '@/components/fluid/tabs'
+import { Field, FieldDescription, FieldError, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 const MAX_RAW_UPLOAD_BYTES = 5 * 1024 * 1024 // 5 MB raw before client resize
 const MAX_SERVER_BYTES = 750 * 1024

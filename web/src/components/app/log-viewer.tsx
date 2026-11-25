@@ -1,13 +1,13 @@
 import { ArrowDownToLine, Search, WrapText, X } from 'lucide-react'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { CopyButton } from '@/components/app/copy-button'
-import { Input } from '@/components/fluid/input'
-import { Tooltip } from '@/components/fluid/tooltip'
+import { Input } from '@rig/ui/input'
+import { Tooltip } from '@rig/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import type { LogLine } from '@/hooks/use-log-stream'
 import { logTime } from '@/lib/format'
 import { usePreferences, type HourCycleMode, type TimeZoneMode } from '@/lib/preferences'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 /** How close to the bottom still counts as "following". */
 const STICKY_PX = 32

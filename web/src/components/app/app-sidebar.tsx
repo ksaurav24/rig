@@ -4,9 +4,9 @@ import { BookOpen, Boxes, ChevronsUpDown, LogOut, PinOff } from 'lucide-react'
 import { useMemo } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { projectsQuery } from '@/api/queries'
-import { OrgMark } from '@/components/app/logo'
+import { OrgMark } from '@rig/ui/app/logo'
 import { UserAvatar } from '@/components/app/user-avatar'
-import { Badge } from '@/components/fluid/badge'
+import { Badge } from '@rig/ui/badge'
 import {
   DropdownContent,
   DropdownLabel,
@@ -14,7 +14,7 @@ import {
   DropdownSeparator,
   DropdownTrigger,
   MenuItem,
-} from '@/components/fluid/dropdown'
+} from '@rig/ui/dropdown'
 import {
   Sidebar,
   SidebarContent,
@@ -27,7 +27,7 @@ import {
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-} from '@/components/fluid/sidebar'
+} from '@rig/ui/sidebar'
 import { PERSONAL_NAV, sidebarNavFor } from '@/lib/nav'
 import { isEnvBadgeColor, usePreferences } from '@/lib/preferences'
 

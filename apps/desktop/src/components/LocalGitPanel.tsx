@@ -10,8 +10,15 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
+import { Panel } from '@rig/ui/app/page'
+import { Badge } from '@rig/ui/badge'
+import { Banner, BannerDescription } from '@rig/ui/banner'
+import { Button } from '@rig/ui/button'
+import { Field, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
 import { desktopApi } from '@/lib/ipc'
 import type { DiscoveredRepo, LocalGitStatus } from '@/lib/types'
+import { cn } from '@rig/ui/lib/utils'
 
 interface LocalGitPanelProps {
   serverId: string
@@ -102,187 +109,191 @@ export function LocalGitPanel({
   }
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-3 rounded-xl border border-line bg-surface p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-fg">Deploy from Local Git Checkout</h3>
-            <p className="mt-0.5 text-xs text-muted">
-              Pick a discovered repository or browse any folder. Rig Desktop deduplicates files with
-              zstd blobs and deploys straight to <span className="font-medium text-fg">{appName}</span>.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={pickFolder}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg hover:bg-bg"
-          >
-            <FolderGit2 className="size-3.5 text-emerald-400" />
+    <div className="space-y-5">
+      <Panel
+        title="Deploy from Local Git Checkout"
+        description={
+          <>
+            Pick a discovered repository or browse any folder. Rig Desktop deduplicates files with
+            zstd blobs and deploys straight to{' '}
+            <span className="font-medium text-foreground">{appName}</span>.
+          </>
+        }
+        actions={
+          <Button type="button" variant="secondary" size="compact" leadingIcon={FolderGit2} onClick={pickFolder}>
             Choose Folder…
-          </button>
-        </div>
+          </Button>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex gap-2.5">
+            <Input
+              type="text"
+              value={repoPath}
+              onChange={(e) => setRepoPath(e.target.value)}
+              placeholder="/path/to/local/repo"
+              className="flex-1 font-mono"
+            />
+            <Button
+              type="button"
+              variant="tertiary"
+              leadingIcon={RefreshCw}
+              loading={busy}
+              disabled={!repoPath.trim()}
+              onClick={() => void inspect(repoPath)}
+            >
+              Inspect
+            </Button>
+          </div>
 
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={repoPath}
-            onChange={(e) => setRepoPath(e.target.value)}
-            placeholder="/path/to/local/repo"
-            className="flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-          />
-          <button
-            type="button"
-            disabled={busy || !repoPath.trim()}
-            onClick={() => void inspect(repoPath)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg hover:bg-bg disabled:opacity-50"
-          >
-            <RefreshCw className="size-3.5" />
-            Inspect
-          </button>
-        </div>
-
-        {/* Discovered local repositories quick-picker */}
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-medium text-muted">
-              Discovered local repositories ({filteredRepos.length})
-            </span>
-            <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted" />
-              <input
-                type="text"
-                value={repoSearch}
-                onChange={(e) => setRepoSearch(e.target.value)}
-                placeholder="Filter repos…"
-                className="w-44 rounded-md border border-line bg-bg py-0.5 pr-2 pl-6 text-[11px] text-fg outline-none focus:border-emerald-500"
-              />
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-[12.5px] font-medium text-muted-foreground">
+                Discovered local repositories ({filteredRepos.length})
+              </span>
+              <div className="relative">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  size="compact"
+                  type="text"
+                  value={repoSearch}
+                  onChange={(e) => setRepoSearch(e.target.value)}
+                  placeholder="Filter repos…"
+                  className="w-48 pl-8"
+                />
+              </div>
+            </div>
+            <div className="max-h-48 divide-y divide-border/80 overflow-y-auto rounded-lg border border-border bg-surface/60">
+              {filteredRepos.length === 0 ? (
+                <div className="px-4 py-6 text-center text-[13px] text-muted-foreground">
+                  {scanning
+                    ? 'Scanning local directories…'
+                    : 'No matching repos — use Choose Folder above.'}
+                </div>
+              ) : (
+                filteredRepos.map((r) => (
+                  <button
+                    key={r.path}
+                    type="button"
+                    onClick={() => {
+                      setRepoPath(r.path)
+                      void inspect(r.path)
+                    }}
+                    className={cn(
+                      'flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left text-[13.5px] transition-colors',
+                      repoPath === r.path ? 'bg-active text-foreground' : 'hover:bg-hover',
+                    )}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 font-medium text-foreground">
+                        <span className="truncate">{r.name}</span>
+                        {r.branch && (
+                          <Badge variant="solid" color="gray" size="compact" className="font-mono">
+                            {r.branch}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="truncate font-mono text-[12px] text-muted-foreground">
+                        {r.path}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      {r.stacks.slice(0, 2).map((s) => (
+                        <Badge key={s} variant="solid" color="emerald" size="compact">
+                          {s}
+                        </Badge>
+                      ))}
+                    </div>
+                  </button>
+                ))
+              )}
             </div>
           </div>
-          <div className="max-h-40 divide-y divide-line overflow-y-auto rounded-lg border border-line bg-bg">
-            {filteredRepos.length === 0 ? (
-              <div className="px-3 py-4 text-center text-[11px] text-muted">
-                {scanning ? 'Scanning local directories…' : 'No matching repos — use Choose Folder.'}
-              </div>
-            ) : (
-              filteredRepos.map((r) => (
-                <button
-                  key={r.path}
-                  type="button"
-                  onClick={() => {
-                    setRepoPath(r.path)
-                    void inspect(r.path)
-                  }}
-                  className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs ${
-                    repoPath === r.path ? 'bg-emerald-500/15 text-fg' : 'hover:bg-surface-2/60'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 font-medium text-fg">
-                      <span className="truncate">{r.name}</span>
-                      {r.branch && (
-                        <span className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[10px] text-muted">
-                          {r.branch}
-                        </span>
-                      )}
-                    </div>
-                    <div className="truncate font-mono text-[10px] text-muted">{r.path}</div>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
-                    {r.stacks.slice(0, 2).map((s) => (
-                      <span
-                        key={s}
-                        className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-emerald-300"
-                      >
-                        {s}
-                      </span>
-                    ))}
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
         </div>
-      </div>
+      </Panel>
 
       {status && (
-        <div className="space-y-3 rounded-xl border border-line bg-surface p-4 text-xs">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-1.5 font-mono text-fg">
-              <GitBranch className="size-3.5 text-emerald-400" />
-              <span>{status.branch ?? (status.is_git_repo ? 'detached HEAD' : 'plain folder')}</span>
+        <Panel>
+          <div className="space-y-4 text-[13.5px]">
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-1.5 font-mono text-foreground">
+                <GitBranch className="size-4 text-primary" />
+                <span>
+                  {status.branch ?? (status.is_git_repo ? 'detached HEAD' : 'plain folder')}
+                </span>
+              </div>
+              {status.head_sha && (
+                <div className="flex items-center gap-1.5 font-mono text-muted-foreground">
+                  <GitCommitHorizontal className="size-4" />
+                  <span className="text-foreground">{status.head_sha}</span>
+                  {status.head_subject && (
+                    <span className="max-w-md truncate font-sans">{status.head_subject}</span>
+                  )}
+                </div>
+              )}
+              {status.stacks.length > 0 && (
+                <div className="flex gap-1.5">
+                  {status.stacks.map((s) => (
+                    <Badge key={s} variant="solid" color="emerald" size="compact" className="font-mono">
+                      {s}
+                    </Badge>
+                  ))}
+                </div>
+              )}
             </div>
-            {status.head_sha && (
-              <div className="flex items-center gap-1.5 font-mono text-muted">
-                <GitCommitHorizontal className="size-3.5" />
-                <span className="text-fg">{status.head_sha}</span>
-                {status.head_subject && (
-                  <span className="max-w-md truncate font-sans">{status.head_subject}</span>
-                )}
+
+            {status.remote_url && (
+              <div className="font-mono text-[12.5px] text-muted-foreground">
+                origin: {status.remote_url}
               </div>
             )}
-            {status.stacks.length > 0 && (
-              <div className="flex gap-1">
-                {status.stacks.map((s) => (
-                  <span
-                    key={s}
-                    className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300"
-                  >
-                    {s}
-                  </span>
-                ))}
-              </div>
+
+            {(status.dirty_files > 0 || status.unpushed_commits > 0) && (
+              <Banner status="warning" contrast="high" size="compact" icon={AlertTriangle}>
+                <BannerDescription>
+                  {status.dirty_files > 0 && (
+                    <div>
+                      {status.dirty_files} uncommitted file{status.dirty_files === 1 ? '' : 's'} in
+                      working tree — your working copy will be uploaded directly.
+                    </div>
+                  )}
+                  {status.unpushed_commits > 0 && (
+                    <div>
+                      {status.unpushed_commits} local commit
+                      {status.unpushed_commits === 1 ? '' : 's'} not pushed to origin.
+                    </div>
+                  )}
+                </BannerDescription>
+              </Banner>
             )}
-          </div>
 
-          {status.remote_url && (
-            <div className="font-mono text-[11px] text-muted">origin: {status.remote_url}</div>
-          )}
+            <div className="flex flex-wrap items-end justify-between gap-4 border-t border-border/80 pt-4">
+              <Field className="w-72">
+                <FieldLabel htmlFor="local-git-df">
+                  Dockerfile path <span className="opacity-70">(empty = Railpack)</span>
+                </FieldLabel>
+                <Input
+                  id="local-git-df"
+                  type="text"
+                  value={dockerfile}
+                  onChange={(e) => setDockerfile(e.target.value)}
+                  placeholder="Dockerfile"
+                  className="font-mono"
+                />
+              </Field>
 
-          {(status.dirty_files > 0 || status.unpushed_commits > 0) && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-200">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" />
-              <div>
-                {status.dirty_files > 0 && (
-                  <div>
-                    {status.dirty_files} uncommitted file{status.dirty_files === 1 ? '' : 's'} in
-                    working tree — your working copy will be uploaded directly.
-                  </div>
-                )}
-                {status.unpushed_commits > 0 && (
-                  <div>
-                    {status.unpushed_commits} local commit
-                    {status.unpushed_commits === 1 ? '' : 's'} not pushed to origin.
-                  </div>
-                )}
-              </div>
+              <Button
+                type="button"
+                variant="primary"
+                leadingIcon={Rocket}
+                loading={busy}
+                onClick={deployNow}
+              >
+                Deploy this checkout
+              </Button>
             </div>
-          )}
-
-          <div className="flex flex-wrap items-end justify-between gap-3 pt-1">
-            <div>
-              <label className="mb-1 block text-[11px] text-muted">
-                Dockerfile path <span className="text-muted">(empty = Railpack auto-build)</span>
-              </label>
-              <input
-                type="text"
-                value={dockerfile}
-                onChange={(e) => setDockerfile(e.target.value)}
-                placeholder="Dockerfile"
-                className="w-64 rounded-lg border border-line bg-bg px-2.5 py-1.5 font-mono text-xs text-fg outline-none focus:border-emerald-500"
-              />
-            </div>
-
-            <button
-              type="button"
-              disabled={busy}
-              onClick={deployNow}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-            >
-              <Rocket className="size-3.5" />
-              {busy ? 'Uploading & deploying…' : 'Deploy this checkout'}
-            </button>
           </div>
-        </div>
+        </Panel>
       )}
     </div>
   )

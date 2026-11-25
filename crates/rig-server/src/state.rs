@@ -34,6 +34,7 @@ pub struct SystemSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct NetworkSnapshot {
+    pub public_ip: Option<String>,
     pub lan_addresses: Vec<String>,
     pub tailscale: Option<TailscaleInfo>,
     pub sampled_at: Instant,

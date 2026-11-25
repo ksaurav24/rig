@@ -3,8 +3,8 @@ import { useId, useMemo, useState, type PointerEvent } from 'react'
 
 import { metricsQuery, type MetricRange, type MetricTarget } from '@/api/queries'
 import type { Schemas } from '@/api/client'
-import { Panel } from '@/components/app/page'
-import { Tabs, TabsItem } from '@/components/fluid/tabs'
+import { Panel } from '@rig/ui/app/page'
+import { Tabs, TabsItem } from '@rig/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { bytes } from '@/lib/format'
 

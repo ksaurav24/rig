@@ -6,10 +6,10 @@ import { toast } from 'sonner'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { alertChannelsQuery } from '@/api/queries'
 import { CopyButton } from '@/components/app/copy-button'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { EmptyState, ErrorState } from '@/components/app/state'
-import { Badge } from '@/components/fluid/badge'
-import { CheckboxGroup, CheckboxItem } from '@/components/fluid/checkbox-group'
+import { Badge } from '@rig/ui/badge'
+import { CheckboxGroup, CheckboxItem } from '@rig/ui/checkbox-group'
 import {
   Dialog,
   DialogContent,
@@ -17,10 +17,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '@/components/fluid/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/fluid/field'
-import { Input } from '@/components/fluid/input'
-import { Switch } from '@/components/fluid/switch'
+} from '@rig/ui/dialog'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@rig/ui/field'
+import { Input } from '@rig/ui/input'
+import { Switch } from '@rig/ui/switch'
 import {
   AlertDialog,
   AlertDialogAction,

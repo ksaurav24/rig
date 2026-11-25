@@ -1,49 +1,136 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Box,
-  Command,
+  ChevronRight,
   Database,
   FolderGit2,
   LayoutDashboard,
-  Palette,
+  Minus,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Rocket,
+  Search,
   Server,
   Settings,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react'
 import { toast } from 'sonner'
 import { AddServerModal } from './components/AddServerModal'
-import { AppearanceModal } from './components/AppearancePanel'
 import { AppsView, type AppDetailTab } from './components/AppsView'
 import { CommandPalette } from './components/CommandPalette'
 import { DatabasesView } from './components/DatabasesView'
 import { DeployModal } from './components/DeployModal'
+import { DesktopSettingsView, type DesktopSettingsTab } from './components/DesktopSettingsView'
 import { LocalReposView } from './components/LocalReposView'
 import { OverviewView } from './components/OverviewView'
 import { ServerRail } from './components/ServerRail'
 import { SettingsView } from './components/SettingsView'
+import { Logo } from '@rig/ui/app/logo'
+import { Button } from '@rig/ui/button'
+import { FluidHoverHighlight } from '@rig/ui/fluid-hover-highlight'
+import { Tooltip, TooltipGroup } from '@rig/ui/tooltip'
+import { useFluidHover, useRegisterFluidHoverItem } from '@rig/ui/hooks/use-fluid-hover'
 import { desktopApi } from './lib/ipc'
-import { usePreferences } from './lib/preferences'
+import { KeyCaps } from '@rig/ui/lib/key-cap'
+import { MAX_ZOOM, MIN_ZOOM, usePreferences } from './lib/preferences'
+import { useShape } from '@rig/ui/lib/shape-context'
 import type { ServerView } from './lib/types'
+import { cn } from '@rig/ui/lib/utils'
 
 type Section = 'overview' | 'apps' | 'local' | 'databases' | 'settings'
 
+interface NavItemDef {
+  id: Section
+  label: string
+  icon: ComponentType<{ className?: string; size?: number; strokeWidth?: number }>
+  badge?: number
+}
+
+function SidebarNavItem({
+  item,
+  index,
+  active,
+  compact,
+  registerItem,
+  onClick,
+}: {
+  item: NavItemDef
+  index: number
+  active: boolean
+  compact: boolean
+  registerItem: (index: number, el: HTMLElement | null) => void
+  onClick: () => void
+}) {
+  const ref = useRef<HTMLButtonElement>(null)
+  const shape = useShape()
+  const Icon = item.icon
+  useRegisterFluidHoverItem(registerItem, index, ref)
+
+  const button = (
+    <button
+      ref={ref}
+      type="button"
+      data-fluid-hover-index={index}
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'relative z-10 flex items-center text-[13.5px] transition-colors duration-80 outline-none select-none',
+        'focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring)]',
+        shape.item,
+        compact ? 'size-10 justify-center' : 'h-9 w-full gap-2.5 px-3',
+        active
+          ? 'bg-active font-medium text-foreground'
+          : 'text-sidebar-foreground hover:text-foreground',
+      )}
+    >
+      <Icon
+        size={17}
+        strokeWidth={active ? 2 : 1.65}
+        className={cn('shrink-0 transition-colors', active ? 'text-primary' : 'text-muted-foreground')}
+      />
+      {!compact && <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>}
+      {!compact && item.badge !== undefined && (
+        <span className="font-mono text-[11.5px] text-muted-foreground tabular-nums">
+          {item.badge}
+        </span>
+      )}
+    </button>
+  )
+
+  if (compact) {
+    return (
+      <Tooltip side="right" content={item.label}>
+        {button}
+      </Tooltip>
+    )
+  }
+  return button
+}
+
 export default function App() {
   const qc = useQueryClient()
-  const { prefs, resolvedTheme, updatePrefs } = usePreferences()
+  const { prefs, resolvedTheme, updatePrefs, zoomIn, zoomOut, resetZoom } = usePreferences()
+  const shape = useShape()
   const [section, setSection] = useState<Section>(() => prefs.defaultSection)
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false)
+  const [appSettingsTab, setAppSettingsTab] = useState<DesktopSettingsTab>('general')
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [appTab, setAppTab] = useState<AppDetailTab>('deployments')
   const [addOpen, setAddOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [appearanceOpen, setAppearanceOpen] = useState(false)
   const [autoOpenCreateDb, setAutoOpenCreateDb] = useState(false)
   const [deployModal, setDeployModal] = useState<{
     open: boolean
     initialLocalPath?: string | null
     initialName?: string | null
   }>({ open: false })
+
+  const notificationsEnabledRef = useRef(prefs.notificationsEnabled)
+  notificationsEnabledRef.current = prefs.notificationsEnabled
+
+  const navListRef = useRef<HTMLDivElement>(null)
+  const navHover = useFluidHover(navListRef)
 
   const serversQuery = useQuery({
     queryKey: ['desktop', 'servers'],
@@ -103,12 +190,18 @@ export default function App() {
 
     void desktopApi
       .onServerEvent(({ server_id, server_name, event }) => {
-        if (event.kind === 'deploy.failed' || event.kind === 'app.crashed' || event.kind === 'app.down') {
-          toast.error(`${server_name}: ${event.title}`, {
-            description: event.detail ?? undefined,
-          })
-        } else if (event.kind === 'deploy.finished') {
-          toast.success(`${server_name}: ${event.title}`)
+        if (notificationsEnabledRef.current) {
+          if (
+            event.kind === 'deploy.failed' ||
+            event.kind === 'app.crashed' ||
+            event.kind === 'app.down'
+          ) {
+            toast.error(`${server_name}: ${event.title}`, {
+              description: event.detail ?? undefined,
+            })
+          } else if (event.kind === 'deploy.finished') {
+            toast.success(`${server_name}: ${event.title}`)
+          }
         }
         void qc.invalidateQueries({ queryKey: ['desktop', 'snapshot', server_id] })
       })
@@ -122,8 +215,14 @@ export default function App() {
     }
   }, [qc])
 
+  const openAppSettings = useCallback((tab: DesktopSettingsTab = 'general') => {
+    setAppSettingsTab(tab)
+    setAppSettingsOpen(true)
+  }, [])
+
   const handleSelectServer = useCallback(
     async (id: string) => {
+      setAppSettingsOpen(false)
       if (id === activeServerId) return
       qc.setQueryData<{ active_server_id?: string | null; servers: ServerView[] }>(
         ['desktop', 'servers'],
@@ -167,7 +266,9 @@ export default function App() {
     [qc],
   )
 
-  // Global keyboard shortcuts: Cmd/Ctrl+K (palette), Cmd/Ctrl+1..9 (server switch), Cmd/Ctrl+N (add server).
+  // Global keyboard shortcuts & Ctrl+Wheel zoom:
+  // Cmd/Ctrl+K (palette), Cmd/Ctrl+1..9 (server switch), Cmd/Ctrl+N (add server),
+  // Cmd/Ctrl+=/+/-/0 (zoom in/out/reset), Ctrl+Wheel (smooth zoom).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
@@ -176,9 +277,23 @@ export default function App() {
       if (key === 'k') {
         e.preventDefault()
         setPaletteOpen((v) => !v)
+      } else if (key === ',') {
+        e.preventDefault()
+        setAppSettingsOpen((v) => !v)
       } else if (key === 'n') {
         e.preventDefault()
         setAddOpen(true)
+      } else if (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd') {
+        e.preventDefault()
+        zoomIn()
+      } else if (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract') {
+        e.preventDefault()
+        zoomOut()
+      } else if (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0') {
+        if (!e.shiftKey) {
+          e.preventDefault()
+          resetZoom()
+        }
       } else if (key >= '1' && key <= '9') {
         const idx = Number(key) - 1
         if (servers[idx]) {
@@ -187,9 +302,21 @@ export default function App() {
         }
       }
     }
+
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return
+      e.preventDefault()
+      if (e.deltaY < 0) zoomIn()
+      else if (e.deltaY > 0) zoomOut()
+    }
+
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [handleSelectServer, servers])
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('wheel', onWheel)
+    }
+  }, [handleSelectServer, resetZoom, servers, zoomIn, zoomOut])
 
   const openDeployModal = useCallback((initialLocalPath?: string, initialName?: string) => {
     setDeployModal({ open: true, initialLocalPath: initialLocalPath ?? null, initialName: initialName ?? null })
@@ -201,115 +328,196 @@ export default function App() {
     setAutoOpenCreateDb(true)
   }, [])
 
-  const navItems: { id: Section; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { id: 'overview', label: 'Overview', icon: <LayoutDashboard className="size-4" /> },
+  const navItems: NavItemDef[] = [
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
     {
       id: 'apps',
       label: 'Apps',
-      icon: <Box className="size-4" />,
+      icon: Box,
       badge: snapshotQuery.data?.apps.length,
     },
     {
       id: 'local',
       label: 'Local Repos',
-      icon: <FolderGit2 className="size-4" />,
+      icon: FolderGit2,
     },
     {
       id: 'databases',
       label: 'Databases',
-      icon: <Database className="size-4" />,
+      icon: Database,
       badge: snapshotQuery.data?.databases.length,
     },
-    { id: 'settings', label: 'Settings', icon: <Settings className="size-4" /> },
+    { id: 'settings', label: 'Settings', icon: Settings },
   ]
 
   const compactNav = prefs.sidebarLayout === 'compact'
+  const selectedAppName = useMemo(
+    () => snapshotQuery.data?.apps.find((a) => a.id === selectedAppId)?.name ?? null,
+    [selectedAppId, snapshotQuery.data?.apps],
+  )
+  const zoomPercent = Math.round(prefs.zoom * 100)
+
+  const sectionLabel =
+    section === 'local'
+      ? 'Local Repos'
+      : section === 'overview'
+        ? 'Overview'
+        : section === 'apps'
+          ? 'Applications'
+          : section === 'databases'
+            ? 'Databases'
+            : 'Settings'
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg text-fg">
+    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
       {/* Multi-Server Switcher Rail */}
       <ServerRail
         servers={servers}
         activeId={activeServerId}
+        appSettingsOpen={appSettingsOpen}
         onSelect={(id) => void handleSelectServer(id)}
         onAdd={() => setAddOpen(true)}
         onReorder={(ids) => void handleReorderServers(ids)}
-        onOpenAppearance={() => setAppearanceOpen(true)}
+        onOpenAppSettings={() => openAppSettings('general')}
         theme={resolvedTheme}
         onToggleTheme={() => updatePrefs({ theme: resolvedTheme === 'dark' ? 'light' : 'dark' })}
       />
 
       {/* Active Server Navigation Sidebar */}
-      {activeServer && (
+      {activeServer && !appSettingsOpen && (
         <nav
           aria-label="Server navigation"
-          className={`flex shrink-0 flex-col border-r border-line bg-surface/60 transition-[width] duration-150 ${
-            compactNav ? 'w-16 items-center' : 'w-52'
-          }`}
+          className={cn(
+            'flex shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-150',
+            compactNav ? 'w-[64px] items-center' : 'w-60',
+          )}
         >
-          <div className={`border-b border-line ${compactNav ? 'p-2' : 'px-3.5 py-3'}`}>
-            {!compactNav && (
+          <div className={cn('border-b border-sidebar-border/80', compactNav ? 'flex flex-col items-center gap-2 p-2.5' : 'px-3.5 py-3')}>
+            {compactNav ? (
               <>
-                <div className="truncate text-xs font-semibold text-fg">{activeServer.name}</div>
-                <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
-                  {activeServer.user_email ?? activeServer.url}
+                <Tooltip side="right" content="Expand sidebar">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => updatePrefs({ sidebarLayout: 'expanded' })}
+                    aria-label="Expand sidebar"
+                    className="size-10 text-muted-foreground hover:text-foreground"
+                  >
+                    <PanelLeftOpen className="size-4" />
+                  </Button>
+                </Tooltip>
+                <Tooltip side="right" content="Deploy App">
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="icon"
+                    onClick={() => openDeployModal()}
+                    aria-label="Deploy App"
+                    className="size-10"
+                  >
+                    <Rocket className="size-4" />
+                  </Button>
+                </Tooltip>
+              </>
+            ) : (
+              <>
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        'size-2 shrink-0 rounded-full',
+                        activeServer.health === 'online'
+                          ? 'bg-ok'
+                          : activeServer.health === 'deploying'
+                            ? 'bg-warn animate-pulse'
+                            : activeServer.health === 'connecting'
+                              ? 'bg-busy animate-pulse'
+                              : activeServer.health === 'degraded'
+                                ? 'bg-fail'
+                                : 'bg-idle',
+                      )}
+                    />
+                    <span className="truncate text-[14.5px] font-semibold tracking-tight text-foreground">
+                      {activeServer.name}
+                    </span>
+                  </div>
+                  <Tooltip side="right" content="Collapse sidebar">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-compact"
+                      onClick={() => updatePrefs({ sidebarLayout: 'compact' })}
+                      aria-label="Collapse sidebar"
+                      className="shrink-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <PanelLeftClose />
+                    </Button>
+                  </Tooltip>
                 </div>
+                <Button
+                  type="button"
+                  variant="primary"
+                  leadingIcon={Rocket}
+                  onClick={() => openDeployModal()}
+                  className="w-full"
+                >
+                  Deploy App
+                </Button>
               </>
             )}
-            <button
-              type="button"
-              onClick={() => openDeployModal()}
-              title="Deploy App"
-              className={`flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 text-xs font-medium text-white hover:bg-emerald-500 ${
-                compactNav ? 'size-10' : 'mt-2.5 w-full px-2.5 py-1.5'
-              }`}
-            >
-              <Rocket className="size-3.5" />
-              {!compactNav && 'Deploy App'}
-            </button>
           </div>
-          <div className={`flex-1 space-y-0.5 p-2 ${compactNav ? 'flex flex-col items-center' : ''}`}>
-            {navItems.map((item) => {
-              const active = section === item.id
-              return (
-                <button
+
+          <TooltipGroup>
+            <div
+              ref={navListRef}
+              onMouseEnter={navHover.handlers.onMouseEnter}
+              onMouseMove={navHover.handlers.onMouseMove}
+              onMouseLeave={navHover.handlers.onMouseLeave}
+              onClick={navHover.handlers.onClick}
+              className={cn(
+                'relative flex-1 space-y-1 overflow-y-auto p-2.5',
+                compactNav && 'flex flex-col items-center',
+              )}
+            >
+              <FluidHoverHighlight hover={navHover} className={cn('z-0', shape.item)} />
+              {navItems.map((item, idx) => (
+                <SidebarNavItem
                   key={item.id}
-                  type="button"
-                  title={compactNav ? item.label : undefined}
+                  item={item}
+                  index={idx}
+                  active={section === item.id}
+                  compact={compactNav}
+                  registerItem={navHover.registerItem}
                   onClick={() => {
                     setSection(item.id)
                     if (item.id !== 'apps') setSelectedAppId(null)
                   }}
-                  className={`flex items-center rounded-lg text-xs font-medium transition-colors ${
-                    compactNav
-                      ? 'relative size-10 justify-center'
-                      : 'w-full gap-2.5 px-2.5 py-2'
-                  } ${
-                    active
-                      ? 'bg-surface-2 text-fg ring-1 ring-line'
-                      : 'text-muted hover:bg-surface-2/60 hover:text-fg'
-                  }`}
-                >
-                  {item.icon}
-                  {!compactNav && <span className="flex-1 text-left">{item.label}</span>}
-                  {!compactNav && item.badge !== undefined && (
-                    <span className="font-mono text-[10px] text-muted tabular-nums">
-                      {item.badge}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
+                />
+              ))}
+            </div>
+          </TooltipGroup>
+
           {!compactNav && prefs.showShortcutHints && (
-            <div className="border-t border-line p-2.5 text-[10px] text-muted">
-              <div className="flex items-center justify-between">
-                <span>Command Palette</span>
-                <kbd className="rounded bg-bg px-1.5 py-0.5 font-mono ring-1 ring-line">Ctrl K</kbd>
-              </div>
-              <div className="mt-1 flex items-center justify-between">
-                <span>Switch Server</span>
-                <kbd className="rounded bg-bg px-1.5 py-0.5 font-mono ring-1 ring-line">Ctrl 1-9</kbd>
+            <div className="border-t border-sidebar-border/80 px-4 py-3">
+              <div className="space-y-1.5 text-[12px] text-muted-foreground">
+                <div className="flex items-center justify-between">
+                  <span>Command menu</span>
+                  <KeyCaps keys={['Ctrl', 'K']} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Switch server</span>
+                  <KeyCaps keys={['Ctrl', '1-9']} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>App settings</span>
+                  <KeyCaps keys={['Ctrl', ',']} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Zoom UI</span>
+                  <KeyCaps keys={['Ctrl', '+/-']} />
+                </div>
               </div>
             </div>
           )}
@@ -317,74 +525,162 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-11 shrink-0 items-center justify-between border-b border-line bg-surface/50 px-4">
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <span className="font-medium text-fg">
-              {activeServer ? activeServer.name : 'Rig Desktop'}
-            </span>
-            {activeServer && (
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/70 px-5">
+          {/* Interactive Breadcrumb */}
+          <div className="flex min-w-0 items-center gap-1.5 text-[13.5px] text-muted-foreground">
+            {appSettingsOpen ? (
               <>
-                <span>/</span>
-                <span className="capitalize">
-                  {section === 'local' ? 'Local Repos' : section}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setAppSettingsOpen(false)}
+                  className="truncate transition-colors hover:text-foreground"
+                >
+                  {activeServer ? activeServer.name : 'Rig Desktop'}
+                </button>
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
+                <span className="truncate font-medium text-foreground">App Settings</span>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAppId(null)
+                    setSection('overview')
+                  }}
+                  className="truncate font-medium text-foreground transition-colors hover:text-primary"
+                >
+                  {activeServer ? activeServer.name : 'Rig Desktop'}
+                </button>
+                {activeServer && (
+                  <>
+                    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
+                    <button
+                      type="button"
+                      onClick={() => setSelectedAppId(null)}
+                      className={cn(
+                        'truncate transition-colors',
+                        selectedAppName
+                          ? 'hover:text-foreground'
+                          : 'font-medium text-foreground',
+                      )}
+                    >
+                      {sectionLabel}
+                    </button>
+                    {selectedAppName && (
+                      <>
+                        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" />
+                        <span className="truncate font-medium text-foreground">{selectedAppName}</span>
+                      </>
+                    )}
+                  </>
+                )}
               </>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setAppearanceOpen(true)}
-              title="Customize Appearance"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-bg px-2.5 py-1 text-xs text-muted hover:border-emerald-500/40 hover:text-fg"
+
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Quick Zoom Control — h-7 aligns flush with compact header buttons */}
+            <div
+              className={cn(
+                'inline-flex h-7 items-center border border-border bg-card/70 px-0.5 text-[12px] text-muted-foreground',
+                shape.button,
+              )}
+              title="UI Zoom (Ctrl+ / Ctrl- / Ctrl+0)"
             >
-              <Palette className="size-3.5" />
-              <span className="hidden sm:inline">Appearance</span>
-            </button>
-            <button
+              <button
+                type="button"
+                onClick={zoomOut}
+                disabled={prefs.zoom <= MIN_ZOOM}
+                aria-label="Zoom out"
+                className={cn(
+                  'flex size-5.5 items-center justify-center transition-colors hover:bg-hover hover:text-foreground disabled:opacity-35',
+                  shape.item,
+                )}
+              >
+                <Minus className="size-3" />
+              </button>
+              <button
+                type="button"
+                onClick={resetZoom}
+                title="Reset zoom to 100% (Ctrl+0)"
+                className={cn(
+                  'min-w-[42px] px-1.5 font-mono text-[11.5px] leading-none tabular-nums transition-colors hover:bg-hover hover:text-foreground',
+                  prefs.zoom !== 1 ? 'font-medium text-primary' : 'text-muted-foreground',
+                  shape.item,
+                )}
+              >
+                {zoomPercent}%
+              </button>
+              <button
+                type="button"
+                onClick={zoomIn}
+                disabled={prefs.zoom >= MAX_ZOOM}
+                aria-label="Zoom in"
+                className={cn(
+                  'flex size-5.5 items-center justify-center transition-colors hover:bg-hover hover:text-foreground disabled:opacity-35',
+                  shape.item,
+                )}
+              >
+                <Plus className="size-3" />
+              </button>
+            </div>
+
+            <Button
               type="button"
+              variant="tertiary"
+              size="compact"
+              leadingIcon={Search}
+              shortcut={['Ctrl', 'K']}
               onClick={() => setPaletteOpen(true)}
-              className="inline-flex items-center gap-2 rounded-lg border border-line bg-bg px-2.5 py-1 text-xs text-muted hover:border-emerald-500/40 hover:text-fg"
             >
-              <Command className="size-3" />
-              <span>Jump to…</span>
-              <kbd className="rounded bg-surface-2 px-1 py-0.5 font-mono text-[10px]">Ctrl+K</kbd>
-            </button>
+              Jump to…
+            </Button>
           </div>
         </header>
 
-        <main className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
-          {!activeServer ? (
-            <div className="flex flex-1 flex-col items-center justify-center p-8 text-center">
-              <div className="mb-4 flex size-14 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30">
-                <Server className="size-7" />
+        <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          {appSettingsOpen ? (
+            <DesktopSettingsView
+              key={appSettingsTab}
+              initialTab={appSettingsTab}
+              servers={servers}
+              activeServerId={activeServerId}
+              onSelectServer={(id) => void handleSelectServer(id)}
+              onAddServer={() => setAddOpen(true)}
+              onRemoveServer={(id) => void handleRemoveServer(id)}
+              onReorderServers={(ids) => void handleReorderServers(ids)}
+            />
+          ) : !activeServer ? (
+            <div className="mx-auto flex max-w-lg flex-1 flex-col items-center justify-center px-6 py-12 text-center">
+              <div className="mb-5 flex size-16 items-center justify-center rounded-2xl bg-card shadow-[var(--shadow-4)]">
+                <Logo className="size-10" />
               </div>
-              <h1 className="text-xl font-semibold tracking-tight text-fg">
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">
                 Control all your Rig servers in one place
               </h1>
-              <p className="mt-2 max-w-md text-xs leading-relaxed text-muted">
+              <p className="mt-2.5 text-[14px] leading-relaxed text-muted-foreground">
                 Pair headless or full Rig servers over public HTTPS, LAN (pinned internal CA), or
-                Tailscale. Tokens stay in your OS keychain and all streaming runs in the native Rust
-                core.
+                Tailscale. Tokens stay in your OS keychain and all streaming runs natively in Rust.
               </p>
-              <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
-                <button
+              <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
+                <Button
                   type="button"
+                  variant="primary"
+                  leadingIcon={Server}
                   onClick={() => setAddOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-emerald-500"
                 >
-                  <Plus className="size-4" />
                   Add Rig Server
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  onClick={() => setAppearanceOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-line bg-surface px-4 py-2.5 text-xs font-medium text-fg hover:bg-surface-2"
+                  variant="tertiary"
+                  leadingIcon={Settings}
+                  onClick={() => openAppSettings('general')}
                 >
-                  <Palette className="size-4 text-emerald-400" />
-                  Customize Appearance
-                </button>
+                  App Settings
+                </Button>
               </div>
             </div>
           ) : (
@@ -405,11 +701,16 @@ export default function App() {
                     setSelectedAppId(null)
                     setSection('local')
                   }}
+                  onOpenDatabases={() => {
+                    setSelectedAppId(null)
+                    setSection('databases')
+                  }}
                   onCreateDatabase={openCreateDatabase}
                 />
               )}
               {section === 'apps' && (
                 <AppsView
+                  key={activeServer.id}
                   serverId={activeServer.id}
                   projects={snapshotQuery.data?.projects ?? []}
                   apps={snapshotQuery.data?.apps ?? []}
@@ -429,6 +730,7 @@ export default function App() {
               )}
               {section === 'databases' && (
                 <DatabasesView
+                  key={activeServer.id}
                   serverId={activeServer.id}
                   projects={snapshotQuery.data?.projects ?? []}
                   databases={snapshotQuery.data?.databases ?? []}
@@ -439,6 +741,7 @@ export default function App() {
               )}
               {section === 'settings' && (
                 <SettingsView
+                  key={activeServer.id}
                   server={activeServer}
                   onRemoveServer={(id) => void handleRemoveServer(id)}
                 />
@@ -452,12 +755,11 @@ export default function App() {
         open={addOpen}
         onClose={() => setAddOpen(false)}
         onAdded={() => {
+          setAppSettingsOpen(false)
           setSection(prefs.defaultSection)
           void qc.invalidateQueries({ queryKey: ['desktop', 'servers'] })
         }}
       />
-
-      <AppearanceModal open={appearanceOpen} onClose={() => setAppearanceOpen(false)} />
 
       {activeServer && (
         <DeployModal
@@ -469,6 +771,7 @@ export default function App() {
           onClose={() => setDeployModal({ open: false })}
           onDeployed={(app) => {
             void snapshotQuery.refetch()
+            setAppSettingsOpen(false)
             setSelectedAppId(app.id)
             setAppTab('deployments')
             setSection('apps')
@@ -485,6 +788,7 @@ export default function App() {
         databases={snapshotQuery.data?.databases ?? []}
         onSelectServer={(id) => void handleSelectServer(id)}
         onNavigate={(sec, appId, tab) => {
+          setAppSettingsOpen(false)
           setSection(sec)
           if (appId) setSelectedAppId(appId)
           if (tab) setAppTab(tab as AppDetailTab)
@@ -492,7 +796,7 @@ export default function App() {
         onAddServer={() => setAddOpen(true)}
         onDeployApp={() => openDeployModal()}
         onCreateDatabase={openCreateDatabase}
-        onOpenAppearance={() => setAppearanceOpen(true)}
+        onOpenAppSettings={openAppSettings}
       />
     </div>
   )

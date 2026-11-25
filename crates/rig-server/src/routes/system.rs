@@ -1,7 +1,9 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::{Duration, Instant},
 };
+#[cfg(not(test))]
+use std::sync::LazyLock;
 
 use axum::{
     Json,
@@ -25,6 +27,17 @@ use crate::{
 
 const NETWORK_CACHE_TTL: Duration = Duration::from_secs(30);
 pub const API_VERSION: u32 = 1;
+
+#[cfg(not(test))]
+static PUBLIC_IP_HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(concat!("rig/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("static public IP client settings are valid")
+});
 
 const CAPABILITIES: &[&str] = &[
     "events_sse",
@@ -128,6 +141,54 @@ pub(crate) async fn tailscale_info() -> Option<TailscaleInfo> {
     })
 }
 
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, _, _] = ip.octets();
+    let is_cgnat = a == 100 && (64..=127).contains(&b);
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_documentation()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !is_cgnat
+}
+
+pub(crate) fn local_public_ipv4() -> Option<String> {
+    let Ok(nets) = sysinfo::Networks::new_with_refreshed_list() else {
+        return None;
+    };
+    nets.values()
+        .flat_map(|n| n.ip_networks().iter().map(|i| i.addr))
+        .find_map(|ip| match ip {
+            IpAddr::V4(v4) if is_public_ipv4(v4) => Some(v4.to_string()),
+            _ => None,
+        })
+}
+
+async fn detect_public_ip() -> Option<String> {
+    if let Ok(Some(local)) = tokio::task::spawn_blocking(local_public_ipv4).await {
+        return Some(local);
+    }
+    #[cfg(test)]
+    {
+        return None;
+    }
+    #[cfg(not(test))]
+    {
+        for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
+            if let Ok(resp) = PUBLIC_IP_HTTP.get(url).send().await
+                && resp.status().is_success()
+                && let Ok(text) = resp.text().await
+                && let Ok(ip) = text.trim().parse::<IpAddr>()
+            {
+                return Some(ip.to_string());
+            }
+        }
+        None
+    }
+}
+
 pub(crate) fn lan_addresses() -> Vec<String> {
     let Ok(nets) = sysinfo::Networks::new_with_refreshed_list() else {
         return Vec::new();
@@ -146,8 +207,8 @@ pub(crate) fn lan_addresses() -> Vec<String> {
     out
 }
 
-/// Where this machine can be reached (LAN addresses, Tailscale name) and who
-/// may open the dashboard.
+/// Where this machine can be reached (public IP, LAN addresses, Tailscale name)
+/// and who may open the dashboard.
 #[utoipa::path(get, path = "/api/v1/system/network", tag = "system",
     responses((status = 200, body = NetworkInfo)))]
 async fn network_info(
@@ -159,7 +220,9 @@ async fn network_info(
     Ok(Json(network(&state, real_ip(&headers, addr.ip())).await))
 }
 
-async fn cached_network_probe(state: &AppState) -> (Vec<String>, Option<TailscaleInfo>) {
+async fn cached_network_probe(
+    state: &AppState,
+) -> (Option<String>, Vec<String>, Option<TailscaleInfo>) {
     if let Some(snap) = state
         .caches
         .network
@@ -168,7 +231,11 @@ async fn cached_network_probe(state: &AppState) -> (Vec<String>, Option<Tailscal
         .as_ref()
         && snap.sampled_at.elapsed() < NETWORK_CACHE_TTL
     {
-        return (snap.lan_addresses.clone(), snap.tailscale.clone());
+        return (
+            snap.public_ip.clone(),
+            snap.lan_addresses.clone(),
+            snap.tailscale.clone(),
+        );
     }
     let _guard = state.caches.network_refresh.lock().await;
     if let Some(snap) = state
@@ -179,12 +246,17 @@ async fn cached_network_probe(state: &AppState) -> (Vec<String>, Option<Tailscal
         .as_ref()
         && snap.sampled_at.elapsed() < NETWORK_CACHE_TTL
     {
-        return (snap.lan_addresses.clone(), snap.tailscale.clone());
+        return (
+            snap.public_ip.clone(),
+            snap.lan_addresses.clone(),
+            snap.tailscale.clone(),
+        );
     }
     let lan = tokio::task::spawn_blocking(lan_addresses);
-    let (lan, tailscale) = tokio::join!(lan, tailscale_info());
+    let (public_ip, lan, tailscale) = tokio::join!(detect_public_ip(), lan, tailscale_info());
     let lan_addresses = lan.unwrap_or_default();
     let snap = NetworkSnapshot {
+        public_ip: public_ip.clone(),
         lan_addresses: lan_addresses.clone(),
         tailscale: tailscale.clone(),
         sampled_at: Instant::now(),
@@ -194,13 +266,14 @@ async fn cached_network_probe(state: &AppState) -> (Vec<String>, Option<Tailscal
         .network
         .write()
         .unwrap_or_else(|p| p.into_inner()) = Some(snap);
-    (lan_addresses, tailscale)
+    (public_ip, lan_addresses, tailscale)
 }
 
 async fn network(state: &AppState, you: IpAddr) -> NetworkInfo {
-    let ((lan_addresses, tailscale), dashboard_domain) =
+    let ((public_ip, lan_addresses, tailscale), dashboard_domain) =
         tokio::join!(cached_network_probe(state), proxy::dashboard_domain(&state.db));
     NetworkInfo {
+        public_ip,
         lan_addresses,
         tailscale,
         dashboard_access: state.access.get(),
@@ -302,4 +375,22 @@ async fn set_dashboard_domain(
     auth.audit(&state, "system.dashboard_domain", None, host.as_deref())
         .await?;
     Ok(Json(network(&state, real_ip(&headers, addr.ip())).await))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ipv4_filter_excludes_private_loopback_and_cgnat() {
+        assert!(is_public_ipv4(Ipv4Addr::new(203, 0, 113, 10)) == false); // TEST-NET-3 documentation
+        assert!(is_public_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(is_public_ipv4(Ipv4Addr::new(45, 79, 12, 34)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(172, 17, 0, 1)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(192, 168, 1, 10)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(100, 64, 0, 5)));
+        assert!(!is_public_ipv4(Ipv4Addr::new(169, 254, 1, 1)));
+    }
 }

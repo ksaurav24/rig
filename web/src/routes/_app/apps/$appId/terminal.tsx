@@ -4,7 +4,7 @@ import { SquareTerminal } from 'lucide-react'
 import { lazy, Suspense } from 'react'
 
 import { appQuery, meQuery } from '@/api/queries'
-import { Panel } from '@/components/app/page'
+import { Panel } from '@rig/ui/app/page'
 import { EmptyState } from '@/components/app/state'
 import { Skeleton } from '@/components/ui/skeleton'
 import { hasRole } from '@/lib/nav'

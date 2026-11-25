@@ -18,7 +18,7 @@ use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
 };
-use rig_api::Role;
+use rig_api::{Role, TokenKind};
 use sqlx::Row;
 
 use crate::{
@@ -80,6 +80,8 @@ pub struct Auth<R: MinRole = Viewer> {
     pub credential_hash: String,
     /// Set for API tokens only.
     pub token_id: Option<String>,
+    /// Set for API tokens only (`Api` vs `Device`).
+    pub token_kind: Option<TokenKind>,
     /// True when the account must change its temporary password before using Rig.
     pub must_change_password: bool,
     _min: PhantomData<R>,
@@ -91,6 +93,15 @@ impl<R: MinRole> Auth<R> {
         match self.via {
             Via::Session => Ok(()),
             Via::ApiToken => Err(ApiError::Forbidden(msg)),
+        }
+    }
+
+    /// Allows browser sessions and paired desktop/mobile device tokens, while
+    /// still blocking non-interactive API/CI tokens (`kind = 'api'`).
+    pub fn require_interactive(&self, msg: &'static str) -> ApiResult<()> {
+        match (self.via, self.token_kind) {
+            (Via::Session, _) | (Via::ApiToken, Some(TokenKind::Device)) => Ok(()),
+            _ => Err(ApiError::Forbidden(msg)),
         }
     }
 
@@ -144,6 +155,7 @@ impl<R: MinRole> FromRequestParts<AppState> for Auth<R> {
             csrf_token: auth.csrf_token,
             credential_hash: auth.credential_hash,
             token_id: auth.token_id,
+            token_kind: auth.token_kind,
             must_change_password: auth.must_change_password,
             _min: PhantomData,
         })
@@ -197,7 +209,7 @@ async fn from_api_token(
     let hash = crypto::hash_token(token);
     let current_now = now();
     let row = sqlx::query(
-        "SELECT t.id, t.user_id, t.org_id, t.role AS token_role, t.last_used_at,
+        "SELECT t.id, t.user_id, t.org_id, t.role AS token_role, t.kind AS token_kind, t.last_used_at,
                 m.role AS member_role, u.email, u.must_change_password
          FROM api_tokens t
          JOIN users u ON u.id = t.user_id AND u.disabled = 0
@@ -212,6 +224,7 @@ async fn from_api_token(
 
     // A token can never exceed its owner's current role.
     let token_role = parse_role(row.get("token_role"))?;
+    let token_kind = TokenKind::parse(row.get("token_kind"));
     let member_role = parse_role(row.get("member_role"))?;
     let id: String = row.get("id");
 
@@ -241,6 +254,7 @@ async fn from_api_token(
         csrf_token: None,
         credential_hash: hash,
         token_id: Some(id),
+        token_kind: Some(token_kind),
         must_change_password: row.get::<i64, _>("must_change_password") != 0,
         _min: PhantomData,
     })
@@ -306,6 +320,7 @@ async fn from_session(state: &AppState, parts: &Parts) -> ApiResult<Auth<Viewer>
         csrf_token: Some(csrf),
         credential_hash: hash,
         token_id: None,
+        token_kind: None,
         must_change_password: row.get::<i64, _>("must_change_password") != 0,
         _min: PhantomData,
     })

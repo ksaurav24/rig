@@ -109,6 +109,10 @@ impl ServerRegistry {
         &self.data
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn list(&self) -> &[ServerEntry] {
         &self.data.servers
     }
@@ -184,6 +188,32 @@ impl ServerRegistry {
             self.save()?;
         }
         Ok(())
+    }
+
+    pub fn update_server(
+        &mut self,
+        id: &str,
+        name: Option<String>,
+        accent: Option<String>,
+    ) -> Result<Option<ServerEntry>> {
+        let Some(s) = self.get_mut(id) else {
+            return Ok(None);
+        };
+        if let Some(n) = name {
+            let trimmed = n.trim();
+            if !trimmed.is_empty() {
+                s.name = trimmed.to_owned();
+            }
+        }
+        if let Some(a) = accent {
+            let trimmed = a.trim();
+            if !trimmed.is_empty() {
+                s.accent = trimmed.to_owned();
+            }
+        }
+        let cloned = s.clone();
+        self.save()?;
+        Ok(Some(cloned))
     }
 }
 

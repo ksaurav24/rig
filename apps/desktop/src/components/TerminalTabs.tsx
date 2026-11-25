@@ -4,8 +4,11 @@ import { Terminal } from '@xterm/xterm'
 import { Plus, Terminal as TerminalIcon, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { EmptyState } from '@rig/ui/app/state'
+import { Button } from '@rig/ui/button'
 import { desktopApi } from '@/lib/ipc'
 import { usePreferences } from '@/lib/preferences'
+import { cn } from '@rig/ui/lib/utils'
 
 interface TerminalTab {
   id: string
@@ -41,12 +44,12 @@ function SingleTerminalPane({
       cursorBlink: true,
       fontFamily: "'JetBrains Mono Variable', ui-monospace, monospace",
       fontSize,
-      lineHeight: 1.3,
+      lineHeight: 1.35,
       scrollback: 5000,
       theme: {
-        background: '#0b0c0f',
-        foreground: '#e4e4e7',
-        cursor: '#10b981',
+        background: '#121110',
+        foreground: '#e8e6e3',
+        cursor: '#34d399',
         selectionBackground: 'rgba(16, 185, 129, 0.28)',
       },
     })
@@ -119,7 +122,7 @@ function SingleTerminalPane({
   return (
     <div
       ref={hostRef}
-      className={`h-full w-full bg-[#0b0c0f] p-2 ${active ? 'block' : 'hidden'}`}
+      className={cn('h-full w-full bg-[#121110] p-2.5', active ? 'block' : 'hidden')}
     />
   )
 }
@@ -157,38 +160,36 @@ export function TerminalTabs({ serverId, appId, appName, isRunning }: TerminalTa
 
   if (!isRunning) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-line bg-surface p-8 text-center">
-        <TerminalIcon className="mb-2 size-7 text-muted" />
-        <div className="text-sm font-medium text-fg">Container is not running</div>
-        <p className="mt-1 text-xs text-muted">
-          Start or deploy <span className="font-medium text-fg">{appName}</span> before opening an
-          interactive shell.
-        </p>
-      </div>
+      <EmptyState icon={TerminalIcon} title="Container is not running">
+        Start or deploy <span className="font-medium text-foreground">{appName}</span> before
+        opening an interactive shell.
+      </EmptyState>
     )
   }
 
   return (
-    <div className="flex min-h-[420px] flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface">
-      <div className="flex items-center gap-1 border-b border-line bg-surface-2/60 px-2 py-1.5">
+    <div className="flex min-h-[440px] flex-1 flex-col overflow-hidden rounded-xl bg-card shadow-[var(--shadow-2)]">
+      <div className="flex items-center gap-1.5 border-b border-border/80 bg-surface/60 px-3 py-2">
         {tabs.map((tab) => (
           <div
             key={tab.id}
             onClick={() => setActiveId(tab.id)}
-            className={`group flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1 text-xs ${
+            className={cn(
+              'group flex cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-[13px] transition-colors',
               tab.id === activeId
-                ? 'bg-bg text-fg ring-1 ring-line'
-                : 'text-muted hover:bg-bg/50 hover:text-fg'
-            }`}
+                ? 'bg-active font-medium text-foreground'
+                : 'text-muted-foreground hover:bg-hover hover:text-foreground',
+            )}
           >
             <span
-              className={`size-1.5 rounded-full ${
+              className={cn(
+                'size-2 rounded-full',
                 tab.state === 'connected'
-                  ? 'bg-emerald-400'
+                  ? 'bg-ok'
                   : tab.state === 'connecting'
-                    ? 'bg-amber-400'
-                    : 'bg-zinc-500'
-              }`}
+                    ? 'bg-warn animate-pulse'
+                    : 'bg-idle',
+              )}
             />
             <span className="font-mono">{tab.label}</span>
             <button
@@ -197,39 +198,40 @@ export function TerminalTabs({ serverId, appId, appName, isRunning }: TerminalTa
                 e.stopPropagation()
                 closeTab(tab.id)
               }}
-              className="rounded p-0.5 text-muted hover:bg-surface-2 hover:text-fg"
+              aria-label={`Close ${tab.label}`}
+              className="rounded p-0.5 text-muted-foreground hover:bg-hover hover:text-foreground"
             >
-              <X className="size-3" />
+              <X className="size-3.5" />
             </button>
           </div>
         ))}
-        <button
-          type="button"
-          onClick={openNewTab}
-          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted hover:bg-bg hover:text-fg"
-        >
-          <Plus className="size-3.5" />
+        <Button type="button" variant="ghost" size="compact" leadingIcon={Plus} onClick={openNewTab}>
           New shell
-        </button>
+        </Button>
       </div>
 
-      <div className="relative min-h-0 flex-1 bg-[#0b0c0f]">
+      <div className="relative min-h-0 flex-1 bg-[#121110]">
         {tabs.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-            <TerminalIcon className="mb-2 size-7 text-emerald-400" />
-            <div className="text-sm font-medium text-fg">On-demand Container Terminal</div>
-            <p className="mt-1 max-w-sm text-xs text-muted">
+          <div className="flex h-full flex-col items-center justify-center p-10 text-center">
+            <div className="mb-3.5 flex size-12 items-center justify-center rounded-xl bg-white/5 text-primary">
+              <TerminalIcon className="size-6" strokeWidth={1.6} />
+            </div>
+            <div className="text-[15px] font-medium text-zinc-100">
+              On-demand Container Terminal
+            </div>
+            <p className="mt-1.5 max-w-sm text-[13.5px] leading-relaxed text-zinc-400">
               WebSockets are opened through the native Rust core only when you launch a shell — zero
               idle connections.
             </p>
-            <button
+            <Button
               type="button"
+              variant="primary"
+              leadingIcon={TerminalIcon}
               onClick={openNewTab}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-500"
+              className="mt-5"
             >
-              <TerminalIcon className="size-3.5" />
               Open Container Shell
-            </button>
+            </Button>
           </div>
         ) : (
           tabs.map((tab) => (

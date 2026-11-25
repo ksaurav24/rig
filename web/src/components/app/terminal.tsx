@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Status } from '@/components/app/state'
 import { Button } from '@/components/ui/button'
 import { usePreferences } from '@/lib/preferences'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 type Phase = 'connecting' | 'open' | 'closed'
 

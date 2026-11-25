@@ -1,7 +1,7 @@
 import { cva, type VariantProps } from 'class-variance-authority'
 import type { ComponentProps } from 'react'
-import { Button as FluidButton } from '@/components/fluid/button'
-import { cn } from '@/lib/utils'
+import { Button as FluidButton } from '@rig/ui/button'
+import { cn } from '@rig/ui/lib/utils'
 
 /*
  * The app's Button keeps the shadcn call-site API (variant/size names,

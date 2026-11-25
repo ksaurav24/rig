@@ -4265,6 +4265,7 @@ dependencies = [
  "hex",
  "ignore",
  "keyring",
+ "reqwest",
  "rig-api",
  "rig-client",
  "serde",

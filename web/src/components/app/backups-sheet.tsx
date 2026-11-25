@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { api, unwrap, type Schemas } from '@/api/client'
 import { backupsQuery } from '@/api/queries'
 import { EmptyState, ErrorState, Status } from '@/components/app/state'
-import { Tooltip } from '@/components/fluid/tooltip'
+import { Tooltip } from '@rig/ui/tooltip'
 import {
   AlertDialog,
   AlertDialogAction,

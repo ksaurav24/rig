@@ -2,10 +2,15 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDownToLine, Copy, Pause, Play, Search, WrapText, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { Status, statusTone } from '@rig/ui/app/state'
+import { Button } from '@rig/ui/button'
+import { Input } from '@rig/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
 import { formatLogTime } from '@/lib/format'
 import { desktopApi } from '@/lib/ipc'
 import { usePreferences } from '@/lib/preferences'
 import type { AnsiSpan, LogChannelFrame, ParsedLogLine } from '@/lib/types'
+import { cn } from '@rig/ui/lib/utils'
 
 const ANSI_COLORS: Record<number, string> = {
   0: '#71717a',
@@ -117,7 +122,6 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
     }
   }, [])
 
-  // Auto-start live app or deploy log stream.
   useEffect(() => {
     if (mode === 'app') {
       if (!serverId || !appId) return
@@ -143,14 +147,12 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
     }
   }, [appId, deploymentId, handleFrame, mode, serverId, streamId])
 
-  // Auto-scroll to bottom when following.
   useEffect(() => {
     if (followingRef.current && visibleLines.length > 0) {
       rowVirtualizer.scrollToIndex(visibleLines.length - 1, { align: 'end' })
     }
   }, [rowVirtualizer, visibleLines.length])
 
-  // Run Rust-side search across the entire 50k ring buffer when user presses Enter in filter box.
   async function searchRustRing() {
     const res = await desktopApi.queryLogBuffer({
       streamId,
@@ -166,30 +168,24 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-surface">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card shadow-[var(--shadow-2)]">
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface-2/60 px-3 py-2 text-xs">
-        <div className="flex items-center gap-2">
-          <span
-            className={`size-2 rounded-full ${
-              status === 'streaming'
-                ? 'bg-green-400'
-                : status === 'connecting'
-                  ? 'bg-amber-400'
-                  : 'bg-zinc-500'
-            }`}
-          />
-          <span className="font-medium text-fg">{title ?? 'Live Logs'}</span>
-          <span className="font-mono text-[11px] text-muted tabular-nums">
+      <div className="flex flex-wrap items-center gap-2.5 border-b border-border/80 bg-surface/60 px-4 py-2.5">
+        <div className="flex items-center gap-2.5">
+          <Status tone={statusTone(status)} size="compact">
+            {title ?? 'Live Logs'}
+          </Status>
+          <span className="font-mono text-[12px] text-muted-foreground tabular-nums">
             {visibleLines.length.toLocaleString()} shown · {totalBuffered.toLocaleString()} buffered
             {droppedTotal > 0 ? ` · ${droppedTotal.toLocaleString()} rotated` : ''}
           </span>
         </div>
 
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           <div className="relative">
-            <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted" />
-            <input
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              size="compact"
               type="text"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -197,69 +193,76 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
                 if (e.key === 'Enter') void searchRustRing()
               }}
               placeholder="Filter (Enter = full ring)"
-              className="w-44 rounded-md border border-line bg-bg py-1 pr-6 pl-6 text-[11px] text-fg outline-none focus:border-emerald-500"
+              className="w-48 pr-7 pl-8"
             />
             {filter && (
               <button
                 type="button"
                 onClick={() => setFilter('')}
-                className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted hover:text-fg"
+                aria-label="Clear filter"
+                className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               >
-                <X className="size-3" />
+                <X className="size-3.5" />
               </button>
             )}
           </div>
 
-          <select
+          <Select
+            size="compact"
             value={streamFilter}
-            onChange={(e) => setStreamFilter(e.target.value as typeof streamFilter)}
-            className="rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-fg"
+            onValueChange={(v) => setStreamFilter(v as typeof streamFilter)}
           >
-            <option value="all">All streams</option>
-            <option value="stdout">stdout</option>
-            <option value="stderr">stderr</option>
-            <option value="deploy">deploy</option>
-          </select>
+            <SelectTrigger className="w-[132px]" />
+            <SelectContent>
+              <SelectItem index={0} value="all">All streams</SelectItem>
+              <SelectItem index={1} value="stdout">stdout</SelectItem>
+              <SelectItem index={2} value="stderr">stderr</SelectItem>
+              <SelectItem index={3} value="deploy">deploy</SelectItem>
+            </SelectContent>
+          </Select>
 
-          <button
+          <Button
             type="button"
+            variant="tertiary"
+            size="icon-compact"
+            active={prefs.logWrap}
             onClick={() => updatePrefs({ logWrap: !prefs.logWrap })}
             title={prefs.logWrap ? 'Disable line wrap' : 'Wrap long log lines'}
-            className={`rounded-md border px-1.5 py-1 text-[11px] ${
-              prefs.logWrap
-                ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
-                : 'border-line bg-bg text-muted hover:bg-surface-2 hover:text-fg'
-            }`}
+            aria-label={prefs.logWrap ? 'Disable line wrap' : 'Wrap long log lines'}
           >
-            <WrapText className="size-3.5" />
-          </button>
+            <WrapText />
+          </Button>
 
-          <button
+          <Button
             type="button"
+            variant="tertiary"
+            size="compact"
+            leadingIcon={paused ? Play : Pause}
+            active={paused}
             onClick={() => setPaused((p) => !p)}
             title={paused ? 'Resume UI updates' : 'Pause UI updates'}
-            className="inline-flex items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-fg hover:bg-surface-2"
           >
-            {paused ? <Play className="size-3" /> : <Pause className="size-3" />}
             {paused ? 'Resume' : 'Pause'}
-          </button>
+          </Button>
 
-          <button
+          <Button
             type="button"
+            variant="tertiary"
+            size="icon-compact"
             onClick={() => {
               const text = visibleLines.map((l) => l.plain).join('\n')
               void navigator.clipboard.writeText(text)
               toast.success(`Copied ${visibleLines.length.toLocaleString()} lines`)
             }}
             title="Copy visible lines"
-            className="rounded-md border border-line bg-bg p-1 text-muted hover:bg-surface-2 hover:text-fg"
+            aria-label="Copy visible lines"
           >
-            <Copy className="size-3.5" />
-          </button>
+            <Copy />
+          </Button>
         </div>
       </div>
 
-      {/* Virtualized Log Pane */}
+      {/* Virtualized Log Pane (no backdrop-filter per WebKitGTK perf discipline) */}
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollParentRef}
@@ -269,10 +272,12 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
             setFollowing(nearBottom)
           }}
           style={{ fontSize: `${prefs.logFontSize}px`, lineHeight: `${lineHeight}px` }}
-          className="h-full overflow-auto bg-[#0b0c0f] py-1.5 font-mono text-zinc-200"
+          className="h-full overflow-auto bg-[#121110] py-2 font-mono text-zinc-200"
         >
           {visibleLines.length === 0 ? (
-            <div className="px-4 py-6 font-sans text-xs text-muted">Waiting for log output…</div>
+            <div className="px-5 py-8 font-sans text-[13.5px] text-zinc-400">
+              Waiting for log output…
+            </div>
           ) : (
             <div
               style={{
@@ -296,20 +301,20 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
                       minHeight: `${vRow.size}px`,
                       transform: `translateY(${vRow.start}px)`,
                     }}
-                    className={`flex gap-3 border-l-2 px-3 hover:bg-white/[0.04] ${
-                      prefs.logWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'
-                    } ${
+                    className={cn(
+                      'flex gap-3.5 border-l-2 px-4 hover:bg-white/[0.04]',
+                      prefs.logWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre',
                       line.stream === 'stderr'
-                        ? 'border-l-rose-500/70 bg-rose-500/[0.04]'
+                        ? 'border-l-rose-500/75 bg-rose-500/[0.05]'
                         : line.stream === 'deploy'
-                          ? 'border-l-amber-400/70'
-                          : 'border-l-transparent'
-                    }`}
+                          ? 'border-l-amber-400/75'
+                          : 'border-l-transparent',
+                    )}
                   >
-                    <span className="w-[62px] shrink-0 text-zinc-500 tabular-nums select-none">
+                    <span className="w-[68px] shrink-0 text-zinc-500 tabular-nums select-none">
                       {formatLogTime(line.ts)}
                     </span>
-                    <span className={`min-w-0 ${prefs.logWrap ? 'flex-1' : 'truncate'}`}>
+                    <span className={cn('min-w-0', prefs.logWrap ? 'flex-1' : 'truncate')}>
                       {renderSpans(line)}
                     </span>
                   </div>
@@ -320,17 +325,19 @@ export function LogStreamView({ mode, serverId, appId, deploymentId, title }: Lo
         </div>
 
         {!following && visibleLines.length > 0 && (
-          <button
+          <Button
             type="button"
+            variant="primary"
+            size="compact"
+            leadingIcon={ArrowDownToLine}
             onClick={() => {
               setFollowing(true)
               rowVirtualizer.scrollToIndex(visibleLines.length - 1, { align: 'end' })
             }}
-            className="absolute right-4 bottom-3 inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-xs font-medium text-fg shadow-lg hover:bg-surface"
+            className="absolute right-4 bottom-4 shadow-[var(--shadow-4)]"
           >
-            <ArrowDownToLine className="size-3.5" />
             Jump to latest
-          </button>
+          </Button>
         )}
       </div>
     </div>

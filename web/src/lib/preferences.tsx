@@ -1,6 +1,6 @@
 import { createContext, use, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { useShapeContext, type ShapeVariant } from '@/lib/shape-context'
-import { useSizeContext, type SizeVariant } from '@/lib/size-context'
+import { useShapeContext, type ShapeVariant } from '@rig/ui/lib/shape-context'
+import { useSizeContext, type SizeVariant } from '@rig/ui/lib/size-context'
 
 export type AccentPreset = 'emerald' | 'indigo' | 'sky' | 'violet' | 'amber' | 'rose' | 'graphite'
 export type AccentChoice = 'org' | AccentPreset

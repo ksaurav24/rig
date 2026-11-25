@@ -1,5 +1,5 @@
 import { Monitor, Moon, Sun } from 'lucide-react'
-import { DropdownContent, DropdownMenu, DropdownTrigger, MenuItem } from '@/components/fluid/dropdown'
+import { DropdownContent, DropdownMenu, DropdownTrigger, MenuItem } from '@rig/ui/dropdown'
 import { Button } from '@/components/ui/button'
 import { useTheme, type Theme } from '@/lib/theme'
 

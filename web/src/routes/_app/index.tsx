@@ -4,15 +4,15 @@ import { Boxes, ChevronRight } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import { appsQuery, databasesQuery, metricsQuery, systemQuery } from '@/api/queries'
-import { Page, Panel } from '@/components/app/page'
+import { Page, Panel } from '@rig/ui/app/page'
 import { EmptyState, ErrorState, Status, type Tone } from '@/components/app/state'
 import { UsagePanel } from '@/components/app/usage'
-import { Banner, BannerDescription } from '@/components/fluid/banner'
+import { Banner, BannerDescription } from '@rig/ui/banner'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { bytes, percent, timeAgo } from '@/lib/format'
 import { APP_STATUS } from '@/lib/status'
-import { cn } from '@/lib/utils'
+import { cn } from '@rig/ui/lib/utils'
 
 export const Route = createFileRoute('/_app/')({
   staticData: { crumb: 'Overview' },
