@@ -4239,6 +4239,7 @@ name = "rig-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "hex",
  "reqwest",
  "rig-api",
@@ -4250,6 +4251,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
  "url",
  "webpki-roots 1.0.12",
 ]
@@ -4259,6 +4261,7 @@ name = "rig-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "chrono",
  "dirs",
  "futures-util",

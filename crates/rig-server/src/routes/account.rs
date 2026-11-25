@@ -150,10 +150,10 @@ const MAX_CODE_FAILURES: i64 = 8;
 const MAX_PASSWORD_FAILURES: i64 = 8;
 const TOTP_PENDING_TTL_MINS: i64 = 15;
 
-/// Second-factor changes need a real browser session: an API token that
-/// leaked must not be able to turn the account's protection off.
-fn session_only(auth: &Auth<Viewer>) -> ApiResult<()> {
-    auth.require_session("sign in to the dashboard to change two-factor settings")
+/// Second-factor changes need an interactive browser session or paired desktop/mobile
+/// device token (plus password/code confirmation); non-interactive API/CI tokens are blocked.
+fn interactive_only(auth: &Auth<Viewer>) -> ApiResult<()> {
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to change two-factor settings")
 }
 
 /// Vault-keyed HMAC-SHA256 hash of a recovery code (`v2:<hex>`), defeating
@@ -405,7 +405,7 @@ async fn totp_setup(
     auth: Auth<Viewer>,
     Json(req): Json<PasswordConfirm>,
 ) -> ApiResult<Json<TotpEnrollment>> {
-    session_only(&auth)?;
+    interactive_only(&auth)?;
     verify_password(&state, &auth, req.password).await?;
     let enabled: Option<String> =
         sqlx::query_scalar("SELECT totp_enabled_at FROM users WHERE id = ?")
@@ -448,7 +448,7 @@ async fn totp_enable(
     jar: CookieJar,
     Json(req): Json<TotpCode>,
 ) -> ApiResult<(CookieJar, HeaderMap, Json<RecoveryCodes>)> {
-    session_only(&auth)?;
+    interactive_only(&auth)?;
     let key = format!("totp:user:{}", auth.user_id);
     auth::check_rate(&state, &key, MAX_CODE_FAILURES).await?;
     let row = sqlx::query(
@@ -496,17 +496,26 @@ async fn totp_enable(
         return Err(ApiError::Conflict("the setup changed; start again".into()));
     }
     let codes = store_recovery_codes(&state, &auth.user_id).await?;
-    let (cookie, csrf) = auth::rotate_sessions(
-        &state,
-        &auth.user_id,
-        &auth.org_id,
-        user_agent(&headers),
-        auth.ip.as_deref(),
-        auth::is_https(&state, &headers, Some(addr.ip())),
-    )
-    .await?;
+    let (jar, out_headers) = if auth.via == auth::Via::Session {
+        let (cookie, csrf) = auth::rotate_sessions(
+            &state,
+            &auth.user_id,
+            &auth.org_id,
+            user_agent(&headers),
+            auth.ip.as_deref(),
+            auth::is_https(&state, &headers, Some(addr.ip())),
+        )
+        .await?;
+        (jar.add(cookie), csrf_headers(&csrf))
+    } else {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&auth.user_id)
+            .execute(&state.db)
+            .await?;
+        (jar, HeaderMap::new())
+    };
     auth.audit(&state, "auth.totp_enabled", None, None).await?;
-    Ok((jar.add(cookie), csrf_headers(&csrf), Json(RecoveryCodes { codes })))
+    Ok((jar, out_headers, Json(RecoveryCodes { codes })))
 }
 
 /// Turn two-factor sign-in off. Needs your password and a current code
@@ -522,7 +531,7 @@ async fn totp_disable(
     jar: CookieJar,
     Json(req): Json<TotpDisable>,
 ) -> ApiResult<(CookieJar, HeaderMap, StatusCode)> {
-    session_only(&auth)?;
+    interactive_only(&auth)?;
     verify_password(&state, &auth, req.password).await?;
     let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
         .bind(&auth.user_id)
@@ -533,17 +542,26 @@ async fn totp_disable(
         return Err(ApiError::validation("that code did not match"));
     }
     disable_for_user(&state, &auth.user_id).await?;
-    let (cookie, csrf) = auth::rotate_sessions(
-        &state,
-        &auth.user_id,
-        &auth.org_id,
-        user_agent(&headers),
-        auth.ip.as_deref(),
-        auth::is_https(&state, &headers, Some(addr.ip())),
-    )
-    .await?;
+    let (jar, out_headers) = if auth.via == auth::Via::Session {
+        let (cookie, csrf) = auth::rotate_sessions(
+            &state,
+            &auth.user_id,
+            &auth.org_id,
+            user_agent(&headers),
+            auth.ip.as_deref(),
+            auth::is_https(&state, &headers, Some(addr.ip())),
+        )
+        .await?;
+        (jar.add(cookie), csrf_headers(&csrf))
+    } else {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&auth.user_id)
+            .execute(&state.db)
+            .await?;
+        (jar, HeaderMap::new())
+    };
     auth.audit(&state, "auth.totp_disabled", None, None).await?;
-    Ok((jar.add(cookie), csrf_headers(&csrf), StatusCode::NO_CONTENT))
+    Ok((jar, out_headers, StatusCode::NO_CONTENT))
 }
 
 /// Replace your recovery codes. The old ones stop working.
@@ -555,7 +573,7 @@ async fn totp_regenerate(
     auth: Auth<Viewer>,
     Json(req): Json<TotpDisable>,
 ) -> ApiResult<Json<RecoveryCodes>> {
-    session_only(&auth)?;
+    interactive_only(&auth)?;
     verify_password(&state, &auth, req.password).await?;
     let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = ?")
         .bind(&auth.user_id)

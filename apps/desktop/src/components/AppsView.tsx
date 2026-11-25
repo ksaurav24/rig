@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Activity,
   ArrowLeft,
   Box,
   Copy,
@@ -8,9 +9,12 @@ import {
   FolderPlus,
   GitBranch,
   Globe,
+  HardDrive,
   KeyRound,
+  Pencil,
   Play,
   Plus,
+  RefreshCw,
   Rocket,
   RotateCcw,
   Save,
@@ -21,6 +25,7 @@ import {
   Square,
   Terminal,
   Trash2,
+  Webhook,
   X,
 } from 'lucide-react'
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentType, type FormEvent } from 'react'
@@ -28,6 +33,8 @@ import { toast } from 'sonner'
 import { EnvDiffPanel } from './EnvDiffPanel'
 import { LocalGitPanel } from './LocalGitPanel'
 import { LogStreamView } from './LogStreamView'
+import { DeleteProjectDialog, EditProjectDialog } from './ProjectDialogs'
+import { UsagePanel } from './UsagePanel'
 import { Page, Panel } from '@rig/ui/app/page'
 import { EmptyState, Status, statusTone } from '@rig/ui/app/state'
 import { Badge } from '@rig/ui/badge'
@@ -43,14 +50,14 @@ import {
   ComboboxList,
 } from '@rig/ui/combobox'
 import { ConfirmDialog } from '@rig/ui/confirm-dialog'
-import { Field, FieldLabel } from '@rig/ui/field'
+import { Field, FieldDescription, FieldLabel } from '@rig/ui/field'
 import { Input } from '@rig/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
 import { Switch } from '@rig/ui/switch'
 import { Tabs, TabsItem } from '@rig/ui/tabs'
 import { relativeTime } from '@/lib/format'
 import { desktopApi } from '@/lib/ipc'
-import type { App, Project } from '@/lib/types'
+import type { App, AppWebhook, Database, Project } from '@/lib/types'
 
 const TerminalTabs = lazy(() =>
   import('./TerminalTabs').then((m) => ({ default: m.TerminalTabs })),
@@ -58,6 +65,7 @@ const TerminalTabs = lazy(() =>
 
 export type AppDetailTab =
   | 'deployments'
+  | 'metrics'
   | 'logs'
   | 'env'
   | 'local-git'
@@ -67,8 +75,10 @@ export type AppDetailTab =
 
 interface AppsViewProps {
   serverId: string
+  serverUrl: string
   projects: Project[]
   apps: App[]
+  databases: Database[]
   selectedAppId: string | null
   activeTab: AppDetailTab
   onSelectApp: (id: string | null) => void
@@ -79,8 +89,10 @@ interface AppsViewProps {
 
 export function AppsView({
   serverId,
+  serverUrl,
   projects,
   apps,
+  databases,
   selectedAppId,
   activeTab,
   onSelectApp,
@@ -94,6 +106,8 @@ export function AppsView({
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDesc, setNewProjectDesc] = useState('')
   const [creatingProject, setCreatingProject] = useState(false)
+  const [editingProject, setEditingProject] = useState<Project | null>(null)
+  const [deletingProject, setDeletingProject] = useState<Project | null>(null)
 
   const [confirmState, setConfirmState] = useState<{
     title: string
@@ -126,9 +140,14 @@ export function AppsView({
   const [editDockerfile, setEditDockerfile] = useState('')
   const [editPort, setEditPort] = useState(3000)
   const [editMemoryMb, setEditMemoryMb] = useState(512)
+  const [editCpuCores, setEditCpuCores] = useState('')
+  const [editVolumes, setEditVolumes] = useState<string[]>([])
+  const [newVolumePath, setNewVolumePath] = useState('')
   const [editHealthPath, setEditHealthPath] = useState('')
   const [editAutoDeploy, setEditAutoDeploy] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
+  const [webhook, setWebhook] = useState<AppWebhook | null>(null)
+  const [webhookLoading, setWebhookLoading] = useState(false)
 
   const parsedGithubRepo = useMemo(() => {
     const raw = (editGitUrl || selectedApp?.git_url || '').trim()
@@ -161,6 +180,7 @@ export function AppsView({
 
   useEffect(() => {
     setInspectDeployId(null)
+    setWebhook(null)
   }, [selectedAppId])
 
   useEffect(() => {
@@ -172,6 +192,13 @@ export function AppsView({
     setEditDockerfile(selectedApp.dockerfile_path ?? '')
     setEditPort(selectedApp.port)
     setEditMemoryMb(selectedApp.memory_mb ?? 512)
+    setEditCpuCores(
+      selectedApp.cpu_millis && selectedApp.cpu_millis > 0
+        ? String(selectedApp.cpu_millis / 1000)
+        : '',
+    )
+    setEditVolumes(selectedApp.volumes ?? [])
+    setNewVolumePath('')
     setEditHealthPath(selectedApp.health_path ?? '')
     setEditAutoDeploy(selectedApp.auto_deploy)
   }, [selectedApp])
@@ -237,6 +264,14 @@ export function AppsView({
       if (!selectedAppId || !app) return
       setSavingSettings(true)
       try {
+        const cpuNum = editCpuCores.trim() ? Number(editCpuCores) : 0
+        const cpuMillis =
+          editCpuCores.trim() === ''
+            ? 0
+            : Number.isFinite(cpuNum) && cpuNum > 0
+              ? Math.round(cpuNum * 1000)
+              : undefined
+
         await desktopApi.updateApp(serverId, selectedAppId, {
           name: editName.trim() || undefined,
           image: app.source_kind === 'image' ? editImage.trim() || undefined : undefined,
@@ -245,16 +280,49 @@ export function AppsView({
           dockerfile_path: app.source_kind !== 'image' ? editDockerfile.trim() : undefined,
           port: Number(editPort) || app.port,
           memory_mb: Number(editMemoryMb) || undefined,
-          health_path: editHealthPath.trim() || undefined,
+          cpu_millis: cpuMillis,
+          health_path: editHealthPath.trim(),
           auto_deploy: editAutoDeploy,
+          volumes: editVolumes,
         })
-        toast.success('Saved app settings')
+        toast.success('Saved app settings (takes effect on next deploy)')
         void qc.invalidateQueries({ queryKey: ['desktop', serverId, 'app', selectedAppId] })
         onRefreshServer()
       } catch (err) {
         toast.error(String(err))
       } finally {
         setSavingSettings(false)
+      }
+    }
+
+    async function handleRevealWebhook() {
+      if (!selectedAppId) return
+      if (webhook) {
+        setWebhook(null)
+        return
+      }
+      setWebhookLoading(true)
+      try {
+        const res = await desktopApi.getAppWebhook(serverId, selectedAppId)
+        setWebhook(res)
+      } catch (err) {
+        toast.error(String(err))
+      } finally {
+        setWebhookLoading(false)
+      }
+    }
+
+    async function handleRotateWebhook() {
+      if (!selectedAppId) return
+      setWebhookLoading(true)
+      try {
+        const res = await desktopApi.rotateAppWebhook(serverId, selectedAppId)
+        setWebhook(res)
+        toast.success('Rotated deploy webhook secret')
+      } catch (err) {
+        toast.error(String(err))
+      } finally {
+        setWebhookLoading(false)
       }
     }
 
@@ -279,6 +347,7 @@ export function AppsView({
       icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
     }[] = [
       { id: 'deployments', label: 'Deployments', icon: Box },
+      { id: 'metrics', label: 'Metrics', icon: Activity },
       { id: 'logs', label: 'Logs', icon: ScrollText },
       { id: 'env', label: `Env (${detail?.env.length ?? 0})`, icon: KeyRound },
       ...(app?.source_kind !== 'image'
@@ -570,6 +639,45 @@ export function AppsView({
             </div>
           )}
 
+          {activeTab === 'metrics' && (
+            <div className="space-y-5">
+              {app && (
+                <dl className="grid grid-cols-2 gap-3 rounded-xl border border-border/80 bg-card p-4 text-[13px] shadow-[var(--shadow-2)] sm:grid-cols-4">
+                  <div>
+                    <dt className="text-[12px] text-muted-foreground">Memory Limit</dt>
+                    <dd className="mt-0.5 font-mono font-semibold text-foreground">
+                      {app.memory_mb ? `${app.memory_mb} MB` : 'Unlimited'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[12px] text-muted-foreground">CPU Limit</dt>
+                    <dd className="mt-0.5 font-mono font-semibold text-foreground">
+                      {app.cpu_millis ? `${(app.cpu_millis / 1000).toFixed(2).replace(/\.00$/, '')} cores` : 'Unlimited'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[12px] text-muted-foreground">Container Port</dt>
+                    <dd className="mt-0.5 font-mono font-semibold text-foreground">
+                      :{app.port}
+                      {app.host_port ? ` → :${app.host_port}` : ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[12px] text-muted-foreground">Volumes</dt>
+                    <dd className="mt-0.5 font-mono font-semibold text-foreground">
+                      {app.volumes.length > 0 ? `${app.volumes.length} mounted` : 'Stateless'}
+                    </dd>
+                  </div>
+                </dl>
+              )}
+              <UsagePanel
+                serverId={serverId}
+                target={{ kind: 'app', id: selectedAppId }}
+                title={`${app?.name ?? 'App'} · Usage`}
+              />
+            </div>
+          )}
+
           {activeTab === 'logs' && (
             <LogStreamView
               mode="app"
@@ -780,16 +888,100 @@ export function AppsView({
                       />
                     </Field>
                     <Field>
+                      <FieldLabel htmlFor="app-edit-cpu">CPU Limit (cores)</FieldLabel>
+                      <Input
+                        id="app-edit-cpu"
+                        type="number"
+                        step="0.25"
+                        min={0.1}
+                        max={64}
+                        value={editCpuCores}
+                        onChange={(e) => setEditCpuCores(e.target.value)}
+                        placeholder="No limit"
+                        className="font-mono"
+                      />
+                      <FieldDescription>Leave empty for no CPU cap (e.g. 0.5, 1, 2).</FieldDescription>
+                    </Field>
+                    <Field className="sm:col-span-2">
                       <FieldLabel htmlFor="app-edit-health">Health Check Path</FieldLabel>
                       <Input
                         id="app-edit-health"
                         type="text"
                         value={editHealthPath}
                         onChange={(e) => setEditHealthPath(e.target.value)}
-                        placeholder="/healthz"
+                        placeholder="/healthz (empty = TCP check)"
                         className="font-mono"
                       />
                     </Field>
+                  </div>
+
+                  {/* Persistent Volumes */}
+                  <div className="space-y-2.5 rounded-xl border border-border/80 bg-surface/60 p-3.5">
+                    <div className="flex items-center gap-1.5 text-[13px] font-medium text-foreground">
+                      <HardDrive className="size-3.5 text-primary" />
+                      Persistent Volumes
+                    </div>
+                    <p className="text-[12px] text-muted-foreground">
+                      Mount paths inside the container backed by named engine volumes. Retained
+                      paths keep their existing volume data across redeploys.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        type="text"
+                        value={newVolumePath}
+                        onChange={(e) => setNewVolumePath(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            const clean = newVolumePath.trim()
+                            if (clean.startsWith('/') && !editVolumes.includes(clean)) {
+                              setEditVolumes((prev) => [...prev, clean])
+                              setNewVolumePath('')
+                            }
+                          }
+                        }}
+                        placeholder="/data or /var/lib/app"
+                        className="flex-1 font-mono"
+                      />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="compact"
+                        leadingIcon={Plus}
+                        disabled={!newVolumePath.trim().startsWith('/')}
+                        onClick={() => {
+                          const clean = newVolumePath.trim()
+                          if (clean.startsWith('/') && !editVolumes.includes(clean)) {
+                            setEditVolumes((prev) => [...prev, clean])
+                            setNewVolumePath('')
+                          }
+                        }}
+                      >
+                        Add Path
+                      </Button>
+                    </div>
+                    {editVolumes.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {editVolumes.map((vol) => (
+                          <span
+                            key={vol}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 font-mono text-[12px] text-foreground"
+                          >
+                            {vol}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditVolumes((prev) => prev.filter((v) => v !== vol))
+                              }
+                              aria-label={`Remove volume ${vol}`}
+                              className="text-muted-foreground hover:text-fail"
+                            >
+                              <X className="size-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {app.source_kind === 'image' && (
@@ -912,6 +1104,97 @@ export function AppsView({
                 </form>
               </Panel>
 
+              {/* Deploy Webhook (CI / Git Push Trigger) */}
+              <Panel
+                title={
+                  <>
+                    <Webhook className="size-4 text-primary" />
+                    Deploy Webhook
+                  </>
+                }
+                description="Trigger zero-downtime deployments from GitHub Actions, GitLab CI, or any HTTP POST with HMAC signing."
+                actions={
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="tertiary"
+                      size="compact"
+                      loading={webhookLoading}
+                      onClick={() => void handleRevealWebhook()}
+                    >
+                      {webhook ? 'Hide Webhook' : 'Reveal Webhook'}
+                    </Button>
+                    {webhook && (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="compact"
+                        leadingIcon={RefreshCw}
+                        loading={webhookLoading}
+                        onClick={() =>
+                          setConfirmState({
+                            title: 'Rotate Deploy Webhook Secret',
+                            description:
+                              'Generates a new signing secret immediately. Existing CI pipelines or Git webhooks using the old secret will be rejected until updated.',
+                            target: app.name,
+                            confirmLabel: 'Rotate Secret',
+                            tone: 'warning',
+                            action: handleRotateWebhook,
+                          })
+                        }
+                      >
+                        Rotate Secret
+                      </Button>
+                    )}
+                  </div>
+                }
+              >
+                {webhook ? (
+                  <div className="space-y-2.5 rounded-lg border border-border/80 bg-surface p-3.5 font-mono text-[12.5px]">
+                    <div className="flex items-center gap-3">
+                      <span className="w-20 shrink-0 text-muted-foreground">URL</span>
+                      <span className="min-w-0 flex-1 truncate text-foreground">
+                        {`${serverUrl.replace(/\/$/, '')}${webhook.path}`}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-compact"
+                        aria-label="Copy webhook URL"
+                        onClick={() => {
+                          const full = `${serverUrl.replace(/\/$/, '')}${webhook.path}`
+                          void navigator.clipboard.writeText(full)
+                          toast.success('Copied webhook URL')
+                        }}
+                      >
+                        <Copy />
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="w-20 shrink-0 text-muted-foreground">Secret</span>
+                      <span className="min-w-0 flex-1 truncate text-ok">{webhook.secret}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-compact"
+                        aria-label="Copy webhook secret"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(webhook.secret)
+                          toast.success('Copied webhook secret')
+                        }}
+                      >
+                        <Copy />
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[13px] text-muted-foreground">
+                    Click &ldquo;Reveal Webhook&rdquo; to inspect this app&rsquo;s payload URL and
+                    signing secret.
+                  </p>
+                )}
+              </Panel>
+
               <Panel
                 tone="danger"
                 title="Delete Application"
@@ -985,6 +1268,11 @@ export function AppsView({
     projectTabs.findIndex((t) => t.id === projectFilter),
   )
 
+  const selectedProject = useMemo(
+    () => (projectFilter === 'all' ? null : projects.find((p) => p.id === projectFilter) ?? null),
+    [projectFilter, projects],
+  )
+
   return (
     <Page
       title="Applications"
@@ -1046,27 +1334,52 @@ export function AppsView({
         </Panel>
       )}
 
-      {/* Fluid Project Filter Tabs + Search */}
-      {apps.length > 0 && (
+      {/* Fluid Project Filter Tabs + Edit/Delete Project + Search */}
+      {(projects.length > 0 || apps.length > 0) && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 pb-3">
-          {projectTabs.length > 1 ? (
-            <Tabs
-              size="compact"
-              selectedIndex={selectedProjectIdx}
-              onSelect={(idx) => {
-                const target = projectTabs[idx]
-                if (target) setProjectFilter(target.id)
-              }}
-            >
-              {projectTabs.map((t, idx) => (
-                <TabsItem key={t.id} index={idx} label={t.label} />
-              ))}
-            </Tabs>
-          ) : (
-            <span className="text-[13px] text-muted-foreground">
-              {apps.length} {apps.length === 1 ? 'application' : 'applications'}
-            </span>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {projectTabs.length > 1 ? (
+              <Tabs
+                size="compact"
+                selectedIndex={selectedProjectIdx}
+                onSelect={(idx) => {
+                  const target = projectTabs[idx]
+                  if (target) setProjectFilter(target.id)
+                }}
+              >
+                {projectTabs.map((t, idx) => (
+                  <TabsItem key={t.id} index={idx} label={t.label} />
+                ))}
+              </Tabs>
+            ) : (
+              <span className="text-[13px] text-muted-foreground">
+                {apps.length} {apps.length === 1 ? 'application' : 'applications'}
+              </span>
+            )}
+            {selectedProject && (
+              <div className="flex items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="compact"
+                  leadingIcon={Pencil}
+                  onClick={() => setEditingProject(selectedProject)}
+                >
+                  Edit
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="compact"
+                  leadingIcon={Trash2}
+                  onClick={() => setDeletingProject(selectedProject)}
+                  className="text-muted-foreground hover:text-fail"
+                >
+                  Delete
+                </Button>
+              </div>
+            )}
+          </div>
           <div className="relative w-full sm:w-64">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -1210,6 +1523,25 @@ export function AppsView({
           ))}
         </CardGroup>
       )}
+
+      <EditProjectDialog
+        serverId={serverId}
+        project={editingProject}
+        onClose={() => setEditingProject(null)}
+        onSaved={() => onRefreshServer()}
+      />
+
+      <DeleteProjectDialog
+        serverId={serverId}
+        project={deletingProject}
+        allProjects={projects}
+        databases={databases}
+        onClose={() => setDeletingProject(null)}
+        onDeleted={(deletedId) => {
+          if (projectFilter === deletedId) setProjectFilter('all')
+          onRefreshServer()
+        }}
+      />
     </Page>
   )
 }

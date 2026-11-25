@@ -16,6 +16,7 @@ mod railpack;
 mod routes;
 mod runtime;
 mod setup;
+mod snapshot;
 mod state;
 mod totp;
 mod uploads;

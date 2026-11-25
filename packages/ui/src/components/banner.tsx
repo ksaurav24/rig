@@ -255,7 +255,9 @@ function BannerMotion({ fixed, reduceMotion, config, children }: BannerMotionPro
   const overflow = useMotionValue(fixed ? "hidden" : "visible");
 
   const gridTemplateRows = useTransform(row, (v) => `${v}fr`);
-  const marginBottom = useTransform([row, gap], ([r, g]: number[]) => (r - 1) * g);
+  const marginBottom = useTransform([row, gap], ([r, g]: number[]) =>
+    g > 0 && r < 1 ? `${(r - 1) * g}px` : ""
+  );
   const y = useTransform(row, (v) => (slides ? `${(v - 1) * 100}%` : "0%"));
   // A banner that is mostly faded takes no clicks: one appearing can't catch
   // clicks meant for what's under it, and one leaving can't be hit twice.
@@ -440,7 +442,11 @@ const Banner = forwardRef<HTMLDivElement, BannerProps>(
     // Read from the children rather than a `:has()` rule: a group-has
     // selector made Chrome restyle the whole page on every DOM insertion
     // anywhere (each menu opening, about 25ms on a long page).
-    const described = Children.toArray(children).some(
+    const childList = Children.toArray(children);
+    const titled = childList.some(
+      (child) => isValidElement(child) && child.type === BannerTitle
+    );
+    const described = childList.some(
       (child) => isValidElement(child) && child.type === BannerDescription
     );
 
@@ -454,12 +460,12 @@ const Banner = forwardRef<HTMLDivElement, BannerProps>(
         data-status={status}
         data-contrast={contrast}
         data-variant={variant}
+        data-titled={titled ? "" : undefined}
         data-described={described ? "" : undefined}
         className={cn(
-          "group/banner @container/banner relative grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center text-foreground",
-          // With a description the icon and ✕ hold to the title line instead
-          // of centring on the whole block.
-          "data-described:items-start",
+          "group/banner @container/banner relative grid w-full grid-cols-[auto_minmax(0,1fr)_auto_auto] items-start text-left text-foreground",
+          // Single-line title-only banners vertically center icon & trailing actions.
+          !described && "items-center",
           // Even inset on all 4 sides: 16px, 12px compact.
           compact ? "p-3" : "p-4",
           // A fixed bar runs edge to edge: square corners, no frame.
@@ -479,13 +485,19 @@ const Banner = forwardRef<HTMLDivElement, BannerProps>(
         }
         {...props}
       >
-        {/* The glyph box is one title line tall, so it lines up with the
-            first line whether it centres or tops. */}
+        {/* The glyph box matches the first text line's line-height so the icon
+            lines up dead-center with the title (or description when untitled). */}
         <span
           aria-hidden="true"
           className={cn(
             "col-start-1 row-start-1 flex items-center justify-center text-[color:var(--banner-tone)]",
-            compact ? "mr-2.5 h-[18px]" : "mr-3 h-5"
+            compact
+              ? titled
+                ? "mr-2.5 h-[var(--lh-subtitle-compact,19px)]"
+                : "mr-2.5 h-[var(--lh-body-compact,18px)]"
+              : titled
+                ? "mr-3 h-[var(--lh-subtitle,22px)]"
+                : "mr-3 h-[var(--lh-body,20px)]"
           )}
         >
           {OutlineIcon ? (
@@ -547,7 +559,7 @@ const BannerTitle = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagrap
         ref={ref}
         data-slot="banner-title"
         className={cn(
-          "col-start-2 row-start-1 min-w-0 text-foreground",
+          "col-start-2 row-start-1 min-w-0 font-semibold break-words text-foreground",
           typeClass("subtitle", compact ? "compact" : "default"),
           className
         )}
@@ -561,8 +573,8 @@ const BannerTitle = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagrap
 BannerTitle.displayName = "BannerTitle";
 
 // ── BannerDescription ────────────────────────────────────
-// Foreground, like the title: muted grey drops under 4.5:1 on the tinted
-// and neutral fills, and the title already stands apart by its weight.
+// Sits on row 1 beside the icon when there is no BannerTitle, and drops to
+// row 2 directly underneath the title when a BannerTitle is present.
 
 const BannerDescription = forwardRef<
   HTMLParagraphElement,
@@ -574,8 +586,9 @@ const BannerDescription = forwardRef<
       ref={ref}
       data-slot="banner-description"
       className={cn(
-        "col-start-2 row-start-2 mt-0.5 min-w-0 text-foreground",
-        typeClass("subtitle", compact ? "compact" : "default"),
+        "col-start-2 row-start-1 min-w-0 break-words text-foreground/85",
+        "group-data-titled/banner:row-start-2 group-data-titled/banner:mt-1",
+        typeClass("body", compact ? "compact" : "default"),
         className
       )}
       {...props}
@@ -602,13 +615,15 @@ const BannerActions = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>
         className={cn(
           "col-start-3 row-start-1 flex flex-wrap items-center gap-2",
           compact ? "-my-[5px] ml-2.5" : "-my-1 ml-3",
-          // With a description
-          "group-data-described/banner:col-start-2 group-data-described/banner:row-start-3 group-data-described/banner:my-0 group-data-described/banner:ml-0",
+          // With a description (row 2 when untitled, row 3 when titled + described)
+          "group-data-described/banner:col-start-2 group-data-described/banner:row-start-2 group-data-described/banner:my-0 group-data-described/banner:ml-0",
+          "group-data-titled/banner:group-data-described/banner:row-start-3",
           compact
             ? "group-data-described/banner:mt-1.5"
-            : "group-data-described/banner:mt-2",
+            : "group-data-described/banner:mt-2.5",
           // Narrow banner
-          "@max-sm/banner:col-start-2 @max-sm/banner:row-start-3 @max-sm/banner:my-0 @max-sm/banner:ml-0",
+          "@max-sm/banner:col-start-2 @max-sm/banner:row-start-2 @max-sm/banner:my-0 @max-sm/banner:ml-0",
+          "@max-sm/banner:group-data-titled/banner:group-data-described/banner:row-start-3",
           compact ? "@max-sm/banner:mt-1.5" : "@max-sm/banner:mt-2",
           className
         )}

@@ -14,7 +14,8 @@ use rig_api::{
     DatabaseEngineInfo, Deployment, DiscoveredContainer, Domain, EnvVar, GithubBranch, GithubRepo,
     GithubStatus, LocalImageDeployRequest, LocalSourceDeployRequest, Me, Member,
     MemberWithPassword, MetricRange, MetricSeries, PairingCode, Project, RevealedEnvVar,
-    SetEnvVarRequest, StoredBlob, StoredBlobBatch, SystemInfo, UpdateAlertChannelRequest,
+    SetEnvVarRequest, SnapshotExportRequest, SnapshotInspectResult, SnapshotRestoreOptions,
+    SnapshotRestoreReport, StoredBlob, StoredBlobBatch, SystemInfo, UpdateAlertChannelRequest,
     UpdateAppRequest, UpdateMemberRequest, UpdateProjectRequest,
 };
 pub use rig_client::{AppLogQuery, DeploymentListQuery, metric_range_str, segment};
@@ -419,6 +420,36 @@ impl Client {
         dest: Option<&Path>,
     ) -> CliResult<(PathBuf, u64)> {
         Ok(self.inner.download_backup(backup_id, dest).await?)
+    }
+
+    // --------------------------------------------------- portable snapshots
+
+    pub async fn export_snapshot(
+        &self,
+        req: &SnapshotExportRequest,
+        dest: Option<&Path>,
+    ) -> CliResult<(PathBuf, u64, bool)> {
+        Ok(self.inner.export_snapshot(req, dest).await?)
+    }
+
+    pub async fn inspect_snapshot(
+        &self,
+        archive_path: &Path,
+        passphrase: Option<&str>,
+    ) -> CliResult<SnapshotInspectResult> {
+        Ok(self.inner.inspect_snapshot(archive_path, passphrase).await?)
+    }
+
+    pub async fn restore_snapshot(
+        &self,
+        archive_path: &Path,
+        passphrase: Option<&str>,
+        opts: &SnapshotRestoreOptions,
+    ) -> CliResult<SnapshotRestoreReport> {
+        Ok(self
+            .inner
+            .restore_snapshot(archive_path, passphrase, opts)
+            .await?)
     }
 
     // --------------------------------------------------------------- metrics

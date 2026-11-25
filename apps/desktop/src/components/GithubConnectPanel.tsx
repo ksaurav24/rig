@@ -1,7 +1,7 @@
 import { ExternalLink, GitBranch, Loader2, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { Banner, BannerDescription, BannerTitle } from '@rig/ui/banner'
+import { Banner, BannerAction, BannerActions, BannerDescription, BannerTitle } from '@rig/ui/banner'
 import { Button } from '@rig/ui/button'
 import { Field, FieldDescription, FieldLabel } from '@rig/ui/field'
 import { Input } from '@rig/ui/input'
@@ -10,13 +10,19 @@ import type { GithubStatus } from '@/lib/types'
 
 interface GithubConnectPanelProps {
   serverId: string
+  serverUrl?: string
   compact?: boolean
   onConnected: (status: GithubStatus) => void
   onUseGitUrl?: () => void
 }
 
+function isLegacySessionOnlyError(msg: string): boolean {
+  return /sign in to the dashboard to connect a github app/i.test(msg)
+}
+
 export function GithubConnectPanel({
   serverId,
+  serverUrl,
   compact = false,
   onConnected,
   onUseGitUrl,
@@ -24,6 +30,11 @@ export function GithubConnectPanel({
   const [organization, setOrganization] = useState('')
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const dashboardGithubUrl = serverUrl
+    ? `${serverUrl.replace(/\/$/, '')}/settings/github`
+    : null
+  const legacyServerError = error ? isLegacySessionOnlyError(error) : false
 
   async function handleConnect(e: FormEvent) {
     e.preventDefault()
@@ -69,8 +80,34 @@ export function GithubConnectPanel({
         </div>
 
         {error && (
-          <Banner role="alert" status="error" contrast="high" size="compact">
-            <BannerDescription>{error}</BannerDescription>
+          <Banner
+            role="alert"
+            status="error"
+            contrast="high"
+            size="compact"
+            dismissible
+            onDismiss={() => setError(null)}
+          >
+            <BannerTitle>
+              {legacyServerError
+                ? 'Server update needed for in-app GitHub connect'
+                : 'Could not connect GitHub'}
+            </BannerTitle>
+            <BannerDescription>
+              {legacyServerError
+                ? 'This server is running an older rig-server version that only accepts browser sessions for GitHub App setup. Update rig-server to connect directly from Rig Desktop, or connect once in the web dashboard.'
+                : error}
+            </BannerDescription>
+            {legacyServerError && dashboardGithubUrl && (
+              <BannerActions>
+                <BannerAction
+                  variant="primary"
+                  onClick={() => void desktopApi.openExternalUrl(dashboardGithubUrl)}
+                >
+                  Open Web Dashboard
+                </BannerAction>
+              </BannerActions>
+            )}
           </Banner>
         )}
 
@@ -127,11 +164,35 @@ export function GithubConnectPanel({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-5">
       {error && (
-        <Banner role="alert" status="error" contrast="high">
-          <BannerTitle>Could not connect GitHub</BannerTitle>
-          <BannerDescription>{error}</BannerDescription>
+        <Banner
+          role="alert"
+          status="error"
+          contrast="high"
+          dismissible
+          onDismiss={() => setError(null)}
+        >
+          <BannerTitle>
+            {legacyServerError
+              ? 'Server update needed for in-app GitHub connect'
+              : 'Could not connect GitHub'}
+          </BannerTitle>
+          <BannerDescription>
+            {legacyServerError
+              ? 'This server is running an older rig-server build that only accepts web dashboard sessions for GitHub App setup. Upgrade and restart rig-server on the host to connect directly from Rig Desktop, or connect once in the web dashboard and refresh.'
+              : error}
+          </BannerDescription>
+          {legacyServerError && dashboardGithubUrl && (
+            <BannerActions>
+              <BannerAction
+                variant="primary"
+                onClick={() => void desktopApi.openExternalUrl(dashboardGithubUrl)}
+              >
+                Open Web Dashboard
+              </BannerAction>
+            </BannerActions>
+          )}
         </Banner>
       )}
 

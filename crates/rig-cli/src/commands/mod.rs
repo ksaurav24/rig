@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod open;
 pub mod projects;
 pub mod setup;
+pub mod snapshot;
 pub mod status;
 pub mod tokens;
 pub mod up;
@@ -80,6 +81,8 @@ pub enum Command {
     /// Manage database backups (`ls`, `create`, `download`, `restore`, `rm`).
     #[command(alias = "backups")]
     Backup(backup::BackupArgs),
+    /// Export, inspect, or restore a full portable snapshot of a Rig server.
+    Snapshot(snapshot::SnapshotArgs),
     /// Show CPU, memory, and network metrics for the server, an app, or a database.
     Metrics(metrics::MetricsArgs),
     /// Live overview of server load, running apps, and databases.

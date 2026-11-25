@@ -119,6 +119,30 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 - **Profile & avatar (`Account` in the user menu):** Update your display name and set your account avatar using built-in presets, an uploaded image, or an image link.
 - **Appearance & operator ergonomics (`Account`):** Toggle light/dark/system theme, personal accent color, compact vs. default UI density, rounded/sharp/pill corner style, classic/floating/inset sidebar with hover-peek, default landing route, timestamp style/timezone/clock format, log & terminal font size and line wrapping, and pin frequently used projects directly to the sidebar.
 
+## 6. Full server snapshots & cross-server migration
+
+Rig can export a portable full-server snapshot containing organization branding & media, projects, apps, env vars/secrets, webhook secrets, persistent volume specs, domains, alert channels, live database dumps, and (optionally) the connected GitHub App.
+
+### Via CLI (`rig snapshot`)
+
+```sh
+# Download an encrypted full-server snapshot (Argon2id + XChaCha20-Poly1305)
+rig snapshot download --passphrase "$RIG_SNAPSHOT_PASSPHRASE"
+
+# Dry-run inspect a snapshot against another Rig server context without modifying anything
+rig snapshot inspect ./my-org-2026-11-25.rig-snapshot.tar.zst.enc \
+  --node staging --passphrase "$RIG_SNAPSHOT_PASSPHRASE"
+
+# Restore onto any target Rig server (merge safely by default, or --mode replace)
+rig snapshot restore ./my-org-2026-11-25.rig-snapshot.tar.zst.enc \
+  --node staging --mode merge --passphrase "$RIG_SNAPSHOT_PASSPHRASE"
+```
+
+- **Cross-server portability:** Secrets are decrypted on export (protected by your optional passphrase) and automatically re-encrypted under the target server's own `master.key` on restore.
+- **Target account safety:** Target server users, memberships, active sessions, and paired Rig Desktop device tokens are always preserved during both `merge` and `replace` restores.
+- **Rig Desktop & periodic reminders:** Open **Settings → Backup & Restore** in Rig Desktop to download snapshots directly to disk, enable per-server periodic backup reminders (daily, weekly, biweekly, monthly, or custom interval with 24-hour snooze and native OS notifications), and restore snapshots onto any paired server with a dry-run conflict preview.
+- **AI agents (MCP):** `rig mcp` exposes `export_server_snapshot`, `inspect_server_snapshot`, and `restore_server_snapshot` (all supporting `--node` server targeting).
+
 ## Day to day
 
 | What | How |
@@ -126,7 +150,8 @@ No domain for the app? Add one with a **Port** (for example 8081) and open
 | Logs | `journalctl -u rig -f` and `docker logs rig-caddy` (or `sudo -u rig XDG_RUNTIME_DIR=/run/user/$(id -u rig) podman logs rig-caddy` on Podman) |
 | Restart | `sudo systemctl restart rig` |
 | Settings | `/etc/rig/rig.env`, then restart |
-| Back up | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
+| Back up (portable snapshot) | `rig snapshot download --passphrase ...` or Rig Desktop **Settings → Backup & Restore** |
+| Back up (raw data dir) | `/var/lib/rig`; keep `master.key` safe, it decrypts your secrets |
 | CLI | `rig login https://rig.example.com`, then paste a token from **Account → Access tokens** |
 | Password reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset-password you@example.com` (generates a 7-day temporary password requiring change on next sign-in, revokes all sessions and API tokens, and clears login rate limits) |
 | Two-factor reset | `sudo -u rig rig-server --data-dir /var/lib/rig reset2fa you@example.com` (disables TOTP, removes recovery codes, and signs out all active sessions) |

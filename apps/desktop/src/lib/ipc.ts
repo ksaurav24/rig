@@ -13,7 +13,10 @@ import type {
   ApiToken,
   App,
   AppDetailSnapshot,
+  AppWebhook,
   Backup,
+  BackupReminder,
+  ChangePasswordRequest,
   CreateApiTokenRequest,
   CreateAppRequest,
   CreateDatabaseRequest,
@@ -26,6 +29,7 @@ import type {
   DeviceLoginResult,
   DiscoveredRepo,
   Domain,
+  DownloadedFile,
   EnvDiffItem,
   EnvDiffPreview,
   EnvVar,
@@ -37,11 +41,14 @@ import type {
   LogQueryResult,
   Member,
   MemberWithPassword,
+  MetricRange,
+  MetricSeries,
   Organization,
   PairingCode,
   PerfDiagnostics,
   ProbeServerResult,
   Project,
+  RecoveryCodes,
   RevealedEnvVar,
   Role,
   ServerEvent,
@@ -51,9 +58,19 @@ import type {
   ServersStatePayload,
   ServerView,
   SetEnvVarRequest,
+  SnapshotExportRequest,
+  SnapshotExportResult,
+  SnapshotInspectResult,
+  SnapshotRestoreOptions,
+  SnapshotRestoreReport,
   TerminalFrame,
+  TotpEnrollment,
+  TotpStatus,
   UpdateAppRequest,
   UpdateCheckResult,
+  UpdateProfileRequest,
+  UploadImageRequest,
+  User,
 } from './types'
 
 export const desktopApi = {
@@ -108,8 +125,17 @@ export const desktopApi = {
     invoke<Project>('create_project', { serverId, name, description }),
   updateProject: (serverId: string, projectId: string, name?: string, description?: string) =>
     invoke<Project>('update_project', { serverId, projectId, name, description }),
-  deleteProject: (serverId: string, projectId: string) =>
-    invoke<void>('delete_project', { serverId, projectId }),
+  deleteProject: (
+    serverId: string,
+    projectId: string,
+    opts?: { databasesAction?: 'move' | 'delete'; targetProjectId?: string | null },
+  ) =>
+    invoke<void>('delete_project', {
+      serverId,
+      projectId,
+      databasesAction: opts?.databasesAction ?? 'delete',
+      targetProjectId: opts?.targetProjectId ?? null,
+    }),
   createApp: (serverId: string, req: CreateAppRequest) =>
     invoke<App>('create_app', { serverId, req }),
   updateApp: (serverId: string, appId: string, req: UpdateAppRequest) =>
@@ -155,8 +181,84 @@ export const desktopApi = {
     invoke<ServerSettingsSnapshot>('get_server_settings', { serverId }),
   updateOrganization: (
     serverId: string,
-    req: { name?: string; accent_color?: string; env_label?: string; env_color?: string },
+    req: {
+      name?: string
+      logo_url?: string
+      accent_color?: string
+      env_label?: string
+      env_color?: string
+    },
   ) => invoke<Organization>('update_organization', { serverId, req }),
+  uploadOrgLogo: (serverId: string, req: UploadImageRequest) =>
+    invoke<Organization>('upload_org_logo', { serverId, req }),
+  deleteOrgLogo: (serverId: string) => invoke<Organization>('delete_org_logo', { serverId }),
+  fetchMediaDataUrl: (serverId: string, path: string) =>
+    invoke<string>('fetch_media_data_url', { serverId, path }),
+
+  // ---- Metrics, Webhooks & Backup Downloads ----
+  getMetrics: (
+    serverId: string,
+    target: { kind: 'host' } | { kind: 'app'; id: string } | { kind: 'database'; id: string },
+    range: MetricRange,
+  ) =>
+    invoke<MetricSeries>('get_metrics', {
+      serverId,
+      targetKind: target.kind,
+      targetId: target.kind === 'host' ? null : target.id,
+      range,
+    }),
+  getAppWebhook: (serverId: string, appId: string) =>
+    invoke<AppWebhook>('get_app_webhook', { serverId, appId }),
+  rotateAppWebhook: (serverId: string, appId: string) =>
+    invoke<AppWebhook>('rotate_app_webhook', { serverId, appId }),
+  downloadBackup: (serverId: string, backupId: string, destPath: string) =>
+    invoke<DownloadedFile>('download_backup', { serverId, backupId, destPath }),
+
+  // ---- Account Profile, Password & Two-Factor (TOTP) ----
+  updateProfile: (serverId: string, req: UpdateProfileRequest) =>
+    invoke<User>('update_profile', { serverId, req }),
+  uploadAvatar: (serverId: string, req: UploadImageRequest) =>
+    invoke<User>('upload_avatar', { serverId, req }),
+  deleteAvatar: (serverId: string) => invoke<User>('delete_avatar', { serverId }),
+  changePassword: (serverId: string, req: ChangePasswordRequest) =>
+    invoke<void>('change_password', { serverId, req }),
+  getTotpStatus: (serverId: string) => invoke<TotpStatus>('get_totp_status', { serverId }),
+  totpSetup: (serverId: string, password: string) =>
+    invoke<TotpEnrollment>('totp_setup', { serverId, password }),
+  totpEnable: (serverId: string, code: string) =>
+    invoke<RecoveryCodes>('totp_enable', { serverId, code }),
+  totpDisable: (serverId: string, password: string, code: string) =>
+    invoke<void>('totp_disable', { serverId, password, code }),
+  totpRegenerateRecoveryCodes: (serverId: string, password: string, code: string) =>
+    invoke<RecoveryCodes>('totp_regenerate_recovery_codes', { serverId, password, code }),
+  saveTextFile: (path: string, content: string) =>
+    invoke<number>('save_text_file', { path, content }),
+
+  // ---- Full Portable Server Snapshots & Periodic Reminders ----
+  exportServerSnapshot: (serverId: string, req: SnapshotExportRequest, destPath: string) =>
+    invoke<SnapshotExportResult>('export_server_snapshot', { serverId, req, destPath }),
+  inspectServerSnapshot: (serverId: string, archivePath: string, passphrase?: string | null) =>
+    invoke<SnapshotInspectResult>('inspect_server_snapshot', {
+      serverId,
+      archivePath,
+      passphrase: passphrase?.trim() ? passphrase : null,
+    }),
+  restoreServerSnapshot: (
+    serverId: string,
+    archivePath: string,
+    options: SnapshotRestoreOptions,
+    passphrase?: string | null,
+  ) =>
+    invoke<SnapshotRestoreReport>('restore_server_snapshot', {
+      serverId,
+      archivePath,
+      passphrase: passphrase?.trim() ? passphrase : null,
+      options,
+    }),
+  setBackupReminder: (serverId: string, enabled: boolean, intervalDays: number) =>
+    invoke<BackupReminder>('set_backup_reminder', { serverId, enabled, intervalDays }),
+  snoozeBackupReminder: (serverId: string, hours = 24) =>
+    invoke<BackupReminder>('snooze_backup_reminder', { serverId, hours }),
   addMember: (serverId: string, req: { name: string; email: string; role: Role }) =>
     invoke<MemberWithPassword>('add_member', { serverId, req }),
   updateMember: (serverId: string, userId: string, req: { role: Role }) =>
@@ -321,4 +423,12 @@ export const desktopApi = {
   onServerEvent: (
     cb: (payload: { server_id: string; server_name: string; event: ServerEvent }) => void,
   ): Promise<UnlistenFn> => listen('rig://server-event', (ev) => cb(ev.payload as never)),
+  onBackupReminderDue: (
+    cb: (payload: {
+      server_id: string
+      server_name: string
+      interval_days: number
+      last_snapshot_at?: string | null
+    }) => void,
+  ): Promise<UnlistenFn> => listen('rig://backup-reminder-due', (ev) => cb(ev.payload as never)),
 }

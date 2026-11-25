@@ -2,8 +2,10 @@ import {
   Box,
   Database,
   FolderGit2,
+  HardDriveDownload,
   Info,
   LayoutDashboard,
+  LayoutGrid,
   Moon,
   Palette,
   Plus,
@@ -11,6 +13,7 @@ import {
   RotateCcw,
   Server,
   Settings,
+  ShieldCheck,
   Sliders,
   Sun,
   Terminal,
@@ -39,9 +42,9 @@ interface CommandPaletteProps {
   databases: DbType[]
   onSelectServer: (id: string) => void
   onNavigate: (
-    section: 'overview' | 'apps' | 'local' | 'databases' | 'settings',
+    section: 'overview' | 'apps' | 'catalog' | 'local' | 'databases' | 'settings',
     appId?: string,
-    appTab?: string,
+    tab?: string,
   ) => void
   onAddServer: () => void
   onDeployApp: () => void
@@ -105,6 +108,15 @@ export function CommandPalette({
           onSelect: () => onNavigate('apps'),
         },
         {
+          value: 'nav-catalog',
+          group: activeServer.name,
+          label: 'App Catalog (One-Click Templates)',
+          description: 'Uptime Kuma, Vaultwarden, n8n, Gitea, Jellyfin & more',
+          icon: LayoutGrid,
+          keywords: ['catalog', 'templates', 'store', 'self-hosted', 'docker'],
+          onSelect: () => onNavigate('catalog'),
+        },
+        {
           value: 'nav-local',
           group: activeServer.name,
           label: 'Local Repositories',
@@ -121,12 +133,30 @@ export function CommandPalette({
           onSelect: () => onNavigate('databases'),
         },
         {
+          value: 'nav-backup',
+          group: activeServer.name,
+          label: 'Server Snapshot Backup & Restore',
+          description: 'Download full snapshot, schedule reminders, or restore to any server',
+          icon: HardDriveDownload,
+          keywords: ['snapshot', 'backup', 'restore', 'migrate', 'reminder', 'export'],
+          onSelect: () => onNavigate('settings', undefined, 'backup'),
+        },
+        {
+          value: 'nav-account',
+          group: activeServer.name,
+          label: 'Account, Password & 2FA',
+          description: 'Profile, avatar, password, and authenticator TOTP',
+          icon: ShieldCheck,
+          keywords: ['account', 'profile', 'avatar', 'password', '2fa', 'totp'],
+          onSelect: () => onNavigate('settings', undefined, 'account'),
+        },
+        {
           value: 'nav-settings',
           group: activeServer.name,
           label: 'Server Settings',
-          description: 'Org, Network, GitHub, Team, Devices, Alerts, Audit Log',
+          description: 'Org, Logo, Network, GitHub, Team, Devices, Alerts, Audit Log',
           icon: Settings,
-          onSelect: () => onNavigate('settings'),
+          onSelect: () => onNavigate('settings', undefined, 'general'),
         },
       )
 

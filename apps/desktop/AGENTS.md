@@ -4,18 +4,20 @@ Rig Desktop is a Tauri 2 native multi-server control app for Rig (Linux, macOS, 
 
 ## Architectural Rules (Do Not Violate)
 
-1. **Zero HTTP in the Webview**: `src/` NEVER calls `fetch()` or opens browser `WebSocket`s directly against Rig servers, and NEVER touches bearer tokens. All network calls go through `src/lib/ipc.ts` -> `src-tauri/src/commands.rs` -> `crates/rig-client`.
-2. **Tokens Stay in the OS Keychain**: Device tokens live in `src-tauri/src/keychain.rs` (Keychain / Credential Manager / Secret Service). `servers.json` (`src-tauri/src/registry.rs`) stores only non-secret metadata, TLS pins, and cached read-only snapshots.
+1. **Zero HTTP in the Webview**: `src/` NEVER calls `fetch()` or opens browser `WebSocket`s directly against Rig servers, and NEVER touches bearer tokens. All network calls (including authenticated `/api/v1/media/*` image fetches via `fetch_media_data_url`, streaming backup downloads, and full server snapshot export/inspect/restore) go through `src/lib/ipc.ts` -> `src-tauri/src/commands.rs` -> `crates/rig-client`.
+2. **Tokens Stay in the OS Keychain**: Device tokens live in `src-tauri/src/keychain.rs` (Keychain / Credential Manager / Secret Service). `servers.json` (`src-tauri/src/registry.rs`) stores only non-secret metadata, TLS pins, per-server `BackupReminder` schedules/history, and cached read-only snapshots.
 3. **Heavy Work Stays in Native Rust**:
    - Log ring buffers (50k lines/stream), zero-regex ANSI SGR parsing, and search live in `src-tauri/src/log_engine.rs`.
    - Frames are pushed to the UI via Tauri `Channel` at most once per animation frame (`16ms` / 60Hz).
    - `.env` parsing & masked secret diffing live in `src-tauri/src/env_diff.rs`.
    - Local Git inspection & zstd deduplicated source uploads live in `src-tauri/src/local_git.rs`.
    - Container terminal WebSockets live in `src-tauri/src/terminal.rs`.
-4. **Connection Lifecycle**:
+   - Streaming database backup downloads and full-server snapshot export/inspect/restore run directly over `rig-client` file streams (`src-tauri/src/commands.rs`).
+4. **Connection & Reminder Lifecycle**:
    - Every paired server maintains one lightweight `GET /api/v1/events` SSE loop (`src-tauri/src/connection.rs`) driving left-rail health dots and OS notifications.
+   - A background ticker in `src-tauri/src/lib.rs` checks `BackupReminder` schedules every 15 minutes (throttled to 12h per server), emitting native OS notifications and `rig://backup-reminder-due` events.
    - Switching servers immediately cancels view-level streams (log SSEs + terminals) and switches via cached snapshots for `< 100ms` latency.
-5. **WebKitGTK Discipline**: Keep CSS animations minimal and avoid `backdrop-filter: blur(...)` on scrolling log/table panes. Use `@tanstack/react-virtual` for logs and long lists.
+5. **WebKitGTK Discipline**: Keep CSS animations minimal and avoid `backdrop-filter: blur(...)` on scrolling log/table panes. Use `@tanstack/react-virtual` for logs and long lists, and lightweight zero-dependency SVG charts (`src/components/UsagePanel.tsx`) for historical `1h`/`6h`/`24h` metrics.
 
 ## Commands
 

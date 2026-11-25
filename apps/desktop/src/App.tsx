@@ -5,6 +5,7 @@ import {
   Database,
   FolderGit2,
   LayoutDashboard,
+  LayoutGrid,
   Minus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -18,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType }
 import { toast } from 'sonner'
 import { AddServerModal } from './components/AddServerModal'
 import { AppsView, type AppDetailTab } from './components/AppsView'
+import { CatalogView } from './components/CatalogView'
 import { CommandPalette } from './components/CommandPalette'
 import { DatabasesView } from './components/DatabasesView'
 import { DeployModal } from './components/DeployModal'
@@ -25,7 +27,7 @@ import { DesktopSettingsView, type DesktopSettingsTab } from './components/Deskt
 import { LocalReposView } from './components/LocalReposView'
 import { OverviewView } from './components/OverviewView'
 import { ServerRail } from './components/ServerRail'
-import { SettingsView } from './components/SettingsView'
+import { SettingsView, type SettingsTab } from './components/SettingsView'
 import { Logo } from '@rig/ui/app/logo'
 import { Button } from '@rig/ui/button'
 import { FluidHoverHighlight } from '@rig/ui/fluid-hover-highlight'
@@ -38,7 +40,7 @@ import { useShape } from '@rig/ui/lib/shape-context'
 import type { ServerView } from './lib/types'
 import { cn } from '@rig/ui/lib/utils'
 
-type Section = 'overview' | 'apps' | 'local' | 'databases' | 'settings'
+type Section = 'overview' | 'apps' | 'catalog' | 'local' | 'databases' | 'settings'
 
 interface NavItemDef {
   id: Section
@@ -113,6 +115,7 @@ export default function App() {
   const { prefs, resolvedTheme, updatePrefs, zoomIn, zoomOut, resetZoom } = usePreferences()
   const shape = useShape()
   const [section, setSection] = useState<Section>(() => prefs.defaultSection)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
   const [appSettingsOpen, setAppSettingsOpen] = useState(false)
   const [appSettingsTab, setAppSettingsTab] = useState<DesktopSettingsTab>('general')
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
@@ -164,10 +167,11 @@ export default function App() {
     },
   })
 
-  // Subscribe to Rust ConnectionManager push events (health dots + real-time server events).
+  // Subscribe to Rust ConnectionManager push events (health dots + real-time server events + backup reminders).
   useEffect(() => {
     let unlistenStatus: (() => void) | undefined
     let unlistenEvent: (() => void) | undefined
+    let unlistenBackup: (() => void) | undefined
 
     void desktopApi
       .onServerStatus(({ server_id, health, error }) => {
@@ -209,9 +213,32 @@ export default function App() {
         unlistenEvent = fn
       })
 
+    void desktopApi
+      .onBackupReminderDue(({ server_id, server_name, interval_days }) => {
+        toast.warning(`Snapshot backup due for ${server_name}`, {
+          description: `Scheduled every ${interval_days} day${interval_days === 1 ? '' : 's'}.`,
+          action: {
+            label: 'Back up',
+            onClick: () => {
+              setAppSettingsOpen(false)
+              setSelectedAppId(null)
+              setSettingsTab('backup')
+              setSection('settings')
+              void desktopApi.selectServer(server_id)
+              void qc.invalidateQueries({ queryKey: ['desktop', 'servers'] })
+            },
+          },
+        })
+        void qc.invalidateQueries({ queryKey: ['desktop', 'servers'] })
+      })
+      .then((fn) => {
+        unlistenBackup = fn
+      })
+
     return () => {
       unlistenStatus?.()
       unlistenEvent?.()
+      unlistenBackup?.()
     }
   }, [qc])
 
@@ -337,6 +364,11 @@ export default function App() {
       badge: snapshotQuery.data?.apps.length,
     },
     {
+      id: 'catalog',
+      label: 'Catalog',
+      icon: LayoutGrid,
+    },
+    {
       id: 'local',
       label: 'Local Repos',
       icon: FolderGit2,
@@ -360,13 +392,15 @@ export default function App() {
   const sectionLabel =
     section === 'local'
       ? 'Local Repos'
-      : section === 'overview'
-        ? 'Overview'
-        : section === 'apps'
-          ? 'Applications'
-          : section === 'databases'
-            ? 'Databases'
-            : 'Settings'
+      : section === 'catalog'
+        ? 'App Catalog'
+        : section === 'overview'
+          ? 'Overview'
+          : section === 'apps'
+            ? 'Applications'
+            : section === 'databases'
+              ? 'Databases'
+              : 'Settings'
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -697,6 +731,16 @@ export default function App() {
                     setSection('apps')
                   }}
                   onDeployApp={() => openDeployModal()}
+                  onOpenCatalog={() => {
+                    setSelectedAppId(null)
+                    setSection('catalog')
+                  }}
+                  onOpenBackup={() => {
+                    setSelectedAppId(null)
+                    setSettingsTab('backup')
+                    setSection('settings')
+                  }}
+                  onServersChanged={() => void qc.invalidateQueries({ queryKey: ['desktop', 'servers'] })}
                   onOpenLocalRepos={() => {
                     setSelectedAppId(null)
                     setSection('local')
@@ -712,14 +756,29 @@ export default function App() {
                 <AppsView
                   key={activeServer.id}
                   serverId={activeServer.id}
+                  serverUrl={activeServer.url}
                   projects={snapshotQuery.data?.projects ?? []}
                   apps={snapshotQuery.data?.apps ?? []}
+                  databases={snapshotQuery.data?.databases ?? []}
                   selectedAppId={selectedAppId}
                   activeTab={appTab}
                   onSelectApp={setSelectedAppId}
                   onSelectTab={setAppTab}
                   onRefreshServer={() => void snapshotQuery.refetch()}
                   onDeployNew={() => openDeployModal()}
+                />
+              )}
+              {section === 'catalog' && (
+                <CatalogView
+                  key={activeServer.id}
+                  serverId={activeServer.id}
+                  projects={snapshotQuery.data?.projects ?? []}
+                  onDeployed={(app) => {
+                    void snapshotQuery.refetch()
+                    setSelectedAppId(app.id)
+                    setAppTab('deployments')
+                    setSection('apps')
+                  }}
                 />
               )}
               {section === 'local' && (
@@ -743,6 +802,11 @@ export default function App() {
                 <SettingsView
                   key={activeServer.id}
                   server={activeServer}
+                  servers={servers}
+                  tab={settingsTab}
+                  onTabChange={setSettingsTab}
+                  onServersChanged={() => void qc.invalidateQueries({ queryKey: ['desktop', 'servers'] })}
+                  onRefreshServer={() => void snapshotQuery.refetch()}
                   onRemoveServer={(id) => void handleRemoveServer(id)}
                 />
               )}
@@ -765,6 +829,7 @@ export default function App() {
         <DeployModal
           open={deployModal.open}
           serverId={activeServer.id}
+          serverUrl={activeServer.url}
           projects={snapshotQuery.data?.projects ?? []}
           initialLocalPath={deployModal.initialLocalPath}
           initialName={deployModal.initialName}
@@ -791,7 +856,11 @@ export default function App() {
           setAppSettingsOpen(false)
           setSection(sec)
           if (appId) setSelectedAppId(appId)
-          if (tab) setAppTab(tab as AppDetailTab)
+          else setSelectedAppId(null)
+          if (tab) {
+            if (sec === 'settings') setSettingsTab(tab as SettingsTab)
+            else setAppTab(tab as AppDetailTab)
+          }
         }}
         onAddServer={() => setAddOpen(true)}
         onDeployApp={() => openDeployModal()}

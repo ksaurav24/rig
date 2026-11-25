@@ -121,6 +121,173 @@ export interface UpdateAppRequest {
   cpu_millis?: number
   health_path?: string
   auto_deploy?: boolean
+  volumes?: string[]
+}
+
+export interface AppWebhook {
+  path: string
+  secret: string
+}
+
+export type MetricRange = '1h' | '6h' | '24h'
+
+export interface MetricPoint {
+  ts: number
+  cpu_percent: number
+  memory_bytes: number
+  net_rx_bps?: number | null
+  net_tx_bps?: number | null
+}
+
+export interface MetricSeries {
+  range: MetricRange
+  step_seconds: number
+  memory_total: number
+  points: MetricPoint[]
+}
+
+export interface UploadImageRequest {
+  content_type: string
+  data_base64: string
+}
+
+export interface UpdateProfileRequest {
+  name?: string
+  avatar_url?: string
+}
+
+export interface ChangePasswordRequest {
+  current_password: string
+  new_password: string
+}
+
+export interface TotpStatus {
+  enabled: boolean
+  enabled_at?: string | null
+  recovery_codes_left: number
+}
+
+export interface TotpEnrollment {
+  secret: string
+  otpauth_uri: string
+  qr_svg: string
+}
+
+export interface RecoveryCodes {
+  codes: string[]
+}
+
+export interface BackupReminder {
+  enabled: boolean
+  interval_days: number
+  last_snapshot_at?: string | null
+  last_snapshot_path?: string | null
+  last_snapshot_bytes?: number | null
+  snoozed_until?: string | null
+  last_notified_at?: string | null
+}
+
+export interface DownloadedFile {
+  path: string
+  bytes: number
+}
+
+export interface SnapshotExportRequest {
+  include_database_dumps: boolean
+  include_alerts: boolean
+  include_github: boolean
+  passphrase?: string | null
+}
+
+export interface SnapshotExportResult {
+  path: string
+  bytes: number
+  encrypted: boolean
+  reminder: BackupReminder
+}
+
+export type SnapshotRestoreMode = 'merge' | 'replace'
+
+export interface SnapshotRestoreOptions {
+  mode: SnapshotRestoreMode
+  restore_branding: boolean
+  restore_alerts: boolean
+  restore_github: boolean
+  start_databases: boolean
+  deploy_running_apps: boolean
+}
+
+export interface SnapshotProjectPreview {
+  name: string
+  slug: string
+  description: string
+  exists_on_target: boolean
+}
+
+export interface SnapshotAppPreview {
+  project_slug: string
+  name: string
+  slug: string
+  source_kind: SourceKind
+  image?: string | null
+  git_url?: string | null
+  port: number
+  was_running: boolean
+  env_count: number
+  domain_count: number
+  volume_count: number
+  exists_on_target: boolean
+}
+
+export interface SnapshotDatabasePreview {
+  project_slug: string
+  name: string
+  slug: string
+  engine: DatabaseEngine
+  version: string
+  was_running: boolean
+  has_dump: boolean
+  dump_size_bytes?: number | null
+  dump_error?: string | null
+  exists_on_target: boolean
+}
+
+export interface SnapshotInspectResult {
+  format_version: number
+  encrypted: boolean
+  created_at: string
+  rig_version: string
+  source_org_name: string
+  source_org_slug: string
+  has_logo: boolean
+  has_github_app: boolean
+  media_count: number
+  alert_channel_count: number
+  projects: SnapshotProjectPreview[]
+  apps: SnapshotAppPreview[]
+  databases: SnapshotDatabasePreview[]
+  warnings: string[]
+}
+
+export interface SnapshotRestoreReport {
+  mode: SnapshotRestoreMode
+  branding_restored: boolean
+  media_restored: number
+  projects_created: number
+  projects_skipped: number
+  apps_created: number
+  apps_skipped: number
+  apps_deployments_queued: number
+  env_vars_restored: number
+  domains_restored: number
+  volumes_restored: number
+  databases_created: number
+  databases_skipped: number
+  databases_provisioning: number
+  database_dumps_scheduled: number
+  alerts_created: number
+  github_restored: boolean
+  warnings: string[]
 }
 
 export interface Deployment {
@@ -364,6 +531,7 @@ export interface ServerView {
   health: ServerHealth
   health_error?: string | null
   cache: CachedServerSnapshot
+  backup_reminder: BackupReminder
   created_at: string
 }
 

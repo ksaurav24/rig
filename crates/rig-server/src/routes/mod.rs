@@ -10,8 +10,9 @@ pub mod github;
 pub mod hooks;
 pub mod members;
 mod metrics;
-mod org;
+pub(crate) mod org;
 mod projects;
+mod snapshot;
 pub mod system;
 mod terminal;
 mod uploads;
@@ -103,6 +104,7 @@ fn api() -> OpenApiRouter<AppState> {
         .merge(github::router())
         .merge(alerts::router())
         .merge(uploads::json_router())
+        .merge(snapshot::json_router())
         .merge(adopt::router())
 }
 
@@ -164,6 +166,7 @@ pub fn app(state: AppState) -> Router {
     router
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .merge(uploads::streaming_router())
+        .merge(snapshot::streaming_router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::access::guard,

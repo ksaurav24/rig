@@ -7,6 +7,7 @@ import {
   ExternalLink,
   GitBranch,
   Globe,
+  HardDriveDownload,
   History,
   KeyRound,
   Laptop,
@@ -18,15 +19,21 @@ import {
   Send,
   ShieldCheck,
   Trash2,
+  User as UserIcon,
   UserPlus,
   Users,
+  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ComponentType, type FormEvent } from 'react'
 import { toast } from 'sonner'
+import { AccountSettingsPanel } from './AccountSettingsPanel'
 import { GithubConnectPanel } from './GithubConnectPanel'
+import { ImagePicker } from './ImagePicker'
+import { ServerOrgMark } from './MediaImage'
+import { ServerSnapshotPanel, isBackupReminderDue } from './ServerSnapshotPanel'
 import { Page, Panel } from '@rig/ui/app/page'
 import { EmptyState } from '@rig/ui/app/state'
-import { Badge } from '@rig/ui/badge'
+import { Badge, type BadgeProps } from '@rig/ui/badge'
 import { Banner, BannerAction, BannerActions, BannerDescription, BannerTitle } from '@rig/ui/banner'
 import { Button } from '@rig/ui/button'
 import { Checkbox } from '@rig/ui/checkbox'
@@ -48,12 +55,25 @@ import type {
 } from '@/lib/types'
 import { cn } from '@rig/ui/lib/utils'
 
+export type SettingsTab =
+  | 'general'
+  | 'account'
+  | 'backup'
+  | 'github'
+  | 'team'
+  | 'devices'
+  | 'alerts'
+  | 'audit'
+
 interface SettingsViewProps {
   server: ServerView
+  servers: ServerView[]
+  tab: SettingsTab
+  onTabChange: (tab: SettingsTab) => void
+  onServersChanged: () => void
+  onRefreshServer: () => void
   onRemoveServer: (id: string) => void
 }
-
-type SettingsTab = 'general' | 'github' | 'team' | 'devices' | 'alerts' | 'audit'
 
 const ALL_ALERT_EVENTS: { id: AlertEvent; label: string }[] = [
   { id: 'deploy_failed', label: 'Deploy failed' },
@@ -63,13 +83,18 @@ const ALL_ALERT_EVENTS: { id: AlertEvent; label: string }[] = [
   { id: 'backup_failed', label: 'Backup failed' },
 ]
 
-const ENV_COLORS: { value: string; label: string; dot: string }[] = [
-  { value: 'emerald', label: 'Emerald', dot: 'bg-emerald-500' },
-  { value: 'amber', label: 'Amber', dot: 'bg-amber-500' },
-  { value: 'red', label: 'Red', dot: 'bg-rose-500' },
-  { value: 'blue', label: 'Blue', dot: 'bg-sky-500' },
-  { value: 'purple', label: 'Purple', dot: 'bg-violet-500' },
-  { value: 'gray', label: 'Neutral', dot: 'bg-zinc-400' },
+const ENV_COLORS: {
+  value: string
+  label: string
+  dot: string
+  badgeColor: NonNullable<BadgeProps['color']>
+}[] = [
+  { value: 'emerald', label: 'Emerald', dot: 'bg-emerald-500', badgeColor: 'emerald' },
+  { value: 'amber', label: 'Amber', dot: 'bg-amber-500', badgeColor: 'amber' },
+  { value: 'red', label: 'Red', dot: 'bg-rose-500', badgeColor: 'red' },
+  { value: 'blue', label: 'Blue', dot: 'bg-sky-500', badgeColor: 'blue' },
+  { value: 'purple', label: 'Purple', dot: 'bg-violet-500', badgeColor: 'purple' },
+  { value: 'gray', label: 'Neutral', dot: 'bg-zinc-400', badgeColor: 'gray' },
 ]
 
 function CopyPill({ value, label }: { value: string; label?: string }) {
@@ -93,10 +118,19 @@ function CopyPill({ value, label }: { value: string; label?: string }) {
   )
 }
 
-export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
+export function SettingsView({
+  server,
+  servers,
+  tab,
+  onTabChange,
+  onServersChanged,
+  onRefreshServer,
+  onRemoveServer,
+}: SettingsViewProps) {
   const qc = useQueryClient()
   const { resolvedTheme } = usePreferences()
-  const [tab, setTab] = useState<SettingsTab>('general')
+  const setTab = onTabChange
+  const backupDue = isBackupReminderDue(server.backup_reminder)
   const [pairing, setPairing] = useState<PairingCode | null>(null)
   const [creatingPair, setCreatingPair] = useState(false)
   const [showBridges, setShowBridges] = useState(false)
@@ -299,6 +333,12 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
     icon: ComponentType<{ size?: number; strokeWidth?: number; className?: string }>
   }[] = [
     { id: 'general', label: 'General & Network', icon: Globe },
+    { id: 'account', label: 'Account & 2FA', icon: UserIcon },
+    {
+      id: 'backup',
+      label: backupDue ? 'Backup & Restore (!)' : 'Backup & Restore',
+      icon: HardDriveDownload,
+    },
     { id: 'github', label: ghApp ? `GitHub (${ghApp.owner})` : 'GitHub', icon: GitBranch },
     { id: 'team', label: `Team (${data?.members.length ?? 0})`, icon: Users },
     {
@@ -360,6 +400,42 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
         <div className="space-y-5">
           <Panel title="Organization & Branding">
             <form onSubmit={saveOrg} className="space-y-5">
+              {/* Live Organization Identity Preview */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/80 bg-surface/60 px-4 py-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <ServerOrgMark
+                    serverId={server.id}
+                    logoUrl={data?.me?.org.logo_url}
+                    name={orgName || data?.me?.org.name || server.name}
+                    className="size-10"
+                  />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="truncate text-[15px] font-semibold text-foreground">
+                        {orgName.trim() || data?.me?.org.name || server.name}
+                      </span>
+                      {envLabel.trim() && (
+                        <Badge
+                          variant="solid"
+                          color={
+                            ENV_COLORS.find((c) => c.value === envColor)?.badgeColor ?? 'emerald'
+                          }
+                          size="compact"
+                        >
+                          {envLabel.trim()}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="truncate font-mono text-[12px] text-muted-foreground">
+                      {server.url}
+                    </div>
+                  </div>
+                </div>
+                <span className="text-[11.5px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Live Preview
+                </span>
+              </div>
+
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field>
                   <FieldLabel htmlFor="org-name">Organization Name</FieldLabel>
@@ -373,43 +449,56 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="org-env">Environment Badge</FieldLabel>
-                  <Input
-                    id="org-env"
-                    type="text"
-                    value={envLabel}
-                    onChange={(e) => setEnvLabel(e.target.value)}
-                    placeholder="production, staging, homelab…"
-                    maxLength={24}
-                  />
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      id="org-env"
+                      type="text"
+                      value={envLabel}
+                      onChange={(e) => setEnvLabel(e.target.value)}
+                      placeholder="production, staging, homelab…"
+                      maxLength={24}
+                      className="flex-1"
+                    />
+                    {envLabel.trim() && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-compact"
+                        aria-label="Clear environment badge"
+                        title="Clear badge"
+                        onClick={() => setEnvLabel('')}
+                      >
+                        <X />
+                      </Button>
+                    )}
+                  </div>
                 </Field>
               </div>
 
-              {envLabel.trim() && (
-                <Field>
-                  <FieldLabel>Environment Badge Color</FieldLabel>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {ENV_COLORS.map((c) => {
-                      const active = envColor === c.value
-                      return (
-                        <button
-                          key={c.value}
-                          type="button"
-                          onClick={() => setEnvColor(c.value)}
-                          className={cn(
-                            'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12px] transition-colors',
-                            active
-                              ? 'border-primary bg-primary/12 font-medium text-foreground'
-                              : 'border-border bg-surface text-muted-foreground hover:text-foreground',
-                          )}
-                        >
-                          <span className={cn('size-2 rounded-full', c.dot)} />
-                          {c.label}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </Field>
-              )}
+              <Field>
+                <FieldLabel>Environment Badge Color</FieldLabel>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {ENV_COLORS.map((c) => {
+                    const active = envColor === c.value
+                    return (
+                      <button
+                        key={c.value}
+                        type="button"
+                        onClick={() => setEnvColor(c.value)}
+                        className={cn(
+                          'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12px] transition-colors',
+                          active
+                            ? 'border-primary bg-primary/12 font-medium text-foreground'
+                            : 'border-border bg-surface text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        <span className={cn('size-2 rounded-full', c.dot)} />
+                        {c.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Field>
 
               <Field>
                 <FieldLabel>Organization Accent Color</FieldLabel>
@@ -458,6 +547,33 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
                 </Button>
               </div>
             </form>
+          </Panel>
+
+          <Panel
+            title="Organization Logo"
+            description="Upload a PNG, JPEG, WebP, or GIF logo (or link an https:// image URL) shown across Rig web & desktop."
+          >
+            <ImagePicker
+              currentUrl={data?.me?.org.logo_url}
+              onUpload={async (contentType, dataBase64) => {
+                await desktopApi.uploadOrgLogo(server.id, {
+                  content_type: contentType,
+                  data_base64: dataBase64,
+                })
+                toast.success('Uploaded organization logo')
+                void settingsQuery.refetch()
+              }}
+              onSelectUrl={async (url) => {
+                await desktopApi.updateOrganization(server.id, { logo_url: url })
+                toast.success('Updated organization logo URL')
+                void settingsQuery.refetch()
+              }}
+              onReset={async () => {
+                await desktopApi.deleteOrgLogo(server.id)
+                toast.success('Reset organization logo to default mark')
+                void settingsQuery.refetch()
+              }}
+            />
           </Panel>
 
           <Panel
@@ -637,6 +753,26 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
         </div>
       )}
 
+      {/* ACCOUNT PROFILE, PASSWORD & 2FA */}
+      {tab === 'account' && (
+        <AccountSettingsPanel
+          serverId={server.id}
+          serverName={server.name}
+          me={data?.me}
+          onChanged={() => void settingsQuery.refetch()}
+        />
+      )}
+
+      {/* FULL SERVER SNAPSHOT BACKUP, REMINDERS & CROSS-SERVER RESTORE */}
+      {tab === 'backup' && (
+        <ServerSnapshotPanel
+          server={server}
+          servers={servers}
+          onServersChanged={onServersChanged}
+          onRefreshServer={onRefreshServer}
+        />
+      )}
+
       {/* GITHUB INTEGRATION */}
       {tab === 'github' && (
         <div className="space-y-5">
@@ -647,6 +783,7 @@ export function SettingsView({ server, onRemoveServer }: SettingsViewProps) {
             >
               <GithubConnectPanel
                 serverId={server.id}
+                serverUrl={server.url}
                 onConnected={(status) => {
                   qc.setQueryData(['desktop', server.id, 'github-status'], status)
                   void settingsQuery.refetch()

@@ -31,6 +31,86 @@ pub struct CachedServerSnapshot {
     pub cached_at: Option<String>,
 }
 
+fn default_reminder_interval_days() -> u32 {
+    7
+}
+
+/// Per-server periodic snapshot backup reminder configuration & state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupReminder {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_reminder_interval_days")]
+    pub interval_days: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_snapshot_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_notified_at: Option<String>,
+}
+
+impl Default for BackupReminder {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_days: default_reminder_interval_days(),
+            last_snapshot_at: None,
+            last_snapshot_path: None,
+            last_snapshot_bytes: None,
+            snoozed_until: None,
+            last_notified_at: None,
+        }
+    }
+}
+
+impl BackupReminder {
+    /// Returns true if the periodic reminder is enabled, not currently snoozed,
+    /// and either no snapshot has been downloaded yet or `interval_days` have elapsed.
+    pub fn is_due(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if let Some(snoozed) = self
+            .snoozed_until
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            && snoozed.with_timezone(&chrono::Utc) > now
+        {
+            return false;
+        }
+        let Some(last) = self
+            .last_snapshot_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        else {
+            return true;
+        };
+        let days = self.interval_days.clamp(1, 365) as i64;
+        now >= last.with_timezone(&chrono::Utc) + chrono::Duration::days(days)
+    }
+
+    /// Returns true if a native OS notification should be sent now (throttled to at most once every 12h).
+    pub fn should_notify(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if !self.is_due(now) {
+            return false;
+        }
+        if let Some(last_n) = self
+            .last_notified_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            && now < last_n.with_timezone(&chrono::Utc) + chrono::Duration::hours(12)
+        {
+            return false;
+        }
+        true
+    }
+}
+
 /// One paired Rig server entry in the left switcher rail.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerEntry {
@@ -54,6 +134,9 @@ pub struct ServerEntry {
     /// Last known read-only state for instant switch (< 100ms) and offline view.
     #[serde(default)]
     pub cache: CachedServerSnapshot,
+    /// Periodic full-server snapshot backup reminder configuration & history.
+    #[serde(default)]
+    pub backup_reminder: BackupReminder,
     pub created_at: String,
 }
 
@@ -215,6 +298,70 @@ impl ServerRegistry {
         self.save()?;
         Ok(Some(cloned))
     }
+
+    pub fn update_backup_reminder(
+        &mut self,
+        id: &str,
+        enabled: bool,
+        interval_days: u32,
+    ) -> Result<Option<BackupReminder>> {
+        let Some(s) = self.get_mut(id) else {
+            return Ok(None);
+        };
+        s.backup_reminder.enabled = enabled;
+        s.backup_reminder.interval_days = interval_days.clamp(1, 365);
+        if !enabled {
+            s.backup_reminder.snoozed_until = None;
+        }
+        let reminder = s.backup_reminder.clone();
+        self.save()?;
+        Ok(Some(reminder))
+    }
+
+    pub fn record_snapshot_download(
+        &mut self,
+        id: &str,
+        path: String,
+        bytes: u64,
+    ) -> Result<Option<BackupReminder>> {
+        let Some(s) = self.get_mut(id) else {
+            return Ok(None);
+        };
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        s.backup_reminder.last_snapshot_at = Some(ts);
+        s.backup_reminder.last_snapshot_path = Some(path);
+        s.backup_reminder.last_snapshot_bytes = Some(bytes);
+        s.backup_reminder.snoozed_until = None;
+        s.backup_reminder.last_notified_at = None;
+        let reminder = s.backup_reminder.clone();
+        self.save()?;
+        Ok(Some(reminder))
+    }
+
+    pub fn snooze_backup_reminder(
+        &mut self,
+        id: &str,
+        hours: u32,
+    ) -> Result<Option<BackupReminder>> {
+        let Some(s) = self.get_mut(id) else {
+            return Ok(None);
+        };
+        let until = chrono::Utc::now() + chrono::Duration::hours(hours.clamp(1, 720) as i64);
+        s.backup_reminder.snoozed_until =
+            Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        let reminder = s.backup_reminder.clone();
+        self.save()?;
+        Ok(Some(reminder))
+    }
+
+    pub fn mark_reminder_notified(&mut self, id: &str) -> Result<()> {
+        if let Some(s) = self.get_mut(id) {
+            s.backup_reminder.last_notified_at =
+                Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            self.save()?;
+        }
+        Ok(())
+    }
 }
 
 fn tmp_path(path: &Path) -> PathBuf {
@@ -238,6 +385,7 @@ mod tests {
             org_name: Some("Acme".into()),
             meta: None,
             cache: CachedServerSnapshot::default(),
+            backup_reminder: BackupReminder::default(),
             created_at: "2026-11-24T00:00:00Z".into(),
         }
     }
@@ -256,5 +404,35 @@ mod tests {
         let reloaded = ServerRegistry::load(path).unwrap();
         let ids: Vec<&str> = reloaded.list().iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["s3", "s1", "s2"]);
+    }
+
+    #[test]
+    fn backup_reminder_due_and_snooze_logic() {
+        let now = chrono::Utc::now();
+        let mut rem = BackupReminder::default();
+        assert!(!rem.is_due(now));
+
+        rem.enabled = true;
+        rem.interval_days = 7;
+        assert!(rem.is_due(now));
+        assert!(rem.should_notify(now));
+
+        // After snapshot just now, not due.
+        rem.last_snapshot_at = Some(now.to_rfc3339());
+        assert!(!rem.is_due(now));
+
+        // 8 days ago -> due again.
+        rem.last_snapshot_at = Some((now - chrono::Duration::days(8)).to_rfc3339());
+        assert!(rem.is_due(now));
+
+        // Snoozed for 24h -> not due.
+        rem.snoozed_until = Some((now + chrono::Duration::hours(24)).to_rfc3339());
+        assert!(!rem.is_due(now));
+
+        // Snooze expired, but notified 2h ago -> due for UI banner, throttled for OS notification.
+        rem.snoozed_until = None;
+        rem.last_notified_at = Some((now - chrono::Duration::hours(2)).to_rfc3339());
+        assert!(rem.is_due(now));
+        assert!(!rem.should_notify(now));
     }
 }

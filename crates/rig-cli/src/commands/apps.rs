@@ -208,6 +208,7 @@ pub async fn run(api: &Client, args: AppsArgs, out: OutputOpts) -> CliResult<()>
                 cpu_millis: cpu,
                 health_path: health,
                 auto_deploy,
+                volumes: None,
             };
             let updated = api.update_app(&existing.id, &req).await?;
             if out.is_structured() {

@@ -6,13 +6,16 @@ import {
   FolderGit2,
   GitBranch,
   Globe,
+  HardDrive,
   Link2,
   Lock,
   Package,
+  Plus,
   RefreshCw,
   Rocket,
   Search,
   ShieldCheck,
+  X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { toast } from 'sonner'
@@ -49,6 +52,7 @@ import { cn } from '@rig/ui/lib/utils'
 interface DeployModalProps {
   open: boolean
   serverId: string
+  serverUrl?: string
   projects: Project[]
   initialLocalPath?: string | null
   initialName?: string | null
@@ -71,6 +75,7 @@ function keepComboboxEnter(e: KeyboardEvent<HTMLFormElement>) {
 export function DeployModal({
   open,
   serverId,
+  serverUrl,
   projects,
   initialLocalPath,
   initialName,
@@ -85,6 +90,9 @@ export function DeployModal({
   const [nameTouched, setNameTouched] = useState(false)
   const [port, setPort] = useState(3000)
   const [memoryMb, setMemoryMb] = useState(512)
+  const [cpuCores, setCpuCores] = useState('')
+  const [volumes, setVolumes] = useState<string[]>([])
+  const [volumeInput, setVolumeInput] = useState('')
   const [dockerfilePath, setDockerfilePath] = useState('Dockerfile')
 
   // GitHub connected account state
@@ -135,6 +143,9 @@ export function DeployModal({
     setSelectedRepo(null)
     setGithubBranch('')
     setAutoDeploy(true)
+    setCpuCores('')
+    setVolumes([])
+    setVolumeInput('')
     setNameTouched(false)
     if (initialLocalPath) {
       setSourceMode('local')
@@ -267,6 +278,10 @@ export function DeployModal({
             ? gitBranch.trim() || 'main'
             : null
 
+      const parsedCpu = cpuCores.trim() ? Number(cpuCores) : NaN
+      const cpuMillis =
+        Number.isFinite(parsedCpu) && parsedCpu > 0 ? Math.round(parsedCpu * 1000) : null
+
       let created = await desktopApi.createApp(serverId, {
         project_id: targetProjectId,
         name: appName.trim(),
@@ -277,6 +292,8 @@ export function DeployModal({
         dockerfile_path: sourceMode === 'image' ? null : dockerfilePath.trim() || 'Dockerfile',
         port: Number(port) || 3000,
         memory_mb: Number(memoryMb) || 512,
+        cpu_millis: cpuMillis,
+        volumes: volumes.length > 0 ? volumes : undefined,
       })
 
       if (sourceMode === 'github' && autoDeploy) {
@@ -392,6 +409,7 @@ export function DeployModal({
               ) : !ghApp ? (
                 <GithubConnectPanel
                   serverId={serverId}
+                  serverUrl={serverUrl}
                   compact
                   onConnected={(status) => {
                     qc.setQueryData(['desktop', serverId, 'github-status'], status)
@@ -829,7 +847,7 @@ export function DeployModal({
                 </Field>
               )}
 
-              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-4">
                 <Field>
                   <FieldLabel htmlFor="deploy-port">Container Port</FieldLabel>
                   <Input
@@ -843,7 +861,7 @@ export function DeployModal({
                   />
                 </Field>
                 <Field>
-                  <FieldLabel htmlFor="deploy-mem">Memory Limit (MB)</FieldLabel>
+                  <FieldLabel htmlFor="deploy-mem">Memory (MB)</FieldLabel>
                   <Input
                     id="deploy-mem"
                     type="number"
@@ -854,10 +872,24 @@ export function DeployModal({
                     className="font-mono"
                   />
                 </Field>
+                <Field>
+                  <FieldLabel htmlFor="deploy-cpu">CPU (cores)</FieldLabel>
+                  <Input
+                    id="deploy-cpu"
+                    type="number"
+                    step="0.25"
+                    min={0.1}
+                    max={64}
+                    value={cpuCores}
+                    onChange={(e) => setCpuCores(e.target.value)}
+                    placeholder="No limit"
+                    className="font-mono"
+                  />
+                </Field>
                 {sourceMode !== 'image' && (
                   <Field>
                     <FieldLabel htmlFor="deploy-dockerfile">
-                      Dockerfile <span className="opacity-70">(empty = auto)</span>
+                      Dockerfile <span className="opacity-70">(auto)</span>
                     </FieldLabel>
                     <Input
                       id="deploy-dockerfile"
@@ -870,6 +902,69 @@ export function DeployModal({
                   </Field>
                 )}
               </div>
+
+              <Field>
+                <FieldLabel htmlFor="deploy-vol">
+                  Persistent Volumes <span className="font-normal text-muted-foreground">(optional)</span>
+                </FieldLabel>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="deploy-vol"
+                    type="text"
+                    value={volumeInput}
+                    onChange={(e) => setVolumeInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        const clean = volumeInput.trim()
+                        if (clean.startsWith('/') && !volumes.includes(clean)) {
+                          setVolumes((prev) => [...prev, clean])
+                          setVolumeInput('')
+                        }
+                      }
+                    }}
+                    placeholder="/data or /app/uploads"
+                    className="flex-1 font-mono"
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="compact"
+                    leadingIcon={Plus}
+                    disabled={!volumeInput.trim().startsWith('/')}
+                    onClick={() => {
+                      const clean = volumeInput.trim()
+                      if (clean.startsWith('/') && !volumes.includes(clean)) {
+                        setVolumes((prev) => [...prev, clean])
+                        setVolumeInput('')
+                      }
+                    }}
+                  >
+                    Add
+                  </Button>
+                </div>
+                {volumes.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {volumes.map((v) => (
+                      <span
+                        key={v}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-0.5 font-mono text-[12px] text-foreground"
+                      >
+                        <HardDrive className="size-3 text-primary" />
+                        {v}
+                        <button
+                          type="button"
+                          onClick={() => setVolumes((prev) => prev.filter((x) => x !== v))}
+                          aria-label={`Remove volume ${v}`}
+                          className="text-muted-foreground hover:text-fail"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </Field>
             </>
           )}
         </form>

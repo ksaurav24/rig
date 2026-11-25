@@ -16,25 +16,30 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::{Method, Response, StatusCode, header};
 use rig_api::{
     AddDomainRequest, AddMemberRequest, AdoptExecuteRequest, AdoptExecuteResult, AdoptPreview,
     AdoptPreviewRequest, AlertChannel, AlertTestResult, ApiToken, App, AppWebhook, AuditEntry,
-    Backup, BinaryDeployRequest, BulkSetEnvRequest, CheckBlobsRequest, CheckBlobsResponse,
-    CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest, CreateDatabaseRequest,
-    CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel, CreatedApiToken, Database,
-    DatabaseCredentials, DatabaseEngineInfo, Deployment, DeviceLoginRequest, DiscoveredContainer,
-    Domain, EnvVar, ErrorBody, ExchangePairingRequest, GithubBranch, GithubManifest,
-    GithubManifestComplete, GithubManifestRequest, GithubRepo, GithubStatus,
-    LocalImageDeployRequest, LocalSourceDeployRequest, Me, Member, MemberWithPassword, MetricRange,
-    MetricSeries, NetworkInfo, PairedDevice, PairingCode, Project, RevealedEnvVar, ServerEvent,
-    ServerMeta, SetEnvVarRequest, SetupRequest, SetupStatus, StoredBlob, StoredBlobBatch,
-    SystemInfo, UpdateAlertChannelRequest, UpdateAppRequest, UpdateMemberRequest,
-    UpdateOrganizationRequest, UpdateProjectRequest,
+    Backup, BinaryDeployRequest, BulkSetEnvRequest, ChangePasswordRequest, CheckBlobsRequest,
+    CheckBlobsResponse, CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest,
+    CreateDatabaseRequest, CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel,
+    CreatedApiToken, Database, DatabaseCredentials, DatabaseEngineInfo, Deployment,
+    DeviceLoginRequest, DiscoveredContainer, Domain, EnvVar, ErrorBody, ExchangePairingRequest,
+    GithubBranch, GithubManifest, GithubManifestComplete, GithubManifestRequest, GithubRepo,
+    GithubStatus, LocalImageDeployRequest, LocalSourceDeployRequest, Me, Member,
+    MemberWithPassword, MetricRange, MetricSeries, NetworkInfo, Organization, PairedDevice,
+    PairingCode, PasswordConfirm, Project, RecoveryCodes, RevealedEnvVar, ServerEvent, ServerMeta,
+    SetEnvVarRequest, SetupRequest, SetupStatus, SnapshotExportRequest, SnapshotInspectResult,
+    SnapshotRestoreOptions, SnapshotRestoreReport, StoredBlob, StoredBlobBatch, SystemInfo,
+    TotpCode, TotpDisable, TotpEnrollment, TotpStatus, UpdateAlertChannelRequest, UpdateAppRequest,
+    UpdateMemberRequest, UpdateOrganizationRequest, UpdateProfileRequest, UpdateProjectRequest,
+    UploadImageRequest, User,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::watch;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream, tungstenite};
+use tokio_util::io::ReaderStream;
 
 pub use error::{ClientError, ClientResult};
 pub use sse::{SseEvent, SseParser};
@@ -242,6 +247,12 @@ impl Client {
             .map(drop)
     }
 
+    pub async fn post_no_content<B: Serialize>(&self, path: &str, body: &B) -> ClientResult<()> {
+        self.send(Method::POST, path, Some(body), false, None)
+            .await
+            .map(drop)
+    }
+
     pub async fn patch<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -262,6 +273,10 @@ impl Client {
         self.send(Method::DELETE, path, None::<&()>, false, None)
             .await
             .map(drop)
+    }
+
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> ClientResult<T> {
+        decode(self.send(Method::DELETE, path, None::<&()>, false, None).await?).await
     }
 
     async fn send_bytes<T: DeserializeOwned>(
@@ -667,11 +682,275 @@ impl Client {
         self.get("/api/v1/auth/me").await
     }
 
+    pub async fn update_profile(&self, req: &UpdateProfileRequest) -> ClientResult<User> {
+        self.patch("/api/v1/account/profile", req).await
+    }
+
+    pub async fn upload_avatar(&self, req: &UploadImageRequest) -> ClientResult<User> {
+        self.post("/api/v1/account/avatar", Some(req)).await
+    }
+
+    pub async fn delete_avatar(&self) -> ClientResult<User> {
+        self.delete_json("/api/v1/account/avatar").await
+    }
+
+    pub async fn change_password(&self, req: &ChangePasswordRequest) -> ClientResult<()> {
+        self.post_no_content("/api/v1/auth/password", req).await
+    }
+
+    pub async fn totp_status(&self) -> ClientResult<TotpStatus> {
+        self.get("/api/v1/account/totp").await
+    }
+
+    pub async fn totp_setup(&self, req: &PasswordConfirm) -> ClientResult<TotpEnrollment> {
+        self.post("/api/v1/account/totp/setup", Some(req)).await
+    }
+
+    pub async fn totp_enable(&self, req: &TotpCode) -> ClientResult<RecoveryCodes> {
+        self.post("/api/v1/account/totp/enable", Some(req)).await
+    }
+
+    pub async fn totp_disable(&self, req: &TotpDisable) -> ClientResult<()> {
+        self.post_no_content("/api/v1/account/totp/disable", req)
+            .await
+    }
+
+    pub async fn totp_regenerate_recovery_codes(
+        &self,
+        req: &TotpDisable,
+    ) -> ClientResult<RecoveryCodes> {
+        self.post("/api/v1/account/totp/recovery-codes", Some(req))
+            .await
+    }
+
     pub async fn update_organization(
         &self,
         req: &UpdateOrganizationRequest,
-    ) -> ClientResult<rig_api::Organization> {
+    ) -> ClientResult<Organization> {
         self.patch("/api/v1/org", req).await
+    }
+
+    pub async fn upload_org_logo(&self, req: &UploadImageRequest) -> ClientResult<Organization> {
+        self.post("/api/v1/org/logo", Some(req)).await
+    }
+
+    pub async fn delete_org_logo(&self) -> ClientResult<Organization> {
+        self.delete_json("/api/v1/org/logo").await
+    }
+
+    /// Fetches a server-hosted uploaded media object (`/api/v1/media/{id}`)
+    /// with the client's bearer auth and pinned TLS config.
+    pub async fn fetch_media(&self, path: &str) -> ClientResult<(String, Vec<u8>)> {
+        let trimmed = path.trim();
+        let Some(id) = trimmed.strip_prefix("/api/v1/media/") else {
+            return Err(ClientError::message(
+                "media path must start with /api/v1/media/",
+            ));
+        };
+        if id.is_empty() || id.contains('/') || id.contains("..") {
+            return Err(ClientError::message("invalid media path"));
+        }
+        let res = self
+            .send(Method::GET, trimmed, None::<&()>, false, None)
+            .await?;
+        let content_type = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .split(';')
+            .next()
+            .unwrap_or("application/octet-stream")
+            .trim()
+            .to_string();
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|e| ClientError::network(format!("reading media: {}", e.without_url())))?;
+        Ok((content_type, bytes.to_vec()))
+    }
+
+    // --------------------------------------------------- portable snapshots
+
+    /// Exports a full portable snapshot of the server and streams it directly to `dest`.
+    /// Returns `(path, bytes_written, encrypted)`.
+    pub async fn export_snapshot(
+        &self,
+        req: &SnapshotExportRequest,
+        dest: Option<&Path>,
+    ) -> ClientResult<(std::path::PathBuf, u64, bool)> {
+        let started = Instant::now();
+        let path = "/api/v1/system/snapshot/export";
+        let url = format!("{}{path}", self.base);
+        let mut builder = self
+            .http
+            .post(&url)
+            .header(header::ACCEPT_ENCODING, "identity")
+            .timeout(Duration::from_secs(900))
+            .json(req);
+        if let Some(tok) = &self.token {
+            builder = builder.bearer_auth(tok);
+        }
+        let mut res = builder.send().await.map_err(|e| {
+            let is_net = e.is_connect() || e.is_timeout();
+            let clean = e.without_url();
+            if is_net {
+                ClientError::network(format!("snapshot export failed to reach {}: {clean}", self.base))
+            } else {
+                ClientError::from(clean)
+            }
+        })?;
+        if self.verbose {
+            eprintln!(
+                "rig: debug: POST {path} -> {} ({}ms)",
+                res.status().as_u16(),
+                started.elapsed().as_millis()
+            );
+        }
+        if let Some(ver) = res
+            .headers()
+            .get("x-rig-version")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.check_version_skew(ver);
+        }
+        if !res.status().is_success() {
+            return Err(map_error_response(res, &self.base).await);
+        }
+
+        let encrypted = res
+            .headers()
+            .get("x-rig-snapshot-encrypted")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
+        let out_path = match dest {
+            Some(p) => p.to_path_buf(),
+            None => {
+                let suggested = res
+                    .headers()
+                    .get(header::CONTENT_DISPOSITION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_content_disposition_filename)
+                    .unwrap_or_else(|| {
+                        if encrypted {
+                            "rig-snapshot.tar.zst.enc".to_string()
+                        } else {
+                            "rig-snapshot.tar.zst".to_string()
+                        }
+                    });
+                std::path::PathBuf::from(suggested)
+            }
+        };
+
+        if let Some(parent) = out_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let mut file = std::fs::File::create(&out_path)
+            .with_context(|| format!("creating {}", out_path.display()))?;
+        let mut total = 0u64;
+        while let Some(chunk) = res.chunk().await.map_err(|e| {
+            ClientError::network(format!("snapshot download interrupted: {}", e.without_url()))
+        })? {
+            std::io::Write::write_all(&mut file, &chunk)?;
+            total += chunk.len() as u64;
+        }
+        std::io::Write::flush(&mut file)?;
+        Ok((out_path, total, encrypted))
+    }
+
+    /// Streams a snapshot archive to the target server for dry-run inspection.
+    pub async fn inspect_snapshot(
+        &self,
+        archive_path: &Path,
+        passphrase: Option<&str>,
+    ) -> ClientResult<SnapshotInspectResult> {
+        let file = tokio::fs::File::open(archive_path)
+            .await
+            .with_context(|| format!("opening {}", archive_path.display()))?;
+        let meta = file.metadata().await.ok();
+        let stream = ReaderStream::new(file);
+        let url = format!("{}/api/v1/system/snapshot/inspect", self.base);
+        let mut req = self
+            .http
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .timeout(Duration::from_secs(300))
+            .body(reqwest::Body::wrap_stream(stream));
+        if let Some(m) = meta {
+            req = req.header(header::CONTENT_LENGTH, m.len());
+        }
+        if let Some(tok) = &self.token {
+            req = req.bearer_auth(tok);
+        }
+        if let Some(pw) = passphrase.filter(|s| !s.is_empty()) {
+            req = req.header("X-Rig-Snapshot-Passphrase", BASE64.encode(pw.as_bytes()));
+        }
+        let res = req.send().await.map_err(|e| {
+            let is_net = e.is_connect() || e.is_timeout();
+            let clean = e.without_url();
+            if is_net {
+                ClientError::network(format!(
+                    "could not reach {} while inspecting snapshot: {clean}",
+                    self.base
+                ))
+            } else {
+                ClientError::from(clean)
+            }
+        })?;
+        if res.status().is_success() {
+            return decode(res).await;
+        }
+        Err(map_error_response(res, &self.base).await)
+    }
+
+    /// Streams a snapshot archive to the target server and restores it according to `opts`.
+    pub async fn restore_snapshot(
+        &self,
+        archive_path: &Path,
+        passphrase: Option<&str>,
+        opts: &SnapshotRestoreOptions,
+    ) -> ClientResult<SnapshotRestoreReport> {
+        let file = tokio::fs::File::open(archive_path)
+            .await
+            .with_context(|| format!("opening {}", archive_path.display()))?;
+        let meta = file.metadata().await.ok();
+        let stream = ReaderStream::new(file);
+        let opts_json = serde_json::to_vec(opts)?;
+        let url = format!("{}/api/v1/system/snapshot/restore", self.base);
+        let mut req = self
+            .http
+            .post(&url)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header("X-Rig-Snapshot-Options", BASE64.encode(&opts_json))
+            .timeout(Duration::from_secs(900))
+            .body(reqwest::Body::wrap_stream(stream));
+        if let Some(m) = meta {
+            req = req.header(header::CONTENT_LENGTH, m.len());
+        }
+        if let Some(tok) = &self.token {
+            req = req.bearer_auth(tok);
+        }
+        if let Some(pw) = passphrase.filter(|s| !s.is_empty()) {
+            req = req.header("X-Rig-Snapshot-Passphrase", BASE64.encode(pw.as_bytes()));
+        }
+        let res = req.send().await.map_err(|e| {
+            let is_net = e.is_connect() || e.is_timeout();
+            let clean = e.without_url();
+            if is_net {
+                ClientError::network(format!(
+                    "could not reach {} while restoring snapshot: {clean}",
+                    self.base
+                ))
+            } else {
+                ClientError::from(clean)
+            }
+        })?;
+        if res.status().is_success() {
+            return decode(res).await;
+        }
+        Err(map_error_response(res, &self.base).await)
     }
 
     pub async fn system(&self) -> ClientResult<SystemInfo> {

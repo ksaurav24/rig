@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use rig_api::{
     Access, AddDomainRequest, AdoptExecuteRequest, AdoptPreviewRequest, App, CreateDatabaseRequest,
-    DatabaseEngine, MetricRange, SetEnvVarRequest, TlsMode,
+    DatabaseEngine, MetricRange, SetEnvVarRequest, SnapshotExportRequest, SnapshotRestoreMode,
+    SnapshotRestoreOptions, TlsMode,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
@@ -90,7 +91,7 @@ const fn write(
     }
 }
 
-pub static TOOLS: [Tool; 32] = [
+pub static TOOLS: [Tool; 35] = [
     read(
         "system_status",
         "Who you are signed in as, plus server version, container engine, proxy state, resource usage and app counts.",
@@ -574,6 +575,134 @@ pub static TOOLS: [Tool; 32] = [
                 kind: Kind::Str,
                 required: false,
                 about: "Optional Rig server context name or URL (`--node`).",
+            },
+        ],
+        true,
+    ),
+    write(
+        "export_server_snapshot",
+        "Download a full portable server snapshot archive (projects, apps, env vars, domains, volumes, optional database dumps, alerts, org branding) to a local file. Supports optional passphrase encryption (Argon2id + XChaCha20-Poly1305).",
+        &[
+            Param {
+                name: "out_file",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional destination file path on disk. Defaults to the server-suggested filename in the current working directory.",
+            },
+            Param {
+                name: "include_databases",
+                kind: Kind::Bool,
+                required: false,
+                about: "Include live dumps of managed databases (default true).",
+            },
+            Param {
+                name: "include_alerts",
+                kind: Kind::Bool,
+                required: false,
+                about: "Include alert channels and webhook configs (default true).",
+            },
+            Param {
+                name: "include_github",
+                kind: Kind::Bool,
+                required: false,
+                about: "Include the organization's GitHub App private key and installation (default false).",
+            },
+            Param {
+                name: "passphrase",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional passphrase to encrypt the snapshot archive.",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional Rig server context name or URL (`--node`).",
+            },
+        ],
+        false,
+    ),
+    read(
+        "inspect_server_snapshot",
+        "Dry-run inspect a local server snapshot archive against a target Rig server to preview projects, apps, databases, conflicts, and warnings without making changes.",
+        &[
+            Param {
+                name: "file",
+                kind: Kind::Str,
+                required: true,
+                about: "Local path to the `.rig-snapshot.tar.zst` or `.enc` archive.",
+            },
+            Param {
+                name: "passphrase",
+                kind: Kind::Str,
+                required: false,
+                about: "Passphrase if the snapshot archive is encrypted.",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional target Rig server context name or URL (`--node`).",
+            },
+        ],
+    ),
+    write(
+        "restore_server_snapshot",
+        "Restore a portable server snapshot archive onto any target Rig server, re-encrypting all secrets under the target server's vault key. Always inspect first with `inspect_server_snapshot`.",
+        &[
+            Param {
+                name: "file",
+                kind: Kind::Str,
+                required: true,
+                about: "Local path to the `.rig-snapshot.tar.zst` or `.enc` archive.",
+            },
+            Param {
+                name: "mode",
+                kind: Kind::Str,
+                required: false,
+                about: "Restore strategy: `merge` (default, skips conflicting names) or `replace` (overwrites existing projects/apps/databases).",
+            },
+            Param {
+                name: "passphrase",
+                kind: Kind::Str,
+                required: false,
+                about: "Passphrase if the snapshot archive is encrypted.",
+            },
+            Param {
+                name: "restore_org",
+                kind: Kind::Bool,
+                required: false,
+                about: "Restore organization name, branding, and logo (default true).",
+            },
+            Param {
+                name: "restore_databases",
+                kind: Kind::Bool,
+                required: false,
+                about: "Provision databases and restore included database dumps (default true).",
+            },
+            Param {
+                name: "restore_alerts",
+                kind: Kind::Bool,
+                required: false,
+                about: "Restore alert channels (default true).",
+            },
+            Param {
+                name: "restore_github",
+                kind: Kind::Bool,
+                required: false,
+                about: "Restore GitHub App credentials if present in snapshot (default true).",
+            },
+            Param {
+                name: "deploy_apps",
+                kind: Kind::Bool,
+                required: false,
+                about: "Queue deployments for previously running image/git apps (default true).",
+            },
+            Param {
+                name: "node",
+                kind: Kind::Str,
+                required: false,
+                about: "Optional target Rig server context name or URL (`--node`).",
             },
         ],
         true,
@@ -1106,6 +1235,66 @@ pub async fn run(
                 })
                 .await?;
             serde_json::to_value(res)?
+        }
+        "export_server_snapshot" => {
+            let dest = text(args, "out_file")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
+            let req = SnapshotExportRequest {
+                include_database_dumps: flag(args, "include_databases", true),
+                include_alerts: flag(args, "include_alerts", true),
+                include_github: flag(args, "include_github", false),
+                passphrase: text(args, "passphrase")
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            };
+            let (path, written, encrypted) =
+                api.export_snapshot(&req, dest.as_deref()).await?;
+            json!({
+                "server": api.base(),
+                "path": path.display().to_string(),
+                "bytes": written,
+                "encrypted": encrypted,
+            })
+        }
+        "inspect_server_snapshot" => {
+            let file = std::path::PathBuf::from(text(args, "file").unwrap_or_default());
+            let preview = api
+                .inspect_snapshot(&file, text(args, "passphrase").filter(|s| !s.is_empty()))
+                .await?;
+            serde_json::to_value(preview)?
+        }
+        "restore_server_snapshot" => {
+            let file = std::path::PathBuf::from(text(args, "file").unwrap_or_default());
+            let mode = match text(args, "mode")
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                None | Some("") | Some("merge") => SnapshotRestoreMode::Merge,
+                Some("replace") => SnapshotRestoreMode::Replace,
+                Some(other) => {
+                    return Err(CliError::message(format!(
+                        "invalid mode `{other}`; use `merge` or `replace`"
+                    )));
+                }
+            };
+            let opts = SnapshotRestoreOptions {
+                mode,
+                restore_branding: flag(args, "restore_org", true),
+                restore_alerts: flag(args, "restore_alerts", true),
+                restore_github: flag(args, "restore_github", false),
+                start_databases: flag(args, "restore_databases", true),
+                deploy_running_apps: flag(args, "deploy_apps", true),
+            };
+            let report = api
+                .restore_snapshot(
+                    &file,
+                    text(args, "passphrase").filter(|s| !s.is_empty()),
+                    &opts,
+                )
+                .await?;
+            serde_json::to_value(report)?
         }
         other => return Err(CliError::message(format!("unknown tool: {other}"))),
     };

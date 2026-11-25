@@ -8,16 +8,20 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rig_api::{
-    AddDomainRequest, AddMemberRequest, AlertChannel, AlertTestResult, ApiToken, App, AuditEntry,
-    Backup, CreateAlertChannelRequest, CreateApiTokenRequest, CreateAppRequest,
-    CreateDatabaseRequest, CreatePairingRequest, CreateProjectRequest, CreatedAlertChannel,
-    CreatedApiToken, Database, DatabaseCredentials, DatabaseEngineInfo, Deployment,
-    DeviceLoginRequest, Domain, EnvVar, ExchangePairingRequest, GithubBranch, GithubRepo,
-    GithubStatus, LogLine, Me, Member, MemberWithPassword, NetworkInfo, Organization, PairingCode,
-    Project, RevealedEnvVar, ServerEvent, ServerMeta, SetEnvVarRequest, SetupRequest, SetupStatus,
-    SystemInfo, UpdateAppRequest, UpdateMemberRequest, UpdateOrganizationRequest,
-    UpdateProjectRequest,
+    AddDomainRequest, AddMemberRequest, AlertChannel, AlertTestResult, ApiToken, App, AppWebhook,
+    AuditEntry, Backup, ChangePasswordRequest, CreateAlertChannelRequest, CreateApiTokenRequest,
+    CreateAppRequest, CreateDatabaseRequest, CreatePairingRequest, CreateProjectRequest,
+    CreatedAlertChannel, CreatedApiToken, Database, DatabaseCredentials, DatabaseEngineInfo,
+    Deployment, DeviceLoginRequest, Domain, EnvVar, ExchangePairingRequest, GithubBranch,
+    GithubRepo, GithubStatus, LogLine, Me, Member, MemberWithPassword, MetricRange, MetricSeries,
+    NetworkInfo, Organization, PairingCode, PasswordConfirm, Project, RecoveryCodes,
+    RevealedEnvVar, ServerEvent, ServerMeta, SetEnvVarRequest, SetupRequest, SetupStatus,
+    SnapshotExportRequest, SnapshotInspectResult, SnapshotRestoreOptions, SnapshotRestoreReport,
+    SystemInfo, TotpCode, TotpDisable, TotpEnrollment, TotpStatus, UpdateAppRequest,
+    UpdateMemberRequest, UpdateOrganizationRequest, UpdateProfileRequest, UpdateProjectRequest,
+    UploadImageRequest, User,
 };
 use rig_client::{AppLogQuery, Client, ClientError, ClientOptions, MIN_API_VERSION, TlsProbe};
 use serde::{Deserialize, Serialize};
@@ -34,7 +38,9 @@ use crate::log_engine::{
     FRAME_FLUSH_INTERVAL, LogBufferStats, LogChannelFrame, LogEngine, LogQueryResult,
     MAX_LINES_PER_BATCH,
 };
-use crate::registry::{CachedServerSnapshot, ServerEntry, ServerHealth, ServerRegistry};
+use crate::registry::{
+    BackupReminder, CachedServerSnapshot, ServerEntry, ServerHealth, ServerRegistry,
+};
 use crate::terminal::{TerminalFrame, TerminalManager};
 use tokio::sync::RwLock;
 
@@ -61,7 +67,22 @@ pub struct ServerView {
     pub health: ServerHealth,
     pub health_error: Option<String>,
     pub cache: CachedServerSnapshot,
+    pub backup_reminder: BackupReminder,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadedFile {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotExportResult {
+    pub path: String,
+    pub bytes: u64,
+    pub encrypted: bool,
+    pub reminder: BackupReminder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +252,7 @@ pub async fn list_servers(state: State<'_, DesktopState>) -> Result<ServersState
                 health: h,
                 health_error: err,
                 cache: s.cache.clone(),
+                backup_reminder: s.backup_reminder.clone(),
                 created_at: s.created_at.clone(),
             }
         })
@@ -512,6 +534,7 @@ async fn finish_add_server(
         org_name: Some(paired.org.name),
         meta: None,
         cache: CachedServerSnapshot::default(),
+        backup_reminder: BackupReminder::default(),
         created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     };
 
@@ -545,6 +568,7 @@ async fn finish_add_server(
         health: ServerHealth::Connecting,
         health_error: None,
         cache: entry.cache,
+        backup_reminder: entry.backup_reminder,
         created_at: entry.created_at,
     })
 }
@@ -627,6 +651,7 @@ pub async fn update_server(
         health,
         health_error,
         cache: updated.cache,
+        backup_reminder: updated.backup_reminder,
         created_at: updated.created_at,
     })
 }
@@ -753,10 +778,16 @@ pub async fn delete_project(
     state: State<'_, DesktopState>,
     server_id: String,
     project_id: String,
+    databases_action: Option<String>,
+    target_project_id: Option<String>,
 ) -> Result<(), String> {
     let (_, client) = client_for_server(&state, &server_id).await?;
     client
-        .delete_project(&project_id, Some("delete"), None)
+        .delete_project(
+            &project_id,
+            databases_action.as_deref().or(Some("delete")),
+            target_project_id.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())
 }
@@ -1920,4 +1951,339 @@ pub async fn close_terminal(
 ) -> Result<(), String> {
     state.terminals.close(&session_id).await;
     Ok(())
+}
+
+// ------------------------------------------------ metrics, webhooks & downloads
+
+#[tauri::command]
+pub async fn get_metrics(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    target_kind: String,
+    target_id: Option<String>,
+    range: MetricRange,
+) -> Result<MetricSeries, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    match target_kind.as_str() {
+        "host" => client.host_metrics(range).await.map_err(|e| e.to_string()),
+        "app" => {
+            let id = target_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "target_id is required for app metrics".to_string())?;
+            client.app_metrics(id, range).await.map_err(|e| e.to_string())
+        }
+        "database" => {
+            let id = target_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "target_id is required for database metrics".to_string())?;
+            client
+                .database_metrics(id, range)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!("unknown metrics target kind: {other}")),
+    }
+}
+
+#[tauri::command]
+pub async fn get_app_webhook(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    app_id: String,
+) -> Result<AppWebhook, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.get_webhook(&app_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn rotate_app_webhook(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    app_id: String,
+) -> Result<AppWebhook, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .rotate_webhook(&app_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn download_backup(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    backup_id: String,
+    dest_path: String,
+) -> Result<DownloadedFile, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let dest = std::path::PathBuf::from(dest_path.trim());
+    if dest.as_os_str().is_empty() {
+        return Err("destination path is required".into());
+    }
+    let (saved, bytes) = client
+        .download_backup(&backup_id, Some(&dest))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(DownloadedFile {
+        path: saved.display().to_string(),
+        bytes,
+    })
+}
+
+// ------------------------------------------ org logo, media proxy & account
+
+#[tauri::command]
+pub async fn upload_org_logo(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: UploadImageRequest,
+) -> Result<Organization, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .upload_org_logo(&req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_org_logo(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<Organization, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.delete_org_logo().await.map_err(|e| e.to_string())
+}
+
+/// Fetches a server-hosted `/api/v1/media/{id}` asset through `rig-client`
+/// (honoring auth & TLS pinning) and returns a `data:<ct>;base64,...` URL
+/// safe to render under Rig Desktop's strict CSP.
+#[tauri::command]
+pub async fn fetch_media_data_url(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    path: String,
+) -> Result<String, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let (ct, bytes) = client
+        .fetch_media(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!("data:{ct};base64,{}", BASE64.encode(bytes)))
+}
+
+#[tauri::command]
+pub async fn update_profile(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: UpdateProfileRequest,
+) -> Result<User, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.update_profile(&req).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn upload_avatar(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: UploadImageRequest,
+) -> Result<User, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.upload_avatar(&req).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_avatar(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<User, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.delete_avatar().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn change_password(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: ChangePasswordRequest,
+) -> Result<(), String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .change_password(&req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_totp_status(
+    state: State<'_, DesktopState>,
+    server_id: String,
+) -> Result<TotpStatus, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client.totp_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn totp_setup(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    password: String,
+) -> Result<TotpEnrollment, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .totp_setup(&PasswordConfirm { password })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn totp_enable(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    code: String,
+) -> Result<RecoveryCodes, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .totp_enable(&TotpCode { code })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn totp_disable(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    password: String,
+    code: String,
+) -> Result<(), String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .totp_disable(&TotpDisable { password, code })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn totp_regenerate_recovery_codes(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    password: String,
+    code: String,
+) -> Result<RecoveryCodes, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    client
+        .totp_regenerate_recovery_codes(&TotpDisable { password, code })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_text_file(path: String, content: String) -> Result<u64, String> {
+    let p = std::path::PathBuf::from(path.trim());
+    if p.as_os_str().is_empty() {
+        return Err("destination path is required".into());
+    }
+    let bytes = content.into_bytes();
+    let len = bytes.len() as u64;
+    tokio::fs::write(&p, bytes)
+        .await
+        .map_err(|e| format!("saving {}: {e}", p.display()))?;
+    Ok(len)
+}
+
+// -------------------------------------- full server snapshots & reminders
+
+#[tauri::command]
+pub async fn export_server_snapshot(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    req: SnapshotExportRequest,
+    dest_path: String,
+) -> Result<SnapshotExportResult, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let dest = std::path::PathBuf::from(dest_path.trim());
+    if dest.as_os_str().is_empty() {
+        return Err("destination path is required".into());
+    }
+    let (saved, bytes, encrypted) = client
+        .export_snapshot(&req, Some(&dest))
+        .await
+        .map_err(|e| e.to_string())?;
+    let saved_str = saved.display().to_string();
+    let reminder = state
+        .registry
+        .write()
+        .await
+        .record_snapshot_download(&server_id, saved_str.clone(), bytes)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    Ok(SnapshotExportResult {
+        path: saved_str,
+        bytes,
+        encrypted,
+        reminder,
+    })
+}
+
+#[tauri::command]
+pub async fn inspect_server_snapshot(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    archive_path: String,
+    passphrase: Option<String>,
+) -> Result<SnapshotInspectResult, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let path = std::path::PathBuf::from(archive_path.trim());
+    client
+        .inspect_snapshot(&path, passphrase.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_server_snapshot(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    archive_path: String,
+    passphrase: Option<String>,
+    options: SnapshotRestoreOptions,
+) -> Result<SnapshotRestoreReport, String> {
+    let (_, client) = client_for_server(&state, &server_id).await?;
+    let path = std::path::PathBuf::from(archive_path.trim());
+    client
+        .restore_snapshot(&path, passphrase.as_deref(), &options)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_backup_reminder(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    enabled: bool,
+    interval_days: u32,
+) -> Result<BackupReminder, String> {
+    state
+        .registry
+        .write()
+        .await
+        .update_backup_reminder(&server_id, enabled, interval_days)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Server not found".to_string())
+}
+
+#[tauri::command]
+pub async fn snooze_backup_reminder(
+    state: State<'_, DesktopState>,
+    server_id: String,
+    hours: u32,
+) -> Result<BackupReminder, String> {
+    state
+        .registry
+        .write()
+        .await
+        .snooze_backup_reminder(&server_id, hours)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Server not found".to_string())
 }

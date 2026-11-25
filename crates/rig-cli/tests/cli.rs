@@ -1109,7 +1109,7 @@ async fn mcp_starts_unauthenticated_and_runs_concurrent_with_cancel_and_progress
         .collect();
     assert_eq!(replies.len(), 3);
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "rig");
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 32);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 35);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(
         replies[2]["result"]["content"][0]["text"]

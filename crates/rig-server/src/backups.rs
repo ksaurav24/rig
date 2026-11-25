@@ -401,6 +401,75 @@ pub async fn restore(state: &AppState, database_id: &str, path: &Path) -> Result
     Ok(())
 }
 
+/// Dump a running managed database directly into a plaintext file on disk for
+/// inclusion inside a portable server snapshot archive. Returns `(extension, bytes_written)`.
+pub async fn dump_plaintext_to_file(
+    state: &AppState,
+    database_id: &str,
+    dest_dir: &Path,
+    filename_stem: &str,
+) -> Result<(PathBuf, &'static str, u64)> {
+    let t = target(state, database_id).await?;
+    let tools = tooling(t.engine, &t.username, &t.password, &t.db_name);
+    let path = dest_dir.join(format!("{filename_stem}.{}", tools.extension));
+    let file = create_private_file(&path).await?;
+    let outcome = state
+        .runtime
+        .exec(&t.container_id, tools.dump, tools.env, None, Box::pin(file))
+        .await;
+    let outcome = match outcome {
+        Ok(o) if o.success() => o,
+        Ok(o) => {
+            fs::remove_file(&path).await.ok();
+            return Err(failure("the dump", &o));
+        }
+        Err(e) => {
+            fs::remove_file(&path).await.ok();
+            return Err(e);
+        }
+    };
+    drop(outcome);
+    let meta = fs::metadata(&path)
+        .await
+        .context("reading snapshot database dump size")?;
+    if meta.len() == 0 {
+        fs::remove_file(&path).await.ok();
+        bail!("the dump came back empty");
+    }
+    Ok((path, tools.extension, meta.len()))
+}
+
+/// Restore a plaintext dump file (extracted from a portable server snapshot) into
+/// a running managed database container.
+pub async fn restore_plaintext_from_file(
+    state: &AppState,
+    database_id: &str,
+    path: &Path,
+) -> Result<()> {
+    let t = target(state, database_id).await?;
+    let tools = tooling(t.engine, &t.username, &t.password, &t.db_name);
+    let Some(cmd) = tools.restore else {
+        bail!("this engine cannot be restored in place yet");
+    };
+    let file = fs::File::open(path)
+        .await
+        .with_context(|| format!("opening snapshot dump {}", path.display()))?;
+    let outcome = state
+        .runtime
+        .exec(
+            &t.container_id,
+            cmd,
+            tools.env,
+            Some(Box::pin(file)),
+            Box::pin(tokio::io::sink()),
+        )
+        .await?;
+    if !outcome.success() {
+        return Err(failure("the restore", &outcome));
+    }
+    Ok(())
+}
+
 /// Forget every backup file of a database. The rows go with the database.
 pub async fn remove_all(state: &AppState, database_id: &str) {
     let dir = dir(state, database_id);

@@ -758,8 +758,11 @@ async fn update_app(
         Some(v) => v,
         None => app.auto_deploy,
     };
+    let next_volumes = req.volumes.as_deref().map(validate_volumes).transpose()?;
 
     // The slug is kept: it names containers and images that already exist.
+    let at = now();
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE apps SET name = ?, image = ?, git_url = ?, git_branch = ?, dockerfile_path = ?, port = ?,
                 memory_mb = ?, cpu_millis = ?, health_path = ?, auto_deploy = ?, updated_at = ?
@@ -775,11 +778,45 @@ async fn update_app(
     .bind(cpu_millis.map(i64::from))
     .bind(&health_path)
     .bind(auto_deploy)
-    .bind(now())
+    .bind(&at)
     .bind(&id)
     .bind(&auth.org_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    if let Some(paths) = next_volumes {
+        let existing: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, mount_path FROM app_volumes WHERE app_id = ? AND kind = 'volume'",
+        )
+        .bind(&id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (vol_id, mount_path) in &existing {
+            if !paths.iter().any(|p| p == mount_path) {
+                sqlx::query("DELETE FROM app_volumes WHERE id = ?")
+                    .bind(vol_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for path in &paths {
+            if !existing.iter().any(|(_, mp)| mp == path) {
+                let volume_id = new_id();
+                sqlx::query(
+                    "INSERT INTO app_volumes (id, app_id, name, mount_path, created_at) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&volume_id)
+                .bind(&id)
+                .bind(format!("rig-app-{volume_id}"))
+                .bind(path)
+                .bind(&at)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+
+    tx.commit().await?;
     auth.audit(&state, "app.update", Some(&id), Some(&name))
         .await?;
     Ok(Json(load_app(&state, &auth.org_id, &id).await?))

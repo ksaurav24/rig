@@ -45,6 +45,7 @@ const CAPABILITIES: &[&str] = &[
     "local_deploy",
     "terminal_ws",
     "env_bulk",
+    "server_snapshot",
 ];
 
 pub fn router() -> OpenApiRouter<AppState> {

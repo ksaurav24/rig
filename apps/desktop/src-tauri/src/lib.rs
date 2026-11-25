@@ -22,10 +22,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tauri::{
-    Manager,
+    Emitter, Manager,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::RwLock;
 
 use crate::commands::DesktopState;
@@ -120,6 +121,8 @@ pub fn run() {
 
             // Start lightweight /api/v1/events SSE watchers for every paired server.
             let handle = app.handle().clone();
+            let reminder_handle = app.handle().clone();
+            let reminder_registry = Arc::clone(&boot_registry);
             tauri::async_runtime::spawn(async move {
                 for entry in initial_servers {
                     boot_connections
@@ -130,6 +133,61 @@ pub fn run() {
                             Arc::clone(&boot_registry),
                         )
                         .await;
+                }
+            });
+
+            // Periodic snapshot backup reminder ticker: checks shortly after startup, then every 15 minutes.
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    let now = chrono::Utc::now();
+                    let due_servers: Vec<(String, String, u32, Option<String>)> = {
+                        let reg = reminder_registry.read().await;
+                        reg.list()
+                            .iter()
+                            .filter(|s| s.backup_reminder.should_notify(now))
+                            .map(|s| {
+                                (
+                                    s.id.clone(),
+                                    s.name.clone(),
+                                    s.backup_reminder.interval_days,
+                                    s.backup_reminder.last_snapshot_at.clone(),
+                                )
+                            })
+                            .collect()
+                    };
+                    for (server_id, server_name, interval_days, last_snapshot_at) in due_servers {
+                        let body = match &last_snapshot_at {
+                            Some(_) => format!(
+                                "It has been more than {interval_days} day(s) since your last snapshot backup of {server_name}."
+                            ),
+                            None => format!(
+                                "Time to download your first full snapshot backup of {server_name}."
+                            ),
+                        };
+                        let _ = reminder_handle
+                            .notification()
+                            .builder()
+                            .title(format!("Rig Backup Reminder · {server_name}"))
+                            .body(&body)
+                            .show();
+                        let _ = reminder_handle.emit(
+                            "rig://backup-reminder-due",
+                            serde_json::json!({
+                                "server_id": server_id,
+                                "server_name": server_name,
+                                "interval_days": interval_days,
+                                "last_snapshot_at": last_snapshot_at,
+                            }),
+                        );
+                        let _ = reminder_registry
+                            .write()
+                            .await
+                            .mark_reminder_notified(&server_id);
+                    }
                 }
             });
 
@@ -207,6 +265,28 @@ pub fn run() {
             commands::write_terminal,
             commands::resize_terminal,
             commands::close_terminal,
+            commands::get_metrics,
+            commands::get_app_webhook,
+            commands::rotate_app_webhook,
+            commands::download_backup,
+            commands::upload_org_logo,
+            commands::delete_org_logo,
+            commands::fetch_media_data_url,
+            commands::update_profile,
+            commands::upload_avatar,
+            commands::delete_avatar,
+            commands::change_password,
+            commands::get_totp_status,
+            commands::totp_setup,
+            commands::totp_enable,
+            commands::totp_disable,
+            commands::totp_regenerate_recovery_codes,
+            commands::save_text_file,
+            commands::export_server_snapshot,
+            commands::inspect_server_snapshot,
+            commands::restore_server_snapshot,
+            commands::set_backup_reminder,
+            commands::snooze_backup_reminder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Rig Desktop");

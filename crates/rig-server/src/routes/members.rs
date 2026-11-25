@@ -409,8 +409,9 @@ async fn change_password(
     jar: CookieJar,
     Json(req): Json<ChangePasswordRequest>,
 ) -> ApiResult<(CookieJar, HeaderMap, StatusCode)> {
-    // A leaked API token must not be able to take over the account.
-    auth.require_session("sign in to the dashboard to change your password")?;
+    // A leaked non-interactive API/CI token must not be able to take over the account;
+    // paired Rig Desktop / mobile device tokens are allowed alongside browser sessions.
+    auth.require_interactive("sign in to the dashboard or Rig Desktop to change your password")?;
     validate_password(&req.new_password)?;
     if req.new_password == req.current_password {
         return Err(ApiError::validation(
@@ -446,26 +447,35 @@ async fn change_password(
     .execute(&state.db)
     .await?;
 
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
-    let (cookie, csrf) = auth::rotate_sessions(
-        &state,
-        &auth.user_id,
-        &auth.org_id,
-        ua,
-        auth.ip.as_deref(),
-        auth::is_https(&state, &headers, Some(addr.ip())),
-    )
-    .await?;
+    let (jar, out_headers) = if auth.via == auth::Via::Session {
+        let ua = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok());
+        let (cookie, csrf) = auth::rotate_sessions(
+            &state,
+            &auth.user_id,
+            &auth.org_id,
+            ua,
+            auth.ip.as_deref(),
+            auth::is_https(&state, &headers, Some(addr.ip())),
+        )
+        .await?;
+        let mut h = HeaderMap::new();
+        if let Ok(v) = HeaderValue::from_str(&csrf) {
+            h.insert(CSRF_HEADER, v);
+        }
+        (jar.add(cookie), h)
+    } else {
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&auth.user_id)
+            .execute(&state.db)
+            .await?;
+        (jar, HeaderMap::new())
+    };
 
     auth.audit(&state, "auth.password_change", Some(&auth.user_id), None)
         .await?;
-    let mut out_headers = HeaderMap::new();
-    if let Ok(v) = HeaderValue::from_str(&csrf) {
-        out_headers.insert(CSRF_HEADER, v);
-    }
-    Ok((jar.add(cookie), out_headers, StatusCode::NO_CONTENT))
+    Ok((jar, out_headers, StatusCode::NO_CONTENT))
 }
 
 #[cfg(test)]

@@ -637,6 +637,10 @@ pub struct UpdateAppRequest {
     pub health_path: Option<String>,
     /// Git apps only: deploy on every push to the branch.
     pub auto_deploy: Option<bool>,
+    /// Optional replacement list of persistent mount paths inside the container.
+    /// Existing volumes at retained mount paths keep their data across deploys.
+    #[serde(default)]
+    pub volumes: Option<Vec<String>>,
 }
 
 // ------------------------------------------------------------- deployments
@@ -1625,4 +1629,169 @@ pub struct AdoptExecuteResult {
     pub rig_toml: String,
     pub quadlet_container: String,
     pub quadlet_network: String,
+}
+
+// --------------------------------------------------- portable server snapshots
+
+/// Options for exporting a full portable server snapshot archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotExportRequest {
+    /// Include live SQL/archive dumps for managed databases (default true).
+    #[serde(default = "default_true")]
+    pub include_database_dumps: bool,
+    /// Include alert webhook channels and their decrypted URLs/secrets (default true).
+    #[serde(default = "default_true")]
+    pub include_alerts: bool,
+    /// Include the organization's GitHub App private key & secrets (default false).
+    #[serde(default)]
+    pub include_github: bool,
+    /// Optional passphrase to encrypt the snapshot archive with Argon2id + XChaCha20-Poly1305.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+}
+
+impl Default for SnapshotExportRequest {
+    fn default() -> Self {
+        Self {
+            include_database_dumps: true,
+            include_alerts: true,
+            include_github: false,
+            passphrase: None,
+        }
+    }
+}
+
+/// How restoring a snapshot handles existing resources on the target server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotRestoreMode {
+    /// Safely keep existing projects/apps/databases on the target server and create missing ones.
+    #[default]
+    Merge,
+    /// Remove existing projects, apps, databases, and alert channels in this org before restoring.
+    /// Users, memberships, sessions, and paired device tokens are always preserved.
+    Replace,
+}
+
+/// Options controlling how a portable server snapshot is restored on a target server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotRestoreOptions {
+    #[serde(default)]
+    pub mode: SnapshotRestoreMode,
+    /// Restore organization name, logo, accent color, and environment badge (default true).
+    #[serde(default = "default_true")]
+    pub restore_branding: bool,
+    /// Restore alert webhook channels (default true).
+    #[serde(default = "default_true")]
+    pub restore_alerts: bool,
+    /// Restore GitHub App integration if present in the snapshot (default false).
+    #[serde(default)]
+    pub restore_github: bool,
+    /// Start restored databases and stream-restore any included database dumps (default true).
+    #[serde(default = "default_true")]
+    pub start_databases: bool,
+    /// Queue deployments for image/git apps that were running when the snapshot was taken (default true).
+    #[serde(default = "default_true")]
+    pub deploy_running_apps: bool,
+}
+
+impl Default for SnapshotRestoreOptions {
+    fn default() -> Self {
+        Self {
+            mode: SnapshotRestoreMode::Merge,
+            restore_branding: true,
+            restore_alerts: true,
+            restore_github: false,
+            start_databases: true,
+            deploy_running_apps: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotProjectPreview {
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub exists_on_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotAppPreview {
+    pub project_slug: String,
+    pub name: String,
+    pub slug: String,
+    pub source_kind: SourceKind,
+    pub image: Option<String>,
+    pub git_url: Option<String>,
+    pub port: u16,
+    pub was_running: bool,
+    pub env_count: usize,
+    pub domain_count: usize,
+    pub volume_count: usize,
+    pub exists_on_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotDatabasePreview {
+    pub project_slug: String,
+    pub name: String,
+    pub slug: String,
+    pub engine: DatabaseEngine,
+    pub version: String,
+    pub was_running: bool,
+    pub has_dump: bool,
+    pub dump_size_bytes: Option<u64>,
+    pub dump_error: Option<String>,
+    pub exists_on_target: bool,
+}
+
+/// Dry-run inspection summary of a server snapshot archive against a target server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotInspectResult {
+    pub format_version: u32,
+    pub encrypted: bool,
+    pub created_at: String,
+    pub rig_version: String,
+    pub source_org_name: String,
+    pub source_org_slug: String,
+    pub has_logo: bool,
+    pub has_github_app: bool,
+    pub media_count: usize,
+    pub alert_channel_count: usize,
+    pub projects: Vec<SnapshotProjectPreview>,
+    pub apps: Vec<SnapshotAppPreview>,
+    pub databases: Vec<SnapshotDatabasePreview>,
+    pub warnings: Vec<String>,
+}
+
+/// Summary report returned after restoring a server snapshot onto a target server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(utoipa::ToSchema))]
+pub struct SnapshotRestoreReport {
+    pub mode: SnapshotRestoreMode,
+    pub branding_restored: bool,
+    pub media_restored: usize,
+    pub projects_created: usize,
+    pub projects_skipped: usize,
+    pub apps_created: usize,
+    pub apps_skipped: usize,
+    pub apps_deployments_queued: usize,
+    pub env_vars_restored: usize,
+    pub domains_restored: usize,
+    pub volumes_restored: usize,
+    pub databases_created: usize,
+    pub databases_skipped: usize,
+    pub databases_provisioning: usize,
+    pub database_dumps_scheduled: usize,
+    pub alerts_created: usize,
+    pub github_restored: bool,
+    pub warnings: Vec<String>,
 }

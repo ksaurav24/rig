@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.23.1"
 hex = "0.4.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "gzip", "stream"] }
 rig-api = { version = "0.1.0", path = "../rig-api" }
@@ -15,8 +16,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["net", "io-util", "time", "sync", "macros"] }
+tokio = { version = "1.54.1", features = ["fs", "net", "io-util", "time", "sync", "macros"] }
 tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7.20", features = ["io"] }
 url = "2.5.8"
 webpki-roots = "1.0"

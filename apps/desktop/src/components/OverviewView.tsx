@@ -1,21 +1,28 @@
 import {
   Activity,
+  BellRing,
   Box,
   ChevronRight,
   Database,
   FolderGit2,
+  HardDriveDownload,
+  LayoutGrid,
   Plus,
   Radio,
   RefreshCw,
   Rocket,
 } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { toast } from 'sonner'
 import { Page, Panel } from '@rig/ui/app/page'
 import { EmptyState, Status, statusTone, type Tone } from '@rig/ui/app/state'
 import { Badge } from '@rig/ui/badge'
-import { Banner, BannerDescription } from '@rig/ui/banner'
+import { Banner, BannerAction, BannerActions, BannerDescription, BannerTitle } from '@rig/ui/banner'
 import { Button } from '@rig/ui/button'
+import { isBackupReminderDue } from './ServerSnapshotPanel'
+import { UsagePanel } from './UsagePanel'
 import { formatBytes, formatPercent, relativeTime } from '@/lib/format'
+import { desktopApi } from '@/lib/ipc'
 import type { ServerSnapshot, ServerView } from '@/lib/types'
 import { cn } from '@rig/ui/lib/utils'
 
@@ -26,6 +33,9 @@ interface OverviewViewProps {
   onRefresh: () => void
   onOpenApp: (appId: string) => void
   onDeployApp: () => void
+  onOpenCatalog: () => void
+  onOpenBackup: () => void
+  onServersChanged: () => void
   onOpenLocalRepos: () => void
   onOpenDatabases: () => void
   onCreateDatabase: () => void
@@ -47,10 +57,15 @@ export function OverviewView({
   onRefresh,
   onOpenApp,
   onDeployApp,
+  onOpenCatalog,
+  onOpenBackup,
+  onServersChanged,
   onOpenLocalRepos,
   onOpenDatabases,
   onCreateDatabase,
 }: OverviewViewProps) {
+  const [snoozing, setSnoozing] = useState(false)
+  const backupDue = isBackupReminderDue(server.backup_reminder)
   const sys = snapshot?.system
   const memPct = sys ? formatPercent(sys.memory_used, sys.memory_total) : 0
   const diskPct = sys ? formatPercent(sys.disk_used, sys.disk_total) : 0
@@ -87,6 +102,9 @@ export function OverviewView({
           <Button type="button" variant="primary" leadingIcon={Rocket} onClick={onDeployApp}>
             Deploy App
           </Button>
+          <Button type="button" variant="tertiary" leadingIcon={LayoutGrid} onClick={onOpenCatalog}>
+            Catalog
+          </Button>
           <Button type="button" variant="tertiary" leadingIcon={FolderGit2} onClick={onOpenLocalRepos}>
             Local Repos
           </Button>
@@ -107,6 +125,42 @@ export function OverviewView({
         </>
       }
     >
+      {backupDue && (
+        <Banner status="warning" contrast="high">
+          <BannerTitle className="flex items-center gap-2">
+            <BellRing className="size-4" />
+            Scheduled snapshot backup due for {server.name}
+          </BannerTitle>
+          <BannerDescription>
+            {server.backup_reminder.last_snapshot_at
+              ? `Last downloaded ${relativeTime(server.backup_reminder.last_snapshot_at)} (reminder every ${server.backup_reminder.interval_days}d).`
+              : `No snapshot downloaded yet (reminder every ${server.backup_reminder.interval_days}d).`}
+          </BannerDescription>
+          <BannerActions>
+            <BannerAction onClick={onOpenBackup}>
+              <HardDriveDownload className="mr-1.5 inline size-3.5" />
+              Back up now
+            </BannerAction>
+            <BannerAction
+              disabled={snoozing}
+              onClick={async () => {
+                setSnoozing(true)
+                try {
+                  await desktopApi.snoozeBackupReminder(server.id, 24)
+                  toast.success('Snoozed backup reminder for 24 hours')
+                  onServersChanged()
+                } catch (e) {
+                  toast.error(String(e))
+                } finally {
+                  setSnoozing(false)
+                }
+              }}
+            >
+              Snooze 24h
+            </BannerAction>
+          </BannerActions>
+        </Banner>
+      )}
       {snapshot?.from_cache && (
         <Banner status="warning" contrast="high">
           <BannerDescription>
@@ -161,6 +215,9 @@ export function OverviewView({
           </Health>
         </div>
       </dl>
+
+      {/* Historical Host Metrics (1h / 6h / 24h) */}
+      <UsagePanel serverId={server.id} target={{ kind: 'host' }} title="Host Usage" />
 
       {/* Apps + Live Event Feed */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">

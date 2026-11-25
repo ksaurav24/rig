@@ -1,10 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
+import { save as saveDialog } from '@tauri-apps/plugin-dialog'
 import {
+  Activity,
   Archive,
   ChevronDown,
   ChevronUp,
   Copy,
   Database as DbIcon,
+  Download,
   KeyRound,
   Play,
   Plus,
@@ -31,6 +34,7 @@ import {
 import { Field, FieldLabel } from '@rig/ui/field'
 import { Input } from '@rig/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@rig/ui/select'
+import { UsagePanel } from './UsagePanel'
 import { formatBytes, relativeTime } from '@/lib/format'
 import { desktopApi } from '@/lib/ipc'
 import type {
@@ -69,6 +73,8 @@ export function DatabasesView({
 }: DatabasesViewProps) {
   const [revealed, setRevealed] = useState<Record<string, DatabaseCredentials>>({})
   const [expandedBackups, setExpandedBackups] = useState<Record<string, Backup[]>>({})
+  const [expandedMetrics, setExpandedMetrics] = useState<Record<string, boolean>>({})
+  const [downloadingBackupId, setDownloadingBackupId] = useState<string | null>(null)
   const [loadingBackupDb, setLoadingBackupDb] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -185,6 +191,32 @@ export function DatabasesView({
     }
   }
 
+  async function handleDownloadBackup(db: Database, backup: Backup) {
+    const ext =
+      db.engine === 'redis'
+        ? 'rdb'
+        : db.engine === 'mongodb'
+          ? 'archive.gz'
+          : 'sql.gz'
+    const slug = db.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'db'
+    const dest = await saveDialog({
+      title: `Save Backup of ${db.name}`,
+      defaultPath: `${slug}-${backup.id.slice(-8)}.${ext}`,
+    })
+    if (!dest) return
+    setDownloadingBackupId(backup.id)
+    try {
+      const saved = await desktopApi.downloadBackup(serverId, backup.id, dest)
+      toast.success(`Saved backup (${formatBytes(saved.bytes)})`, {
+        description: saved.path,
+      })
+    } catch (err) {
+      toast.error(String(err))
+    } finally {
+      setDownloadingBackupId(null)
+    }
+  }
+
   async function handleDeleteDb(db: Database) {
     setBusyId(db.id)
     try {
@@ -288,6 +320,18 @@ export function DatabasesView({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="tertiary"
+                      size="compact"
+                      leadingIcon={Activity}
+                      active={Boolean(expandedMetrics[db.id])}
+                      onClick={() =>
+                        setExpandedMetrics((prev) => ({ ...prev, [db.id]: !prev[db.id] }))
+                      }
+                    >
+                      Metrics
+                    </Button>
                     <Button
                       type="button"
                       variant="tertiary"
@@ -420,6 +464,16 @@ export function DatabasesView({
                   </div>
                 )}
 
+                {expandedMetrics[db.id] && (
+                  <div className="mt-4">
+                    <UsagePanel
+                      serverId={serverId}
+                      target={{ kind: 'database', id: db.id }}
+                      title={`${db.name} · Usage`}
+                    />
+                  </div>
+                )}
+
                 {backups && (
                   <div className="mt-4 overflow-hidden rounded-lg border border-border/80 bg-surface">
                     <div className="flex items-center justify-between border-b border-border/80 px-4 py-2.5">
@@ -465,32 +519,45 @@ export function DatabasesView({
                             </div>
                             <div className="flex items-center gap-1.5">
                               {b.restorable && (
-                                <Button
-                                  type="button"
-                                  variant="tertiary"
-                                  size="compact"
-                                  leadingIcon={RotateCcw}
-                                  onClick={() =>
-                                    setConfirmState({
-                                      title: 'Restore Database Backup',
-                                      description:
-                                        'Overwrites the current database contents with this backup snapshot. Any data written since this backup was created will be lost.',
-                                      target: `${db.name} ← backup ${b.id.slice(-8)}`,
-                                      confirmLabel: 'Restore Backup',
-                                      tone: 'warning',
-                                      action: async () => {
-                                        try {
-                                          await desktopApi.restoreBackup(serverId, b.id)
-                                          toast.success('Backup restored')
-                                        } catch (err) {
-                                          toast.error(String(err))
-                                        }
-                                      },
-                                    })
-                                  }
-                                >
-                                  Restore
-                                </Button>
+                                <>
+                                  <Button
+                                    type="button"
+                                    variant="tertiary"
+                                    size="compact"
+                                    leadingIcon={Download}
+                                    loading={downloadingBackupId === b.id}
+                                    disabled={downloadingBackupId !== null}
+                                    onClick={() => void handleDownloadBackup(db, b)}
+                                  >
+                                    Download
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="tertiary"
+                                    size="compact"
+                                    leadingIcon={RotateCcw}
+                                    onClick={() =>
+                                      setConfirmState({
+                                        title: 'Restore Database Backup',
+                                        description:
+                                          'Overwrites the current database contents with this backup snapshot. Any data written since this backup was created will be lost.',
+                                        target: `${db.name} ← backup ${b.id.slice(-8)}`,
+                                        confirmLabel: 'Restore Backup',
+                                        tone: 'warning',
+                                        action: async () => {
+                                          try {
+                                            await desktopApi.restoreBackup(serverId, b.id)
+                                            toast.success('Backup restored')
+                                          } catch (err) {
+                                            toast.error(String(err))
+                                          }
+                                        },
+                                      })
+                                    }
+                                  >
+                                    Restore
+                                  </Button>
+                                </>
                               )}
                               <Button
                                 type="button"

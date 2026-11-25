@@ -112,6 +112,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
             let node_override = match &command {
                 Command::Up(a) => a.node.as_deref(),
                 Command::Adopt(a) => a.node.as_deref(),
+                Command::Snapshot(a) => a.node.as_deref(),
                 _ => None,
             };
             let (resolved_context, resolved_server) =
@@ -141,6 +142,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
                 Command::Domains(args) => commands::domains::run(&api, args, out).await,
                 Command::Db(args) => commands::databases::run(&api, args, out).await,
                 Command::Backup(args) => commands::backup::run(&api, args, out).await,
+                Command::Snapshot(args) => commands::snapshot::run(&api, args, out).await,
                 Command::Metrics(args) => commands::metrics::run_metrics(&api, args, out).await,
                 Command::Top(args) => commands::metrics::run_top(&api, args, out).await,
                 Command::Tokens(args) => commands::tokens::run(&api, args, out).await,
